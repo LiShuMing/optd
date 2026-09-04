@@ -64,7 +64,7 @@ LogicalLimit { skip: 0(i64), fetch: 20(i64) }
                 │   │       └── INTERVAL_MONTH_DAY_NANO (3, 0, 0)
                 │   ├── Eq
                 │   │   ├── #25
-                │   │   └── "R"
+                │   │   └── Cast { cast_to: Utf8View, child: "R" }
                 │   └── Eq
                 │       ├── #3
                 │       └── #33
@@ -107,7 +107,7 @@ PhysicalLimit { skip: 0(i64), fetch: 20(i64) }
                 │   └── PhysicalFilter
                 │       ├── cond:Eq
                 │       │   ├── #8
-                │       │   └── "R"
+                │       │   └── Cast { cast_to: Utf8View, child: "R" }
                 │       └── PhysicalScan { table: lineitem }
                 └── PhysicalScan { table: nation }
 */

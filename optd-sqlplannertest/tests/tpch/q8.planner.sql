@@ -54,7 +54,7 @@ LogicalSort
         │   │       └── 
         │   │           ┌── Eq
         │   │           │   ├── #2
-        │   │           │   └── "IRAQ"
+        │   │           │   └── Cast { cast_to: Utf8View, child: "IRAQ" }
         │   │           ├── #1
         │   │           └── Cast { cast_to: Decimal128(38, 4), child: 0(i64) }
         │   └── Agg(Sum)
@@ -92,14 +92,14 @@ LogicalSort
                 │   │   └── #57
                 │   ├── Eq
                 │   │   ├── #58
-                │   │   └── "AMERICA"
+                │   │   └── Cast { cast_to: Utf8View, child: "AMERICA" }
                 │   ├── Eq
                 │   │   ├── #12
                 │   │   └── #53
                 │   ├── Between { child: #36, lower: Cast { cast_to: Date32, child: "1995-01-01" }, upper: Cast { cast_to: Date32, child: "1996-12-31" } }
                 │   └── Eq
                 │       ├── #4
-                │       └── "ECONOMY ANODIZED STEEL"
+                │       └── Cast { cast_to: Utf8View, child: "ECONOMY ANODIZED STEEL" }
                 └── LogicalJoin { join_type: Inner, cond: true }
                     ├── LogicalJoin { join_type: Inner, cond: true }
                     │   ├── LogicalJoin { join_type: Inner, cond: true }
@@ -131,7 +131,7 @@ PhysicalSort
         │   │       └── 
         │   │           ┌── Eq
         │   │           │   ├── #2
-        │   │           │   └── "IRAQ"
+        │   │           │   └── Cast { cast_to: Utf8View, child: "IRAQ" }
         │   │           ├── #1
         │   │           └── Cast { cast_to: Decimal128(38, 4), child: 0(i64) }
         │   └── Agg(Sum)
@@ -158,7 +158,7 @@ PhysicalSort
                 │   │   │   │   │       │   ├── PhysicalFilter
                 │   │   │   │   │       │   │   ├── cond:Eq
                 │   │   │   │   │       │   │   │   ├── #4
-                │   │   │   │   │       │   │   │   └── "ECONOMY ANODIZED STEEL"
+                │   │   │   │   │       │   │   │   └── Cast { cast_to: Utf8View, child: "ECONOMY ANODIZED STEEL" }
                 │   │   │   │   │       │   │   └── PhysicalScan { table: part }
                 │   │   │   │   │       │   └── PhysicalScan { table: lineitem }
                 │   │   │   │   │       └── PhysicalScan { table: supplier }
@@ -170,7 +170,7 @@ PhysicalSort
                 └── PhysicalFilter
                     ├── cond:Eq
                     │   ├── #1
-                    │   └── "AMERICA"
+                    │   └── Cast { cast_to: Utf8View, child: "AMERICA" }
                     └── PhysicalScan { table: region }
 */
 

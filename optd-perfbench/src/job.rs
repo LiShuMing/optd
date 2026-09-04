@@ -9,12 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 
-use csv2parquet::Opts;
 use datafusion::catalog::SchemaProvider;
 /// A wrapper around job-kit
 use serde::{Deserialize, Serialize};
 
-use crate::shell;
+use crate::{csv_to_parquet, shell};
 
 const JOB_KIT_REPO_URL: &str = "https://github.com/wangpatrick57/job-kit.git";
 const JOB_TABLES_URL: &str = "https://homepages.cwi.nl/~boncz/job/imdb.tgz";
@@ -151,10 +150,7 @@ impl JobKit {
                     .schema();
                 let mut parquet_tbl_fpath = csv_tbl_fpath.clone();
                 parquet_tbl_fpath.set_extension("parquet");
-                let mut opts = Opts::new(csv_tbl_fpath, parquet_tbl_fpath.clone());
-                opts.delimiter = ',';
-                opts.schema = Some(schema.as_ref().clone());
-                csv2parquet::convert(opts).unwrap();
+                csv_to_parquet::convert(csv_tbl_fpath, parquet_tbl_fpath, schema, b',').unwrap();
             }
             File::create(done_fpath)?;
             log::debug!("[end] making parquet for {}", job_kit_config);

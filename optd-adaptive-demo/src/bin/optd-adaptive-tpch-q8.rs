@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use datafusion::catalog_common::MemoryCatalogProviderList;
+use datafusion::catalog::MemoryCatalogProviderList;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionConfig;
-use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use datafusion_optd_cli::exec::{exec_from_commands, exec_from_commands_collect, exec_from_files};
@@ -27,8 +27,8 @@ async fn main() -> Result<()> {
     let mut session_config = SessionConfig::from_env()?.with_information_schema(true);
     session_config.options_mut().optimizer.max_passes = 0;
 
-    let rn_config = RuntimeConfig::new();
-    let runtime_env = RuntimeEnv::try_new(rn_config.clone())?;
+    let rn_config = RuntimeEnvBuilder::new();
+    let runtime_env = rn_config.clone().build()?;
 
     let ctx = {
         let mut state = SessionStateBuilder::new()

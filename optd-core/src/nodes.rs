@@ -218,6 +218,10 @@ impl Value {
                 Value::Int32(i32) => (*i32).into(),
                 _ => panic!("{self} could not be converted into an Decimal128"),
             }),
+            DataType::Utf8 | DataType::Utf8View => match self {
+                Value::String(value) => Value::String(Arc::clone(value)),
+                _ => panic!("{self} could not be converted into a string"),
+            },
             _ => unimplemented!(
                 "Have not implemented convert_to_type from {self} for DataType {typ}"
             ),

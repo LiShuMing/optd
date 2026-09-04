@@ -53,8 +53,8 @@ LogicalSort
             │   │   └── #0
             │   ├── Neq
             │   │   ├── #8
-            │   │   └── "Brand#45"
-            │   ├── Like { expr: #9, pattern: "MEDIUM POLISHED%", negated: true, case_insensitive: false }
+            │   │   └── Cast { cast_to: Utf8View, child: "Brand#45" }
+            │   ├── Like { expr: #9, pattern: Cast { cast_to: Utf8View, child: "MEDIUM POLISHED%" }, negated: true, case_insensitive: false }
             │   ├── InList { expr: Cast { cast_to: Int64, child: #10 }, list: [ 49(i64), 14(i64), 23(i64), 45(i64), 19(i64), 3(i64), 36(i64), 9(i64) ], negated: false }
             │   └── Not
             │       └── [ #14 ]
@@ -63,7 +63,7 @@ LogicalSort
                 │   ├── LogicalScan { table: partsupp }
                 │   └── LogicalScan { table: part }
                 └── LogicalProjection { exprs: [ #0 ] }
-                    └── LogicalFilter { cond: Like { expr: #6, pattern: "%Customer%Complaints%", negated: false, case_insensitive: false } }
+                    └── LogicalFilter { cond: Like { expr: #6, pattern: Cast { cast_to: Utf8View, child: "%Customer%Complaints%" }, negated: false, case_insensitive: false } }
                         └── LogicalScan { table: supplier }
 PhysicalSort
 ├── exprs:
@@ -86,8 +86,8 @@ PhysicalSort
         │   │   └── #0
         │   ├── Neq
         │   │   ├── #8
-        │   │   └── "Brand#45"
-        │   ├── Like { expr: #9, pattern: "MEDIUM POLISHED%", negated: true, case_insensitive: false }
+        │   │   └── Cast { cast_to: Utf8View, child: "Brand#45" }
+        │   ├── Like { expr: #9, pattern: Cast { cast_to: Utf8View, child: "MEDIUM POLISHED%" }, negated: true, case_insensitive: false }
         │   ├── InList { expr: Cast { cast_to: Int64, child: #10 }, list: [ 49(i64), 14(i64), 23(i64), 45(i64), 19(i64), 3(i64), 36(i64), 9(i64) ], negated: false }
         │   └── Not
         │       └── [ #14 ]
@@ -100,7 +100,7 @@ PhysicalSort
             │   ├── PhysicalScan { table: partsupp }
             │   └── PhysicalScan { table: part }
             └── PhysicalProjection { exprs: [ #0 ] }
-                └── PhysicalFilter { cond: Like { expr: #6, pattern: "%Customer%Complaints%", negated: false, case_insensitive: false } }
+                └── PhysicalFilter { cond: Like { expr: #6, pattern: Cast { cast_to: Utf8View, child: "%Customer%Complaints%" }, negated: false, case_insensitive: false } }
                     └── PhysicalScan { table: supplier }
 */
 

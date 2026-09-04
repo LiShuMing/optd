@@ -29,7 +29,7 @@ use std::sync::{Arc, OnceLock};
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::context::SessionConfig;
 use datafusion::execution::memory_pool::{FairSpillPool, GreedyMemoryPool};
-use datafusion::execution::runtime_env::RuntimeConfig;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion_optd_cli::catalog::DynamicObjectStoreCatalog;
 use datafusion_optd_cli::functions::ParquetMetadataFunc;
 use datafusion_optd_cli::{
@@ -169,7 +169,7 @@ async fn main_inner() -> Result<()> {
         session_config = session_config.with_batch_size(batch_size);
     };
 
-    let rt_config = RuntimeConfig::new();
+    let rt_config = RuntimeEnvBuilder::new();
     let rt_config =
         // set memory pool size
         if let Some(memory_limit) = args.memory_limit {

@@ -50,7 +50,7 @@ LogicalSort
         │   │   └── #7
         │   └── Eq
         │       ├── #8
-        │       └── "IRAQ"
+        │       └── Cast { cast_to: Utf8View, child: "IRAQ" }
         └── RawDependentJoin { sq_type: Any { pred: PredNode { typ: ColumnRef, children: [], data: Some(UInt64(0)) }, op: Eq }, cond: true, extern_cols: [] }
             ├── LogicalJoin { join_type: Inner, cond: true }
             │   ├── LogicalScan { table: supplier }
@@ -66,7 +66,7 @@ LogicalSort
                         ├── RawDependentJoin { sq_type: Any { pred: PredNode { typ: ColumnRef, children: [], data: Some(UInt64(0)) }, op: Eq }, cond: true, extern_cols: [] }
                         │   ├── LogicalScan { table: partsupp }
                         │   └── LogicalProjection { exprs: [ #0 ] }
-                        │       └── LogicalFilter { cond: Like { expr: #1, pattern: "indian%", negated: false, case_insensitive: false } }
+                        │       └── LogicalFilter { cond: Like { expr: #1, pattern: Cast { cast_to: Utf8View, child: "indian%" }, negated: false, case_insensitive: false } }
                         │           └── LogicalScan { table: part }
                         └── LogicalProjection
                             ├── exprs:Mul
@@ -105,7 +105,7 @@ PhysicalSort
         │   │   └── #7
         │   └── Eq
         │       ├── #8
-        │       └── "IRAQ"
+        │       └── Cast { cast_to: Utf8View, child: "IRAQ" }
         └── PhysicalNestedLoopJoin
             ├── join_type: LeftMark
             ├── cond:Eq
@@ -148,7 +148,7 @@ PhysicalSort
                             │           │       │   └── #5
                             │           │       ├── PhysicalScan { table: partsupp }
                             │           │       └── PhysicalProjection { exprs: [ #0 ] }
-                            │           │           └── PhysicalFilter { cond: Like { expr: #1, pattern: "indian%", negated: false, case_insensitive: false } }
+                            │           │           └── PhysicalFilter { cond: Like { expr: #1, pattern: Cast { cast_to: Utf8View, child: "indian%" }, negated: false, case_insensitive: false } }
                             │           │               └── PhysicalScan { table: part }
                             │           └── PhysicalAgg
                             │               ├── aggrs:Agg(Sum)
@@ -163,7 +163,7 @@ PhysicalSort
                             │                   │       │   └── #5
                             │                   │       ├── PhysicalScan { table: partsupp }
                             │                   │       └── PhysicalProjection { exprs: [ #0 ] }
-                            │                   │           └── PhysicalFilter { cond: Like { expr: #1, pattern: "indian%", negated: false, case_insensitive: false } }
+                            │                   │           └── PhysicalFilter { cond: Like { expr: #1, pattern: Cast { cast_to: Utf8View, child: "indian%" }, negated: false, case_insensitive: false } }
                             │                   │               └── PhysicalScan { table: part }
                             │                   └── PhysicalFilter
                             │                       ├── cond:And
@@ -183,7 +183,7 @@ PhysicalSort
                                 │   └── #5
                                 ├── PhysicalScan { table: partsupp }
                                 └── PhysicalProjection { exprs: [ #0 ] }
-                                    └── PhysicalFilter { cond: Like { expr: #1, pattern: "indian%", negated: false, case_insensitive: false } }
+                                    └── PhysicalFilter { cond: Like { expr: #1, pattern: Cast { cast_to: Utf8View, child: "indian%" }, negated: false, case_insensitive: false } }
                                         └── PhysicalScan { table: part }
 */
 

@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-datafusion = { version = "43.0.0", features = [
+datafusion = { version = "55.0.0", features = [
     "avro",
     "crypto_expressions",
     "encoding_expressions",
@@ -15,6 +15,7 @@ datafusion = { version = "43.0.0", features = [
     "compression",
     "serde",
 ] }
+arrow = "59.2.0"
 optd-datafusion-repr = { path = "../optd-datafusion-repr" }
 optd-datafusion-repr-adv-cost = { path = "../optd-datafusion-repr-adv-cost" }
 optd-datafusion-bridge = { path = "../optd-datafusion-bridge" }
@@ -41,8 +42,7 @@ serde = "1.0"
 serde_json = "1.0"
 test-case = "3.3"
 rayon = "1.10"
-parquet = "53.3.0"
-csv2parquet = { git = "https://github.com/skyzh/arrow-tools.git", branch = "main" }
+parquet = "59.2.0"
 
 [dev-dependencies]
 assert_cmd = "2.0"

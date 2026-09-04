@@ -171,6 +171,21 @@ impl OptdPlanContext<'_> {
                     .map(|expr| self.conv_from_optd_expr(expr, context))
                     .collect::<Result<Vec<_>>>()?;
                 match func {
+                    FuncType::Scalar(func, _) if func == "coalesce" => {
+                        let mut args = args.into_iter().rev();
+                        let mut result = args.next().context("coalesce requires arguments")?;
+                        for arg in args {
+                            result = physical_expr::expressions::case(
+                                None,
+                                vec![(
+                                    physical_expr::expressions::is_not_null(Arc::clone(&arg))?,
+                                    arg,
+                                )],
+                                Some(result),
+                            )?;
+                        }
+                        Ok(result)
+                    }
                     FuncType::Scalar(func, ret_typ) => {
                         let scalar_func = self
                             .session_state
@@ -182,7 +197,8 @@ impl OptdPlanContext<'_> {
                             &func,
                             scalar_func.clone(),
                             args,
-                            ret_typ,
+                            Arc::new(Field::new(&func, ret_typ, true)),
+                            Arc::new(self.session_state.config_options().clone()),
                         )))
                     }
                     FuncType::Case => {
@@ -301,11 +317,9 @@ impl OptdPlanContext<'_> {
                     .map(|expr| self.conv_from_optd_expr(expr, context))
                     .collect::<Result<Vec<_>>>()?;
                 let negated = expr.negated();
-                Ok(Arc::new(
-                    datafusion::physical_plan::expressions::InListExpr::new(
-                        child, list, negated, None,
-                    ),
-                ))
+                Ok(datafusion::physical_plan::expressions::in_list(
+                    child, list, &negated, context,
+                )?)
             }
             _ => unimplemented!("{:?}", expr), // TODO display?
         }
@@ -409,7 +423,7 @@ impl OptdPlanContext<'_> {
             .collect::<Result<Vec<_>>>()?;
         Ok(
             Arc::new(datafusion::physical_plan::sorts::sort::SortExec::new(
-                LexOrdering::new(physical_exprs),
+                LexOrdering::new(physical_exprs).context("sort ordering must not be empty")?,
                 input_exec,
             )) as Arc<dyn ExecutionPlan + 'static>,
         )
@@ -513,8 +527,13 @@ impl OptdPlanContext<'_> {
             datafusion::physical_plan::joins::NestedLoopJoinExec::try_new(
                 left_exec,
                 right_exec,
-                Some(JoinFilter::new(physical_expr, column_idxs, filter_schema)),
+                Some(JoinFilter::new(
+                    physical_expr,
+                    column_idxs,
+                    filter_schema.into(),
+                )),
                 &join_type,
+                None,
             )?,
         ) as Arc<dyn ExecutionPlan + 'static>)
     }
@@ -563,6 +582,7 @@ impl OptdPlanContext<'_> {
                 &join_type,
                 None,
                 PartitionMode::CollectLeft,
+                datafusion::common::NullEquality::NullEqualsNothing,
                 false,
             )?) as Arc<dyn ExecutionPlan + 'static>,
         )

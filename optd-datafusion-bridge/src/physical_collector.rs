@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::Result;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::{
@@ -60,12 +61,17 @@ impl ExecutionPlan for CollectorExec {
         "CollectorExec"
     }
 
-    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
+    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
         self.input.properties()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        ) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -82,10 +88,6 @@ impl ExecutionPlan for CollectorExec {
             self.group_id,
             self.collect_into.clone(),
         )))
-    }
-
-    fn statistics(&self) -> Result<datafusion::physical_plan::Statistics> {
-        self.input.statistics()
     }
 
     /// Execute one partition and return an iterator over RecordBatch

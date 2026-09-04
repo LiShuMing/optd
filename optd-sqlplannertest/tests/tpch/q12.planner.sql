@@ -35,10 +35,10 @@ LogicalSort
         │   │           ┌── Or
         │   │           │   ├── Eq
         │   │           │   │   ├── #5
-        │   │           │   │   └── "1-URGENT"
+        │   │           │   │   └── Cast { cast_to: Utf8View, child: "1-URGENT" }
         │   │           │   └── Eq
         │   │           │       ├── #5
-        │   │           │       └── "2-HIGH"
+        │   │           │       └── Cast { cast_to: Utf8View, child: "2-HIGH" }
         │   │           ├── 1(i64)
         │   │           └── 0(i64)
         │   └── Agg(Sum)
@@ -47,10 +47,10 @@ LogicalSort
         │               ┌── And
         │               │   ├── Neq
         │               │   │   ├── #5
-        │               │   │   └── "1-URGENT"
+        │               │   │   └── Cast { cast_to: Utf8View, child: "1-URGENT" }
         │               │   └── Neq
         │               │       ├── #5
-        │               │       └── "2-HIGH"
+        │               │       └── Cast { cast_to: Utf8View, child: "2-HIGH" }
         │               ├── 1(i64)
         │               └── 0(i64)
         ├── groups: [ #23 ]
@@ -59,7 +59,7 @@ LogicalSort
             │   ├── Eq
             │   │   ├── #0
             │   │   └── #9
-            │   ├── InList { expr: #23, list: [ "MAIL", "SHIP" ], negated: false }
+            │   ├── InList { expr: #23, list: [ Cast { cast_to: Utf8View, child: "MAIL" }, Cast { cast_to: Utf8View, child: "SHIP" } ], negated: false }
             │   ├── Lt
             │   │   ├── #20
             │   │   └── #21
@@ -86,10 +86,10 @@ PhysicalSort
     │   │           ┌── Or
     │   │           │   ├── Eq
     │   │           │   │   ├── #5
-    │   │           │   │   └── "1-URGENT"
+    │   │           │   │   └── Cast { cast_to: Utf8View, child: "1-URGENT" }
     │   │           │   └── Eq
     │   │           │       ├── #5
-    │   │           │       └── "2-HIGH"
+    │   │           │       └── Cast { cast_to: Utf8View, child: "2-HIGH" }
     │   │           ├── 1(i64)
     │   │           └── 0(i64)
     │   └── Agg(Sum)
@@ -98,10 +98,10 @@ PhysicalSort
     │               ┌── And
     │               │   ├── Neq
     │               │   │   ├── #5
-    │               │   │   └── "1-URGENT"
+    │               │   │   └── Cast { cast_to: Utf8View, child: "1-URGENT" }
     │               │   └── Neq
     │               │       ├── #5
-    │               │       └── "2-HIGH"
+    │               │       └── Cast { cast_to: Utf8View, child: "2-HIGH" }
     │               ├── 1(i64)
     │               └── 0(i64)
     ├── groups: [ #23 ]
@@ -109,7 +109,7 @@ PhysicalSort
         └── PhysicalHashJoin { join_type: Inner, left_keys: [ #0 ], right_keys: [ #0 ] }
             ├── PhysicalFilter
             │   ├── cond:And
-            │   │   ├── InList { expr: #14, list: [ "MAIL", "SHIP" ], negated: false }
+            │   │   ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "MAIL" }, Cast { cast_to: Utf8View, child: "SHIP" } ], negated: false }
             │   │   ├── Lt
             │   │   │   ├── #11
             │   │   │   └── #12

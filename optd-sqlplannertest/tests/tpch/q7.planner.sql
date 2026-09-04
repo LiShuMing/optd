@@ -85,17 +85,17 @@ LogicalSort
                 │   │   ├── And
                 │   │   │   ├── Eq
                 │   │   │   │   ├── #41
-                │   │   │   │   └── "FRANCE"
+                │   │   │   │   └── Cast { cast_to: Utf8View, child: "FRANCE" }
                 │   │   │   └── Eq
                 │   │   │       ├── #45
-                │   │   │       └── "GERMANY"
+                │   │   │       └── Cast { cast_to: Utf8View, child: "GERMANY" }
                 │   │   └── And
                 │   │       ├── Eq
                 │   │       │   ├── #41
-                │   │       │   └── "GERMANY"
+                │   │       │   └── Cast { cast_to: Utf8View, child: "GERMANY" }
                 │   │       └── Eq
                 │   │           ├── #45
-                │   │           └── "FRANCE"
+                │   │           └── Cast { cast_to: Utf8View, child: "FRANCE" }
                 │   └── Between { child: #17, lower: Cast { cast_to: Date32, child: "1995-01-01" }, upper: Cast { cast_to: Date32, child: "1996-12-31" } }
                 └── LogicalJoin { join_type: Inner, cond: true }
                     ├── LogicalJoin { join_type: Inner, cond: true }
@@ -141,17 +141,17 @@ PhysicalSort
             │       ├── And
             │       │   ├── Eq
             │       │   │   ├── #41
-            │       │   │   └── "FRANCE"
+            │       │   │   └── Cast { cast_to: Utf8View, child: "FRANCE" }
             │       │   └── Eq
             │       │       ├── #45
-            │       │       └── "GERMANY"
+            │       │       └── Cast { cast_to: Utf8View, child: "GERMANY" }
             │       └── And
             │           ├── Eq
             │           │   ├── #41
-            │           │   └── "GERMANY"
+            │           │   └── Cast { cast_to: Utf8View, child: "GERMANY" }
             │           └── Eq
             │               ├── #45
-            │               └── "FRANCE"
+            │               └── Cast { cast_to: Utf8View, child: "FRANCE" }
             ├── PhysicalHashJoin { join_type: Inner, left_keys: [ #3 ], right_keys: [ #0 ] }
             │   ├── PhysicalHashJoin { join_type: Inner, left_keys: [ #24 ], right_keys: [ #0 ] }
             │   │   ├── PhysicalHashJoin { join_type: Inner, left_keys: [ #7 ], right_keys: [ #0 ] }

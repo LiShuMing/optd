@@ -49,8 +49,8 @@ LogicalProjection { exprs: [ #0 ] }
         │   │   │   └── #1
         │   │   ├── Eq
         │   │   │   ├── #19
-        │   │   │   └── "Brand#12"
-        │   │   ├── InList { expr: #22, list: [ "SM CASE", "SM BOX", "SM PACK", "SM PKG" ], negated: false }
+        │   │   │   └── Cast { cast_to: Utf8View, child: "Brand#12" }
+        │   │   ├── InList { expr: #22, list: [ Cast { cast_to: Utf8View, child: "SM CASE" }, Cast { cast_to: Utf8View, child: "SM BOX" }, Cast { cast_to: Utf8View, child: "SM PACK" }, Cast { cast_to: Utf8View, child: "SM PKG" } ], negated: false }
         │   │   ├── Geq
         │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
         │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 1(i64) }
@@ -58,18 +58,18 @@ LogicalProjection { exprs: [ #0 ] }
         │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
         │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 11(i64) }
         │   │   ├── Between { child: Cast { cast_to: Int64, child: #21 }, lower: 1(i64), upper: 5(i64) }
-        │   │   ├── InList { expr: #14, list: [ "AIR", "AIR REG" ], negated: false }
+        │   │   ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "AIR" }, Cast { cast_to: Utf8View, child: "AIR REG" } ], negated: false }
         │   │   └── Eq
         │   │       ├── #13
-        │   │       └── "DELIVER IN PERSON"
+        │   │       └── Cast { cast_to: Utf8View, child: "DELIVER IN PERSON" }
         │   ├── And
         │   │   ├── Eq
         │   │   │   ├── #16
         │   │   │   └── #1
         │   │   ├── Eq
         │   │   │   ├── #19
-        │   │   │   └── "Brand#23"
-        │   │   ├── InList { expr: #22, list: [ "MED BAG", "MED BOX", "MED PKG", "MED PACK" ], negated: false }
+        │   │   │   └── Cast { cast_to: Utf8View, child: "Brand#23" }
+        │   │   ├── InList { expr: #22, list: [ Cast { cast_to: Utf8View, child: "MED BAG" }, Cast { cast_to: Utf8View, child: "MED BOX" }, Cast { cast_to: Utf8View, child: "MED PKG" }, Cast { cast_to: Utf8View, child: "MED PACK" } ], negated: false }
         │   │   ├── Geq
         │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
         │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 10(i64) }
@@ -77,18 +77,18 @@ LogicalProjection { exprs: [ #0 ] }
         │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
         │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 20(i64) }
         │   │   ├── Between { child: Cast { cast_to: Int64, child: #21 }, lower: 1(i64), upper: 10(i64) }
-        │   │   ├── InList { expr: #14, list: [ "AIR", "AIR REG" ], negated: false }
+        │   │   ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "AIR" }, Cast { cast_to: Utf8View, child: "AIR REG" } ], negated: false }
         │   │   └── Eq
         │   │       ├── #13
-        │   │       └── "DELIVER IN PERSON"
+        │   │       └── Cast { cast_to: Utf8View, child: "DELIVER IN PERSON" }
         │   └── And
         │       ├── Eq
         │       │   ├── #16
         │       │   └── #1
         │       ├── Eq
         │       │   ├── #19
-        │       │   └── "Brand#34"
-        │       ├── InList { expr: #22, list: [ "LG CASE", "LG BOX", "LG PACK", "LG PKG" ], negated: false }
+        │       │   └── Cast { cast_to: Utf8View, child: "Brand#34" }
+        │       ├── InList { expr: #22, list: [ Cast { cast_to: Utf8View, child: "LG CASE" }, Cast { cast_to: Utf8View, child: "LG BOX" }, Cast { cast_to: Utf8View, child: "LG PACK" }, Cast { cast_to: Utf8View, child: "LG PKG" } ], negated: false }
         │       ├── Geq
         │       │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
         │       │   └── Cast { cast_to: Decimal128(22, 2), child: 20(i64) }
@@ -96,10 +96,10 @@ LogicalProjection { exprs: [ #0 ] }
         │       │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
         │       │   └── Cast { cast_to: Decimal128(22, 2), child: 30(i64) }
         │       ├── Between { child: Cast { cast_to: Int64, child: #21 }, lower: 1(i64), upper: 15(i64) }
-        │       ├── InList { expr: #14, list: [ "AIR", "AIR REG" ], negated: false }
+        │       ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "AIR" }, Cast { cast_to: Utf8View, child: "AIR REG" } ], negated: false }
         │       └── Eq
         │           ├── #13
-        │           └── "DELIVER IN PERSON"
+        │           └── Cast { cast_to: Utf8View, child: "DELIVER IN PERSON" }
         └── LogicalJoin { join_type: Inner, cond: true }
             ├── LogicalScan { table: lineitem }
             └── LogicalScan { table: part }
@@ -119,8 +119,8 @@ PhysicalAgg
     │   │   │   └── #1
     │   │   ├── Eq
     │   │   │   ├── #19
-    │   │   │   └── "Brand#12"
-    │   │   ├── InList { expr: #22, list: [ "SM CASE", "SM BOX", "SM PACK", "SM PKG" ], negated: false }
+    │   │   │   └── Cast { cast_to: Utf8View, child: "Brand#12" }
+    │   │   ├── InList { expr: #22, list: [ Cast { cast_to: Utf8View, child: "SM CASE" }, Cast { cast_to: Utf8View, child: "SM BOX" }, Cast { cast_to: Utf8View, child: "SM PACK" }, Cast { cast_to: Utf8View, child: "SM PKG" } ], negated: false }
     │   │   ├── Geq
     │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
     │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 1(i64) }
@@ -128,18 +128,18 @@ PhysicalAgg
     │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
     │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 11(i64) }
     │   │   ├── Between { child: Cast { cast_to: Int64, child: #21 }, lower: 1(i64), upper: 5(i64) }
-    │   │   ├── InList { expr: #14, list: [ "AIR", "AIR REG" ], negated: false }
+    │   │   ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "AIR" }, Cast { cast_to: Utf8View, child: "AIR REG" } ], negated: false }
     │   │   └── Eq
     │   │       ├── #13
-    │   │       └── "DELIVER IN PERSON"
+    │   │       └── Cast { cast_to: Utf8View, child: "DELIVER IN PERSON" }
     │   ├── And
     │   │   ├── Eq
     │   │   │   ├── #16
     │   │   │   └── #1
     │   │   ├── Eq
     │   │   │   ├── #19
-    │   │   │   └── "Brand#23"
-    │   │   ├── InList { expr: #22, list: [ "MED BAG", "MED BOX", "MED PKG", "MED PACK" ], negated: false }
+    │   │   │   └── Cast { cast_to: Utf8View, child: "Brand#23" }
+    │   │   ├── InList { expr: #22, list: [ Cast { cast_to: Utf8View, child: "MED BAG" }, Cast { cast_to: Utf8View, child: "MED BOX" }, Cast { cast_to: Utf8View, child: "MED PKG" }, Cast { cast_to: Utf8View, child: "MED PACK" } ], negated: false }
     │   │   ├── Geq
     │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
     │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 10(i64) }
@@ -147,18 +147,18 @@ PhysicalAgg
     │   │   │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
     │   │   │   └── Cast { cast_to: Decimal128(22, 2), child: 20(i64) }
     │   │   ├── Between { child: Cast { cast_to: Int64, child: #21 }, lower: 1(i64), upper: 10(i64) }
-    │   │   ├── InList { expr: #14, list: [ "AIR", "AIR REG" ], negated: false }
+    │   │   ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "AIR" }, Cast { cast_to: Utf8View, child: "AIR REG" } ], negated: false }
     │   │   └── Eq
     │   │       ├── #13
-    │   │       └── "DELIVER IN PERSON"
+    │   │       └── Cast { cast_to: Utf8View, child: "DELIVER IN PERSON" }
     │   └── And
     │       ├── Eq
     │       │   ├── #16
     │       │   └── #1
     │       ├── Eq
     │       │   ├── #19
-    │       │   └── "Brand#34"
-    │       ├── InList { expr: #22, list: [ "LG CASE", "LG BOX", "LG PACK", "LG PKG" ], negated: false }
+    │       │   └── Cast { cast_to: Utf8View, child: "Brand#34" }
+    │       ├── InList { expr: #22, list: [ Cast { cast_to: Utf8View, child: "LG CASE" }, Cast { cast_to: Utf8View, child: "LG BOX" }, Cast { cast_to: Utf8View, child: "LG PACK" }, Cast { cast_to: Utf8View, child: "LG PKG" } ], negated: false }
     │       ├── Geq
     │       │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
     │       │   └── Cast { cast_to: Decimal128(22, 2), child: 20(i64) }
@@ -166,10 +166,10 @@ PhysicalAgg
     │       │   ├── Cast { cast_to: Decimal128(22, 2), child: #4 }
     │       │   └── Cast { cast_to: Decimal128(22, 2), child: 30(i64) }
     │       ├── Between { child: Cast { cast_to: Int64, child: #21 }, lower: 1(i64), upper: 15(i64) }
-    │       ├── InList { expr: #14, list: [ "AIR", "AIR REG" ], negated: false }
+    │       ├── InList { expr: #14, list: [ Cast { cast_to: Utf8View, child: "AIR" }, Cast { cast_to: Utf8View, child: "AIR REG" } ], negated: false }
     │       └── Eq
     │           ├── #13
-    │           └── "DELIVER IN PERSON"
+    │           └── Cast { cast_to: Utf8View, child: "DELIVER IN PERSON" }
     └── PhysicalNestedLoopJoin { join_type: Inner, cond: true }
         ├── PhysicalScan { table: lineitem }
         └── PhysicalScan { table: part }

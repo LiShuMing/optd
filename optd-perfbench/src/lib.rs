@@ -5,6 +5,7 @@
 
 pub mod benchmark;
 pub mod cardbench;
+mod csv_to_parquet;
 mod datafusion_dbms;
 pub mod job;
 mod postgres_dbms;

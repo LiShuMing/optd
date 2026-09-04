@@ -24,7 +24,7 @@ LogicalProjection
 │       ┌── Div
 │       │   ├── Cast { cast_to: Float64, child: #0 }
 │       │   └── 7(float)
-│       └── 16(i64)
+│       └── Cast { cast_to: Int32, child: 16(i64) }
 └── LogicalAgg
     ├── exprs:Agg(Sum)
     │   └── [ #5 ]
@@ -36,10 +36,10 @@ LogicalProjection
         │   │   └── #1
         │   ├── Eq
         │   │   ├── #19
-        │   │   └── "Brand#13"
+        │   │   └── Cast { cast_to: Utf8View, child: "Brand#13" }
         │   ├── Eq
         │   │   ├── #22
-        │   │   └── "JUMBO PKG"
+        │   │   └── Cast { cast_to: Utf8View, child: "JUMBO PKG" }
         │   └── Lt
         │       ├── Cast { cast_to: Decimal128(30, 15), child: #4 }
         │       └── #25
@@ -69,7 +69,7 @@ PhysicalProjection
 │       ┌── Div
 │       │   ├── Cast { cast_to: Float64, child: #0 }
 │       │   └── 7(float)
-│       └── 16(i64)
+│       └── Cast { cast_to: Int32, child: 16(i64) }
 └── PhysicalAgg
     ├── aggrs:Agg(Sum)
     │   └── [ #5 ]
@@ -90,10 +90,10 @@ PhysicalProjection
                 │   ├── cond:And
                 │   │   ├── Eq
                 │   │   │   ├── #3
-                │   │   │   └── "Brand#13"
+                │   │   │   └── Cast { cast_to: Utf8View, child: "Brand#13" }
                 │   │   └── Eq
                 │   │       ├── #6
-                │   │       └── "JUMBO PKG"
+                │   │       └── Cast { cast_to: Utf8View, child: "JUMBO PKG" }
                 │   └── PhysicalScan { table: part }
                 └── PhysicalProjection
                     ├── exprs:

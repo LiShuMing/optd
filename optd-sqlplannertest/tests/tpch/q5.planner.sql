@@ -59,7 +59,7 @@ LogicalSort
             │   │   └── #44
             │   ├── Eq
             │   │   ├── #45
-            │   │   └── "Asia"
+            │   │   └── Cast { cast_to: Utf8View, child: "Asia" }
             │   ├── Geq
             │   │   ├── #12
             │   │   └── Cast { cast_to: Date32, child: "2023-01-01" }
@@ -110,7 +110,7 @@ PhysicalSort
         └── PhysicalFilter
             ├── cond:Eq
             │   ├── #1
-            │   └── "Asia"
+            │   └── Cast { cast_to: Utf8View, child: "Asia" }
             └── PhysicalScan { table: region }
 */
 

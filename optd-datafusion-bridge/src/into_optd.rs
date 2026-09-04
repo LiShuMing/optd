@@ -10,7 +10,6 @@ use datafusion::common::DFSchema;
 use datafusion::logical_expr::{self, logical_plan, LogicalPlan, Operator};
 use datafusion::scalar::ScalarValue;
 use datafusion_expr::{ExprSchemable, Subquery};
-use itertools::Itertools;
 use optd_core::nodes::PredNode;
 use optd_datafusion_repr::plan_nodes::{
     ArcDfPlanNode, ArcDfPredNode, BetweenPred, BinOpPred, BinOpType, CastPred, ColumnRefPred,
@@ -35,6 +34,7 @@ impl OptdPlanContext<'_> {
             Subquery {
                 subquery,
                 outer_ref_columns,
+                ..
             },
             sq_typ,
         ) in subqueries.into_iter()
@@ -147,7 +147,7 @@ impl OptdPlanContext<'_> {
                 let idx = dep_ctx.unwrap().index_of_column(col)?;
                 Ok(ExternColumnRefPred::new(idx).into_pred_node())
             }
-            Expr::Literal(x) => match x {
+            Expr::Literal(x, _) => match x {
                 ScalarValue::UInt8(x) => {
                     let x = x.as_ref().unwrap();
                     Ok(ConstantPred::uint8(*x).into_pred_node())
@@ -216,26 +216,14 @@ impl OptdPlanContext<'_> {
             Expr::ScalarFunction(x) => {
                 let args = self.conv_into_optd_expr_list(&x.args, context, dep_ctx, subqueries)?;
                 Ok(FuncPred::new(
-                    FuncType::new_scalar(
-                        x.func.name().to_string(),
-                        // TODO: remove this infer...
-                        x.func
-                            .return_type_from_exprs(
-                                &x.args,
-                                context,
-                                &x.args
-                                    .iter()
-                                    .map(|x| x.get_type(context).unwrap())
-                                    .collect_vec(),
-                            )
-                            .unwrap(),
-                    ),
+                    FuncType::new_scalar(x.func.name().to_string(), expr.get_type(context)?),
                     args,
                 )
                 .into_pred_node())
             }
             Expr::AggregateFunction(x) => {
-                let args = self.conv_into_optd_expr_list(&x.args, context, dep_ctx, subqueries)?;
+                let args =
+                    self.conv_into_optd_expr_list(&x.params.args, context, dep_ctx, subqueries)?;
                 Ok(
                     FuncPred::new(FuncType::new_agg(x.func.name().to_string()), args)
                         .into_pred_node(),
@@ -286,7 +274,7 @@ impl OptdPlanContext<'_> {
             Expr::Cast(x) => {
                 let expr =
                     self.conv_into_optd_expr(x.expr.as_ref(), context, dep_ctx, subqueries)?;
-                Ok(CastPred::new(expr, x.data_type.clone()).into_pred_node())
+                Ok(CastPred::new(expr, x.field.data_type().clone()).into_pred_node())
             }
             Expr::Like(x) => {
                 let expr =
@@ -515,6 +503,7 @@ impl OptdPlanContext<'_> {
             DFJoinType::LeftSemi => JoinType::LeftSemi,
             DFJoinType::RightSemi => JoinType::RightSemi,
             DFJoinType::LeftMark => JoinType::LeftMark,
+            DFJoinType::RightMark => bail!("right mark join is not supported"),
         };
         let mut log_ops = Vec::with_capacity(node.on.len());
         let mut subqueries = vec![];

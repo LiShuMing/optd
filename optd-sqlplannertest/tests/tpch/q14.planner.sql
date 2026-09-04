@@ -23,7 +23,7 @@ LogicalProjection
     │   ┌── Agg(Sum)
     │   │   └── Case
     │   │       └── 
-    │   │           ┌── Like { expr: #20, pattern: "PROMO%", negated: false, case_insensitive: false }
+    │   │           ┌── Like { expr: #20, pattern: Cast { cast_to: Utf8View, child: "PROMO%" }, negated: false, case_insensitive: false }
     │   │           ├── Mul
     │   │           │   ├── #5
     │   │           │   └── Sub
@@ -64,7 +64,7 @@ PhysicalProjection
     │   ┌── Agg(Sum)
     │   │   └── Case
     │   │       └── 
-    │   │           ┌── Like { expr: #20, pattern: "PROMO%", negated: false, case_insensitive: false }
+    │   │           ┌── Like { expr: #20, pattern: Cast { cast_to: Utf8View, child: "PROMO%" }, negated: false, case_insensitive: false }
     │   │           ├── Mul
     │   │           │   ├── #5
     │   │           │   └── Sub

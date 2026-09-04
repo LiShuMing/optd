@@ -11,8 +11,8 @@ repository = { workspace = true }
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-datafusion = "43.0.0"
-datafusion-expr = "43.0.0"
+datafusion = "55.0.0"
+datafusion-expr = "55.0.0"
 async-trait = "0.1"
 itertools = "0.13"
 optd-core = { path = "../optd-core", version = "0.1" }

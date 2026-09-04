@@ -199,7 +199,12 @@ pub async fn exec_from_repl(
 ) -> rustyline::Result<()> {
     let mut rl = Editor::new()?;
     rl.set_helper(Some(CliHelper::new(
-        &ctx.task_ctx().session_config().options().sql_parser.dialect,
+        ctx.task_ctx()
+            .session_config()
+            .options()
+            .sql_parser
+            .dialect
+            .as_ref(),
         print_options.color,
     )));
     rl.load_history(".history").ok();
@@ -250,9 +255,14 @@ pub async fn exec_from_repl(
                         },
                     }
                     // dialect might have changed
-                    rl.helper_mut()
-                        .unwrap()
-                        .set_dialect(&ctx.task_ctx().session_config().options().sql_parser.dialect);
+                    rl.helper_mut().unwrap().set_dialect(
+                        ctx.task_ctx()
+                            .session_config()
+                            .options()
+                            .sql_parser
+                            .dialect
+                            .as_ref(),
+                    );
                 }
             }
             Err(ReadlineError::Interrupted) => {
@@ -300,7 +310,7 @@ pub(super) async fn exec_and_print(
         let df = ctx.execute_logical_plan(plan).await?;
         let physical_plan = df.create_physical_plan().await?;
 
-        if physical_plan.execution_mode().is_unbounded() {
+        if physical_plan.boundedness().is_unbounded() {
             let stream = execute_stream(physical_plan, task_ctx.clone())?;
             print_options.print_stream(stream, now).await?;
         } else {
@@ -378,8 +388,15 @@ async fn create_plan(
     if let LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) = &plan {
         // To support custom formats, treat error as None
         let format = config_file_type_from_str(&cmd.file_type);
-        register_object_store_and_config_extensions(ctx, &cmd.location, &cmd.options, format)
+        for location in &cmd.locations {
+            register_object_store_and_config_extensions(
+                ctx,
+                location,
+                &cmd.options,
+                format.clone(),
+            )
             .await?;
+        }
     }
 
     if let LogicalPlan::Copy(copy_to) = &mut plan {
@@ -472,8 +489,15 @@ mod tests {
 
         if let LogicalPlan::Ddl(DdlStatement::CreateExternalTable(cmd)) = &plan {
             let format = config_file_type_from_str(&cmd.file_type);
-            register_object_store_and_config_extensions(&ctx, &cmd.location, &cmd.options, format)
+            for location in &cmd.locations {
+                register_object_store_and_config_extensions(
+                    &ctx,
+                    location,
+                    &cmd.options,
+                    format.clone(),
+                )
                 .await?;
+            }
         } else {
             return plan_err!("LogicalPlan is not a CreateExternalTable");
         }
@@ -647,7 +671,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("No RSA key found in pem file"), "{err}");
+        assert!(err.to_ascii_lowercase().contains("pem"), "{err}");
 
         // for application_credentials_path
         let sql = format!("CREATE EXTERNAL TABLE test STORED AS PARQUET

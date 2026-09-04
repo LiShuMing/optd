@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use console::Style;
-use datafusion::catalog_common::MemoryCatalogProviderList;
+use datafusion::catalog::MemoryCatalogProviderList;
 use datafusion::error::Result;
 use datafusion::execution::context::SessionConfig;
-use datafusion::execution::runtime_env::RuntimeConfig;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use datafusion_optd_cli::exec::{exec_from_commands, exec_from_commands_collect};
@@ -27,7 +27,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 async fn main() -> Result<()> {
     let ctx = {
         let session_config = SessionConfig::from_env()?.with_information_schema(true);
-        let rn_config = RuntimeConfig::new().build()?;
+        let rn_config = RuntimeEnvBuilder::new().build()?;
         let mut state = SessionStateBuilder::new()
             .with_config(session_config.clone())
             .with_runtime_env(Arc::new(rn_config));
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let perfect_optimizer;
     let ctx_perfect = {
         let session_config = SessionConfig::from_env()?.with_information_schema(true);
-        let rn_config = RuntimeConfig::new().build()?;
+        let rn_config = RuntimeEnvBuilder::new().build()?;
         let mut state = SessionStateBuilder::new()
             .with_config(session_config.clone())
             .with_runtime_env(Arc::new(rn_config));

@@ -68,7 +68,7 @@ LogicalLimit { skip: 0(i64), fetch: 100(i64) }
             │   ├── Eq
             │   │   ├── Cast { cast_to: Int64, child: #5 }
             │   │   └── 4(i64)
-            │   ├── Like { expr: #4, pattern: "%TIN", negated: false, case_insensitive: false }
+            │   ├── Like { expr: #4, pattern: Cast { cast_to: Utf8View, child: "%TIN" }, negated: false, case_insensitive: false }
             │   ├── Eq
             │   │   ├── #12
             │   │   └── #21
@@ -77,7 +77,7 @@ LogicalLimit { skip: 0(i64), fetch: 100(i64) }
             │   │   └── #25
             │   ├── Eq
             │   │   ├── #26
-            │   │   └── "AFRICA"
+            │   │   └── Cast { cast_to: Utf8View, child: "AFRICA" }
             │   └── Eq
             │       ├── #19
             │       └── #28
@@ -112,7 +112,7 @@ LogicalLimit { skip: 0(i64), fetch: 100(i64) }
                             │   │   └── #16
                             │   └── Eq
                             │       ├── #17
-                            │       └── "AFRICA"
+                            │       └── Cast { cast_to: Utf8View, child: "AFRICA" }
                             └── LogicalJoin { join_type: Inner, cond: true }
                                 ├── LogicalJoin { join_type: Inner, cond: true }
                                 │   ├── LogicalJoin { join_type: Inner, cond: true }
@@ -143,7 +143,7 @@ LogicalLimit { skip: 0(i64), fetch: 100(i64) }
             │   ├── Eq
             │   │   ├── Cast { cast_to: Int64, child: #5 }
             │   │   └── 4(i64)
-            │   ├── Like { expr: #4, pattern: "%TIN", negated: false, case_insensitive: false }
+            │   ├── Like { expr: #4, pattern: Cast { cast_to: Utf8View, child: "%TIN" }, negated: false, case_insensitive: false }
             │   ├── Eq
             │   │   ├── #12
             │   │   └── #21
@@ -152,7 +152,7 @@ LogicalLimit { skip: 0(i64), fetch: 100(i64) }
             │   │   └── #25
             │   ├── Eq
             │   │   ├── #26
-            │   │   └── "AFRICA"
+            │   │   └── Cast { cast_to: Utf8View, child: "AFRICA" }
             │   └── Eq
             │       ├── #19
             │       └── #28
@@ -209,7 +209,7 @@ LogicalLimit { skip: 0(i64), fetch: 100(i64) }
                                         │   │   └── #17
                                         │   └── Eq
                                         │       ├── #18
-                                        │       └── "AFRICA"
+                                        │       └── Cast { cast_to: Utf8View, child: "AFRICA" }
                                         └── LogicalJoin { join_type: Inner, cond: true }
                                             ├── LogicalAgg { exprs: [], groups: [ #0 ] }
                                             │   └── LogicalJoin { join_type: Inner, cond: true }
@@ -251,7 +251,7 @@ PhysicalLimit { skip: 0(i64), fetch: 100(i64) }
             │   │   │       │   │   │   ├── Eq
             │   │   │       │   │   │   │   ├── Cast { cast_to: Int64, child: #5 }
             │   │   │       │   │   │   │   └── 4(i64)
-            │   │   │       │   │   │   └── Like { expr: #4, pattern: "%TIN", negated: false, case_insensitive: false }
+            │   │   │       │   │   │   └── Like { expr: #4, pattern: Cast { cast_to: Utf8View, child: "%TIN" }, negated: false, case_insensitive: false }
             │   │   │       │   │   └── PhysicalScan { table: part }
             │   │   │       │   └── PhysicalScan { table: partsupp }
             │   │   │       └── PhysicalScan { table: supplier }
@@ -259,7 +259,7 @@ PhysicalLimit { skip: 0(i64), fetch: 100(i64) }
             │   └── PhysicalFilter
             │       ├── cond:Eq
             │       │   ├── #1
-            │       │   └── "AFRICA"
+            │       │   └── Cast { cast_to: Utf8View, child: "AFRICA" }
             │       └── PhysicalScan { table: region }
             └── PhysicalProjection { exprs: [ #0, #2 ] }
                 └── PhysicalNestedLoopJoin
@@ -302,7 +302,7 @@ PhysicalLimit { skip: 0(i64), fetch: 100(i64) }
                                 └── PhysicalFilter
                                     ├── cond:Eq
                                     │   ├── #1
-                                    │   └── "AFRICA"
+                                    │   └── Cast { cast_to: Utf8View, child: "AFRICA" }
                                     └── PhysicalScan { table: region }
 */
 

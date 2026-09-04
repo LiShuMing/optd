@@ -69,7 +69,7 @@ impl ConstantType {
             DataType::Float64 => ConstantType::Float64,
             DataType::Date32 => ConstantType::Date,
             DataType::Interval(IntervalUnit::MonthDayNano) => ConstantType::IntervalMonthDateNano,
-            DataType::Utf8 => ConstantType::Utf8String,
+            DataType::Utf8 | DataType::Utf8View => ConstantType::Utf8String,
             DataType::Decimal128(_, _) => ConstantType::Decimal,
             _ => unimplemented!("no conversion to ConstantType for DataType {data_type}"),
         }

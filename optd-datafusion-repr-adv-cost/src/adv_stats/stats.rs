@@ -9,7 +9,7 @@ use std::sync::Arc;
 use arrow_schema::{DataType, Schema, SchemaRef};
 use datafusion::arrow::array::{
     Array, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int8Array, RecordBatch, StringArray, UInt16Array, UInt32Array, UInt8Array,
+    Int8Array, RecordBatch, StringArray, StringViewArray, UInt16Array, UInt32Array, UInt8Array,
 };
 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use itertools::Itertools;
@@ -179,6 +179,7 @@ impl TableStats<Counter<ColumnCombValue>, TDigest<Value>> {
                 | DataType::Float32
                 | DataType::Float64
                 | DataType::Utf8
+                | DataType::Utf8View
         )
     }
 
@@ -290,6 +291,13 @@ impl TableStats<Counter<ColumnCombValue>, TDigest<Value>> {
             DataType::Float64 => float_col_cast!({ col, Float64Array }),
             DataType::Date32 => simple_col_cast!({col, Date32Array, Value::Date32}),
             DataType::Utf8 => utf8_col_cast!({ col }),
+            DataType::Utf8View => col
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .unwrap()
+                .iter()
+                .map(|x| x.map(|y| Value::String(y.to_string().into())))
+                .collect::<Vec<_>>(),
             _ => unreachable!(),
         }
     }

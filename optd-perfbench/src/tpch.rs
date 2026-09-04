@@ -11,11 +11,10 @@ use std::sync::Arc;
 use std::{env, fs, io};
 
 /// A wrapper around tpch-kit
-use csv2parquet::Opts;
 use datafusion::catalog::SchemaProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::shell;
+use crate::{csv_to_parquet, shell};
 
 const TPCH_KIT_REPO_URL: &str = "https://github.com/wangpatrick57/tpch-kit.git";
 pub const TPCH_KIT_POSTGRES: &str = "POSTGRESQL";
@@ -174,10 +173,7 @@ impl TpchKit {
                     .schema();
                 let mut parquet_tbl_fpath = csv_tbl_fpath.clone();
                 parquet_tbl_fpath.set_extension("parquet");
-                let mut opts = Opts::new(csv_tbl_fpath, parquet_tbl_fpath.clone());
-                opts.delimiter = '|';
-                opts.schema = Some(schema.as_ref().clone());
-                csv2parquet::convert(opts).unwrap();
+                csv_to_parquet::convert(csv_tbl_fpath, parquet_tbl_fpath, schema, b'|').unwrap();
             }
             File::create(done_fpath)?;
             log::debug!("[end] making parquet for {}", tpch_kit_config);

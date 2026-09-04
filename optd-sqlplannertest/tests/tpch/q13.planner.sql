@@ -44,7 +44,7 @@ LogicalSort
                         │   ├── Eq
                         │   │   ├── #0
                         │   │   └── #9
-                        │   └── Like { expr: #16, pattern: "%special%requests%", negated: true, case_insensitive: false }
+                        │   └── Like { expr: #16, pattern: Cast { cast_to: Utf8View, child: "%special%requests%" }, negated: true, case_insensitive: false }
                         ├── LogicalScan { table: customer }
                         └── LogicalScan { table: orders }
 PhysicalSort
@@ -67,7 +67,7 @@ PhysicalSort
             │   ├── Eq
             │   │   ├── #0
             │   │   └── #9
-            │   └── Like { expr: #16, pattern: "%special%requests%", negated: true, case_insensitive: false }
+            │   └── Like { expr: #16, pattern: Cast { cast_to: Utf8View, child: "%special%requests%" }, negated: true, case_insensitive: false }
             ├── PhysicalScan { table: customer }
             └── PhysicalScan { table: orders }
 */

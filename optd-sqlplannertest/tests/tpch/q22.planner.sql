@@ -59,7 +59,14 @@ LogicalSort
                 │   ├── InList
                 │   │   ├── expr:Scalar(Substr)
                 │   │   │   └── [ #4, 1(i64), 2(i64) ]
-                │   │   ├── list: [ "13", "31", "23", "29", "30", "18", "17" ]
+                │   │   ├── list:
+                │   │   │   ┌── Cast { cast_to: Utf8View, child: "13" }
+                │   │   │   ├── Cast { cast_to: Utf8View, child: "31" }
+                │   │   │   ├── Cast { cast_to: Utf8View, child: "23" }
+                │   │   │   ├── Cast { cast_to: Utf8View, child: "29" }
+                │   │   │   ├── Cast { cast_to: Utf8View, child: "30" }
+                │   │   │   ├── Cast { cast_to: Utf8View, child: "18" }
+                │   │   │   └── Cast { cast_to: Utf8View, child: "17" }
                 │   │   ├── negated: false
 
                 │   ├── Gt
@@ -83,7 +90,14 @@ LogicalSort
                     │               │   └── InList
                     │               │       ├── expr:Scalar(Substr)
                     │               │       │   └── [ #4, 1(i64), 2(i64) ]
-                    │               │       ├── list: [ "13", "31", "23", "29", "30", "18", "17" ]
+                    │               │       ├── list:
+                    │               │       │   ┌── Cast { cast_to: Utf8View, child: "13" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "31" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "23" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "29" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "30" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "18" }
+                    │               │       │   └── Cast { cast_to: Utf8View, child: "17" }
                     │               │       ├── negated: false
 
                     │               └── LogicalScan { table: customer }
@@ -113,7 +127,14 @@ PhysicalSort
             │   ├── InList
             │   │   ├── expr:Scalar(Substr)
             │   │   │   └── [ #4, 1(i64), 2(i64) ]
-            │   │   ├── list: [ "13", "31", "23", "29", "30", "18", "17" ]
+            │   │   ├── list:
+            │   │   │   ┌── Cast { cast_to: Utf8View, child: "13" }
+            │   │   │   ├── Cast { cast_to: Utf8View, child: "31" }
+            │   │   │   ├── Cast { cast_to: Utf8View, child: "23" }
+            │   │   │   ├── Cast { cast_to: Utf8View, child: "29" }
+            │   │   │   ├── Cast { cast_to: Utf8View, child: "30" }
+            │   │   │   ├── Cast { cast_to: Utf8View, child: "18" }
+            │   │   │   └── Cast { cast_to: Utf8View, child: "17" }
             │   │   ├── negated: false
 
             │   ├── Gt
@@ -141,7 +162,14 @@ PhysicalSort
                 │           │   └── InList
                 │           │       ├── expr:Scalar(Substr)
                 │           │       │   └── [ #4, 1(i64), 2(i64) ]
-                │           │       ├── list: [ "13", "31", "23", "29", "30", "18", "17" ]
+                │           │       ├── list:
+                │           │       │   ┌── Cast { cast_to: Utf8View, child: "13" }
+                │           │       │   ├── Cast { cast_to: Utf8View, child: "31" }
+                │           │       │   ├── Cast { cast_to: Utf8View, child: "23" }
+                │           │       │   ├── Cast { cast_to: Utf8View, child: "29" }
+                │           │       │   ├── Cast { cast_to: Utf8View, child: "30" }
+                │           │       │   ├── Cast { cast_to: Utf8View, child: "18" }
+                │           │       │   └── Cast { cast_to: Utf8View, child: "17" }
                 │           │       ├── negated: false
 
                 │           └── PhysicalScan { table: customer }
@@ -161,7 +189,14 @@ PhysicalSort
                     │               │   └── InList
                     │               │       ├── expr:Scalar(Substr)
                     │               │       │   └── [ #4, 1(i64), 2(i64) ]
-                    │               │       ├── list: [ "13", "31", "23", "29", "30", "18", "17" ]
+                    │               │       ├── list:
+                    │               │       │   ┌── Cast { cast_to: Utf8View, child: "13" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "31" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "23" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "29" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "30" }
+                    │               │       │   ├── Cast { cast_to: Utf8View, child: "18" }
+                    │               │       │   └── Cast { cast_to: Utf8View, child: "17" }
                     │               │       ├── negated: false
 
                     │               └── PhysicalScan { table: customer }

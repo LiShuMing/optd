@@ -6,7 +6,7 @@
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use datafusion::execution::context::SessionConfig;
-use datafusion::execution::runtime_env::RuntimeConfig;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::DFParser;
@@ -59,7 +59,7 @@ impl DatafusionDBMS {
     /// Creates a new session context without optd
     async fn new_session_ctx_no_optd() -> Result<SessionContext> {
         let session_config = SessionConfig::from_env()?.with_information_schema(true);
-        let runtime_env = Arc::new(RuntimeConfig::new().build()?);
+        let runtime_env = Arc::new(RuntimeEnvBuilder::new().build()?);
         let state = SessionStateBuilder::new()
             .with_config(session_config)
             .with_runtime_env(runtime_env)
@@ -95,7 +95,7 @@ impl DatafusionDBMS {
                         .fields()
                         .iter()
                         .map(|f| match f.data_type() {
-                            DataType::Utf8 => DefaultColumnType::Text,
+                            DataType::Utf8 | DataType::Utf8View => DefaultColumnType::Text,
                             DataType::Int32 | DataType::Int64 => DefaultColumnType::Integer,
                             DataType::Float32 | DataType::Float64 => {
                                 DefaultColumnType::FloatingPoint

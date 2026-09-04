@@ -43,7 +43,7 @@ LogicalLimit { skip: 0(i64), fetch: 10(i64) }
                 ├── cond:And
                 │   ├── Eq
                 │   │   ├── #6
-                │   │   └── "FURNITURE"
+                │   │   └── Cast { cast_to: Utf8View, child: "FURNITURE" }
                 │   ├── Eq
                 │   │   ├── #0
                 │   │   └── #9
@@ -82,7 +82,7 @@ PhysicalLimit { skip: 0(i64), fetch: 10(i64) }
                 │   ├── PhysicalFilter
                 │   │   ├── cond:Eq
                 │   │   │   ├── #6
-                │   │   │   └── "FURNITURE"
+                │   │   │   └── Cast { cast_to: Utf8View, child: "FURNITURE" }
                 │   │   └── PhysicalScan { table: customer }
                 │   └── PhysicalFilter
                 │       ├── cond:Lt

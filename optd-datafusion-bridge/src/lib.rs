@@ -14,10 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::catalog::CatalogProviderList;
-use datafusion::catalog_common::MemoryCatalogProviderList;
-use datafusion::execution::context::{QueryPlanner, SessionState};
-use datafusion::execution::runtime_env::RuntimeConfig;
+use datafusion::catalog::{CatalogProviderList, MemoryCatalogProviderList, Session};
+use datafusion::execution::context::QueryPlanner;
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{
     Explain, LogicalPlan, PlanType, StringifiedPlan, TableSource, ToStringifiedPlan,
@@ -38,12 +37,12 @@ use optd_datafusion_repr_adv_cost::new_physical_adv_cost;
 
 pub struct OptdPlanContext<'a> {
     tables: HashMap<String, Arc<dyn TableSource>>,
-    session_state: &'a SessionState,
+    session_state: &'a dyn Session,
     pub optimizer: Option<&'a DatafusionOptimizer>,
 }
 
 impl<'a> OptdPlanContext<'a> {
-    pub fn new(session_state: &'a SessionState) -> Self {
+    pub fn new(session_state: &'a dyn Session) -> Self {
         Self {
             tables: HashMap::new(),
             session_state,
@@ -78,7 +77,7 @@ impl Catalog for DatafusionCatalog {
                 DataType::Int32 => ConstantType::Int32,
                 DataType::Int64 => ConstantType::Int64,
                 DataType::Float64 => ConstantType::Decimal,
-                DataType::Utf8 => ConstantType::Utf8String,
+                DataType::Utf8 | DataType::Utf8View => ConstantType::Utf8String,
                 DataType::Decimal128(_, _) => ConstantType::Decimal,
                 dt => unimplemented!("{:?}", dt),
             };
@@ -120,7 +119,7 @@ impl OptdQueryPlanner {
     async fn create_physical_plan_inner(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session_state: &dyn Session,
     ) -> anyhow::Result<Arc<dyn ExecutionPlan>> {
         if let LogicalPlan::Dml(_) | LogicalPlan::Ddl(_) | LogicalPlan::EmptyRelation(_) =
             logical_plan
@@ -221,10 +220,10 @@ impl OptdQueryPlanner {
         ctx.optimizer = Some(&optimizer);
         let physical_plan = ctx.conv_from_optd(optimized_rel, meta).await?;
         if let Some(explains) = &mut explains {
-            explains.push(
-                displayable(&*physical_plan)
-                    .to_stringified(false, datafusion::logical_expr::PlanType::FinalPhysicalPlan),
-            );
+            explains.push(StringifiedPlan::new(
+                datafusion::logical_expr::PlanType::FinalPhysicalPlan,
+                displayable(&*physical_plan).indent(false).to_string(),
+            ));
         }
         self.optimizer.lock().unwrap().replace(optimizer);
         if let Some(explains) = explains {
@@ -256,7 +255,7 @@ impl QueryPlanner for OptdQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        session_state: &SessionState,
+        session_state: &dyn Session,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         Ok(self
             .create_physical_plan_inner(logical_plan, session_state)
@@ -325,7 +324,7 @@ pub struct OptdDfContext {
 /// Utility function to create a session context for datafusion + optd.
 pub async fn create_df_context(
     session_config: Option<SessionConfig>,
-    rn_config: Option<RuntimeConfig>,
+    rn_config: Option<RuntimeEnvBuilder>,
     catalog: Option<Arc<dyn CatalogProviderList>>,
     enable_adaptive: bool,
     use_df_logical: bool,
@@ -345,7 +344,7 @@ pub async fn create_df_context(
     let rn_config = if let Some(rn_config) = rn_config {
         rn_config
     } else {
-        RuntimeConfig::new()
+        RuntimeEnvBuilder::new()
     };
     let runtime_env = Arc::new(rn_config.build()?);
 

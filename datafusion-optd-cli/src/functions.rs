@@ -23,12 +23,12 @@ use arrow::util::pretty::pretty_format_batches;
 use async_trait::async_trait;
 
 use datafusion::catalog::Session;
+use datafusion::catalog::TableFunctionImpl;
 use datafusion::common::{plan_err, Column};
-use datafusion::datasource::function::TableFunctionImpl;
+use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::TableProvider;
 use datafusion::error::Result;
 use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::memory::MemoryExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::scalar::ScalarValue;
 use parquet::basic::ConvertedType;
@@ -222,10 +222,6 @@ struct ParquetMetadataTable {
 
 #[async_trait]
 impl TableProvider for ParquetMetadataTable {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> arrow::datatypes::SchemaRef {
         self.schema.clone()
     }
@@ -241,11 +237,11 @@ impl TableProvider for ParquetMetadataTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(Arc::new(MemoryExec::try_new(
+        Ok(MemorySourceConfig::try_new_exec(
             &[vec![self.batch.clone()]],
             TableProvider::schema(self),
             projection.cloned(),
-        )?))
+        )?)
     }
 }
 
@@ -321,7 +317,7 @@ pub struct ParquetMetadataFunc {}
 impl TableFunctionImpl for ParquetMetadataFunc {
     fn call(&self, exprs: &[Expr]) -> Result<Arc<dyn TableProvider>> {
         let filename = match exprs.first() {
-            Some(Expr::Literal(ScalarValue::Utf8(Some(s)))) => s, // single quote: parquet_metadata('x.parquet')
+            Some(Expr::Literal(ScalarValue::Utf8(Some(s)), _)) => s, // single quote: parquet_metadata('x.parquet')
             Some(Expr::Column(Column { name, .. })) => name, // double quote: parquet_metadata("x.parquet")
             _ => {
                 return plan_err!("parquet_metadata requires string argument as its input");
@@ -413,7 +409,7 @@ impl TableFunctionImpl for ParquetMetadataFunc {
                     stats_max_value_arr.push(None);
                 };
                 compression_arr.push(format!("{:?}", column.compression()));
-                encodings_arr.push(format!("{:?}", column.encodings()));
+                encodings_arr.push(format!("{:?}", column.encodings().collect::<Vec<_>>()));
                 index_page_offset_arr.push(column.index_page_offset());
                 dictionary_page_offset_arr.push(column.dictionary_page_offset());
                 data_page_offset_arr.push(column.data_page_offset());

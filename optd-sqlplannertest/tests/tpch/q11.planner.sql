@@ -53,7 +53,7 @@ LogicalSort
             │       │   │   └── #12
             │       │   └── Eq
             │       │       ├── #13
-            │       │       └── "CHINA"
+            │       │       └── Cast { cast_to: Utf8View, child: "CHINA" }
             │       └── LogicalJoin { join_type: Inner, cond: true }
             │           ├── LogicalJoin { join_type: Inner, cond: true }
             │           │   ├── LogicalScan { table: partsupp }
@@ -82,7 +82,7 @@ LogicalSort
                         │   │   └── #12
                         │   └── Eq
                         │       ├── #13
-                        │       └── "CHINA"
+                        │       └── Cast { cast_to: Utf8View, child: "CHINA" }
                         └── LogicalJoin { join_type: Inner, cond: true }
                             ├── LogicalJoin { join_type: Inner, cond: true }
                             │   ├── LogicalScan { table: partsupp }
@@ -109,7 +109,7 @@ PhysicalSort
             │           │   ├── PhysicalFilter
             │           │   │   ├── cond:Eq
             │           │   │   │   ├── #1
-            │           │   │   │   └── "CHINA"
+            │           │   │   │   └── Cast { cast_to: Utf8View, child: "CHINA" }
             │           │   │   └── PhysicalScan { table: nation }
             │           │   └── PhysicalScan { table: supplier }
             │           └── PhysicalScan { table: partsupp }
@@ -132,7 +132,7 @@ PhysicalSort
                             │   ├── PhysicalFilter
                             │   │   ├── cond:Eq
                             │   │   │   ├── #1
-                            │   │   │   └── "CHINA"
+                            │   │   │   └── Cast { cast_to: Utf8View, child: "CHINA" }
                             │   │   └── PhysicalScan { table: nation }
                             │   └── PhysicalScan { table: supplier }
                             └── PhysicalScan { table: partsupp }
