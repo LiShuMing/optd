@@ -172,10 +172,13 @@ pub fn aggregate(
                     Value::Int(n) => slot[1 + sum_ordinal] += n * w,
                     // A decimal/float/binary column arrives as `Str`, so this
                     // is reachable from a legal plan, not a programmer error:
-                    // it must be reported, not asserted away.
-                    other => {
+                    // it must be reported, not asserted away. The message
+                    // names the column, not the value: binary values are hex
+                    // and strings can be long, and neither belongs in an error
+                    // log.
+                    _ => {
                         return Err(format!(
-                            "SUM over a non-integer value `{other}` is not supported"
+                            "SUM over column {c}: non-integer values are not summable"
                         ));
                     }
                 }
