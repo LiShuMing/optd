@@ -117,7 +117,7 @@ pub fn eval(plan: &IncPlanNode, ctx: &EvalContext) -> Result<Multiset, String> {
 
         IncNodeType::Agg { groups, aggs } => {
             let input = eval(kids[0], ctx)?;
-            Ok(aggregate(&input, groups, aggs))
+            Ok(aggregate(&input, groups, aggs)?)
         }
 
         IncNodeType::MergeAgg { groups, aggs } => {
@@ -139,7 +139,16 @@ pub fn accumulators(aggs: &[AggKind]) -> usize {
 ///
 /// The output is the aggregate's *intermediate state*, not a finalised value —
 /// that is what lets a later batch merge into it (`agg.md` §1).
-pub fn aggregate(input: &Multiset, groups: &[usize], aggs: &[AggKind]) -> Multiset {
+///
+/// `SUM` only accepts integers. The feed maps decimal, float and binary columns
+/// to `Value::Str`, so `SUM` over one of those is not silently zero: it is an
+/// error. Widening the accumulator is a separate change; until then those types
+/// support identity comparison only.
+pub fn aggregate(
+    input: &Multiset,
+    groups: &[usize],
+    aggs: &[AggKind],
+) -> Result<Multiset, String> {
     // key -> accumulators
     let mut acc: BTreeMap<Row, Vec<i64>> = BTreeMap::new();
     for (row, w) in input.iter() {
@@ -158,8 +167,17 @@ pub fn aggregate(input: &Multiset, groups: &[usize], aggs: &[AggKind]) -> Multis
             if let AggKind::Sum(c) = kind {
                 let v = row.get(*c).cloned().unwrap_or(Value::Null);
                 // NULL does not contribute to SUM, matching SQL.
-                if let Value::Int(n) = v {
-                    slot[1 + sum_ordinal] += n * w;
+                match v {
+                    Value::Null => {}
+                    Value::Int(n) => slot[1 + sum_ordinal] += n * w,
+                    // A decimal/float/binary column arrives as `Str`, so this
+                    // is reachable from a legal plan, not a programmer error:
+                    // it must be reported, not asserted away.
+                    other => {
+                        return Err(format!(
+                            "SUM over a non-integer value `{other}` is not supported"
+                        ));
+                    }
                 }
                 sum_ordinal += 1;
             }
@@ -171,7 +189,7 @@ pub fn aggregate(input: &Multiset, groups: &[usize], aggs: &[AggKind]) -> Multis
         row.extend(values.into_iter().map(Value::Int));
         out.add_row(row, 1);
     }
-    out
+    Ok(out)
 }
 
 /// Merge a partial aggregate into stored state, joining on the group keys.

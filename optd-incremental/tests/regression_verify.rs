@@ -173,3 +173,24 @@ fn load_must_not_ignore_a_table_referenced_by_the_plan() {
         "a table omitted from the caller's table list was silently not refreshed (finding C)"
     );
 }
+/// D — `SUM` over a non-integer column must not silently accumulate zero.
+///
+/// The Iceberg feed maps decimal, float and binary columns to `Value::Str`.
+/// Before this fix `interp::aggregate` matched only `Value::Int` and dropped
+/// everything else, so `SUM(decimal_col)` returned 0 while `count(*)` stayed
+/// correct — a wrong answer that looks like a real one. The interpreter now
+/// rejects it; widening the accumulator would be the other legitimate fix and
+/// would make this test green by returning the right sum instead of an error.
+#[test]
+fn d_sum_over_a_non_integer_column_is_refused() {
+    use optd_incremental::interp::aggregate;
+    use optd_incremental::plan::AggKind;
+
+    let mut input = Multiset::new();
+    input.add_row(
+        vec![Value::Int(1), Value::Str("12.5".into())],
+        1,
+    );
+    let err = aggregate(&input, &[0], &[AggKind::Sum(1)]).unwrap_err();
+    assert!(err.contains("SUM"), "{err}");
+}
