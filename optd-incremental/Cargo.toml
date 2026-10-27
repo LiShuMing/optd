@@ -1,0 +1,24 @@
+[package]
+name = "optd-incremental"
+description = "incremental view maintenance framework built on optd-core"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+
+[features]
+# Enables the Iceberg-backed `DeltaSource` (`iceberg_source`). Off by default:
+# it pulls in the Iceberg crate and a Tokio runtime, which only views reading
+# real tables need.
+iceberg = ["dep:iceberg", "dep:tokio", "dep:futures", "dep:arrow"]
+
+[dependencies]
+optd-core = { path = "../optd-core" }
+# The rev is the one `apache/datafusion-iceberg` pins, so the read path and this
+# feed agree on the Iceberg crate version if both are enabled together.
+iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3", optional = true }
+tokio = { version = "1.47", features = ["rt"], optional = true }
+futures = { version = "0.3", optional = true }
+arrow = { version = "59.2", optional = true }
+
+[dev-dependencies]

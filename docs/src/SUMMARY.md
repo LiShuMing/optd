@@ -47,6 +47,19 @@
 - [What's Next]()
   - [Ideas]()
   - [RFCs]()
+- [Incremental Engine Design]()
+  - [Overview](./incremental/overview.md)
+  - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
+  - [ΔScan — Table Scan](./incremental/scan.md)
+  - [ΔProjection](./incremental/projection.md)
+  - [ΔFilter](./incremental/filter.md)
+  - [ΔJoin](./incremental/join.md)
+  - [ΔAggregate](./incremental/agg.md)
+  - [ΔSort](./incremental/sort.md)
+  - [ΔLimit](./incremental/limit.md)
+  - [ΔEmptyRelation](./incremental/empty_relation.md)
+  - [ΔSubquery](./incremental/subquery.md)
+
 ---
 
 # DEPRECATED
