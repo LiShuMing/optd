@@ -22,3 +22,6 @@ futures = { version = "0.3", optional = true }
 arrow = { version = "59.2", optional = true }
 
 [dev-dependencies]
+# Only the iceberg-feature tests need this: they deserialize Iceberg's own
+# metadata fixtures to pin the snapshot-timeline ordering.
+serde_json = "1"

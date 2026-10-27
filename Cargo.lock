@@ -4589,6 +4589,7 @@ dependencies = [
  "futures",
  "iceberg",
  "optd-core",
+ "serde_json",
  "tokio",
 ]
 
