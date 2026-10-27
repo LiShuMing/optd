@@ -5,6 +5,10 @@ version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
+# The `iceberg` feature pulls in iceberg 0.10.1, which declares rust-version
+# 1.95 (and edition 2024). The floor applies to the whole crate because Cargo
+# cannot express a per-feature MSRV; without the feature, 1.94 would suffice.
+rust-version = "1.95"
 
 [features]
 # Enables the Iceberg-backed `DeltaSource` (`iceberg_source`). Off by default:
