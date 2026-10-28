@@ -61,11 +61,27 @@ pub fn rewrite(plan: IncPlanNode) -> Result<IncPlanNode, RewriteError> {
 
 /// Resolve one `Δ( operator(…))` node.
 fn rewrite_delta(marked: &IncPlanNode) -> Result<IncPlanNode, RewriteError> {
+    if marked.children.len() != 1 || children_of(marked).len() != 1 {
+        return Err(RewriteError::Malformed(
+            "Delta must have one concrete child".into(),
+        ));
+    }
     let child = match children_of(marked).first() {
         Some(c) => (*c).clone(),
         None => return Err(RewriteError::Malformed("Delta with no child".into())),
     };
     let grand_children = children_of(&child);
+    let arity = match &child.typ {
+        IncNodeType::Scan(_) | IncNodeType::EmptyRelation | IncNodeType::StoredView => 0,
+        IncNodeType::Join(_) | IncNodeType::Union | IncNodeType::MergeAgg { .. } => 2,
+        _ => 1,
+    };
+    if grand_children.len() != arity || grand_children.len() != child.children.len() {
+        return Err(RewriteError::Malformed(format!(
+            "invalid concrete arity for {}",
+            child.typ
+        )));
+    }
 
     match child.typ.clone() {
         // --- leaves ---------------------------------------------------------
@@ -166,7 +182,16 @@ mod tests {
 
     #[test]
     fn projection_and_filter_transpose() {
-        let plan = project(filter(scan(0), Expr::Gt(Box::new(Expr::Col(0)), Box::new(Expr::Lit(crate::change::Value::Int(0))))), vec![0]);
+        let plan = project(
+            filter(
+                scan(0),
+                Expr::Gt(
+                    Box::new(Expr::Col(0)),
+                    Box::new(Expr::Lit(crate::change::Value::Int(0))),
+                ),
+            ),
+            vec![0],
+        );
         let d = rewrite(delta(plan)).unwrap();
         // The marker must have moved below both operators, onto the scan.
         assert!(matches!(d.typ, IncNodeType::Projection(_)));
@@ -208,7 +233,11 @@ mod tests {
         assert_eq!(d.typ, IncNodeType::Union);
         let kids = children_of(&d);
         assert!(matches!(kids[0].typ, IncNodeType::MergeAgg { .. }));
-        assert_eq!(kids[1].typ, IncNodeType::Negate, "old state must be subtracted");
+        assert_eq!(
+            kids[1].typ,
+            IncNodeType::Negate,
+            "old state must be subtracted"
+        );
         let merge_kids = children_of(kids[0]);
         assert_eq!(merge_kids[1].typ, IncNodeType::StoredView);
         assert!(matches!(merge_kids[0].typ, IncNodeType::Agg { .. }));

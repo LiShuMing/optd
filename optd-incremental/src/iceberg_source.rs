@@ -1,101 +1,12 @@
-// Copyright (c) 2023-2024 CMU Database Group
-//
-// Use of this source code is governed by an MIT-style license that can be found in the LICENSE file or at
-// https://opensource.org/licenses/MIT.
+// Copyright (c) 2023-2026 CMU Database Group
+// Licensed under the MIT license. See LICENSE in the project root.
 
-//! An Iceberg-backed [`DeltaSource`] — the *snapshot-diff* shape.
-//!
-//! The feed takes its changes from the table's snapshot history: the relation at
-//! position `p` is the table as of the `p`-th snapshot, and `changes(from, to)` is
-//! `contents(to) ⊖ contents(from)`. That is shape **B** in
-//! `docs/src/incremental/change_capture.md`: correct, needing no cooperation from
-//! writers, but it reads whole tables rather than only what changed.
-//!
-//! Two consequences worth stating plainly:
-//!
-//! * The Iceberg crate has no changelog/incremental scan yet (only the v3
-//!   `_change_type` column *definitions*), so shape A is not available here. The
-//!   only time-travel primitive is `TableScanBuilder::snapshot_id`.
-//! * This is the naive implementation: it scans both endpoints and diffs the
-//!   resulting multisets. A later version can do a manifest-level diff (read only
-//!   the data files added between two snapshots) without changing this contract.
-//!
-//! ## Positions
-//!
-//! A [`Position`] here is a **logical epoch**, not an Iceberg snapshot id: epoch
-//! `i` is "the `i`-th snapshot on each table's mainline", with the last snapshot
-//! carried forward once a table stops advancing. This keeps positions comparable
-//! across tables, which a raw per-table snapshot id would not be: snapshot ids are
-//! arbitrary, not monotone, and not comparable between tables.
-//!
-//! The epoch → snapshot-id map is built by walking **backwards from the current
-//! snapshot along `parent_snapshot_id()` and reversing**. It must not come from
-//! `TableMetadata::snapshots()`, which is a `HashMap` — its iteration order is
-//! random per process, so `current_position()` would point at an arbitrary
-//! historical snapshot and `changes` could compute "old minus new".
-//!
-//! ## Lifetime
-//!
-//! The timeline is read **once, in [`IcebergSource::new`]**. The feed does not
-//! observe commits made after construction: reusing one source after the table
-//! advances silently returns zero increments. Treat a source as belonging to a
-//! single build — rebuild it (from a freshly loaded [`Table`]) after loading a new
-//! snapshot.
-//!
-//! Because positions are indexes, they are only meaningful for the timeline they
-//! were produced from: expiring old snapshots shifts every index. Persist
-//! watermarks as **snapshot ids**, not epoch numbers — on restart, rebuild the
-//! chain and resolve the id; if it is no longer on the chain (expired or
-//! rolled back), reload the view in full rather than shifting the index.
-//!
-//! ## Schema changes
-//!
-//! Rows are compared **positionally**, so a view is only maintainable while the
-//! top-level field-id layout is stable. If the field ids (in order) differ between
-//! the two endpoints, this feed panics rather than emit a plausible-looking but
-//! misaligned delta; rebuild the view instead.
-//!
-//! ## Supported column types
-//!
-//! `Value` has only `Null`, `Int(i64)` and `Str`, so the mapping is:
-//!
-//! | Arrow type | `Value` |
-//! |---|---|
-//! | Boolean | `Int(0/1)` |
-//! | Int8/16/32/64, UInt8/16/32, Date32/64, Time32/64, Timestamp | `Int` (raw value; the time unit is the Arrow type's) |
-//! | Float32/64, Decimal128, Utf8/LargeUtf8/Utf8View, Binary/LargeBinary/FixedSizeBinary | `Str` (decimals exact, floats shortest-round-trip, binary hex) |
-//!
-//! UInt64, Decimal256 and nested types (List/Struct/Map) are rejected **before
-//! scanning**, naming the column. They are not silently coerced.
-//!
-//! ## Blocking
-//!
-//! [`DeltaSource`] is synchronous and Iceberg's scan API is asynchronous, so this
-//! adapter owns a Tokio runtime and drives each scan to completion inside the
-//! call. Calling a method from inside another Tokio runtime panics —
-//! `block_on` cannot nest. Treat that as known debt: the honest fix is an async
-//! `DeltaSource`, which is a trait-wide change rather than a local one.
-//!
-//! ### The table's runtime, not ours, runs the reads
-//!
-//! A [`Table`] captures the Tokio runtime that was current when it was
-//! **constructed** — `StaticTable::from_metadata_file` calls
-//! `iceberg::Runtime::try_current()` and keeps the handle — and the Arrow
-//! reader spawns its file-read tasks on that captured runtime. The blocking
-//! runtime this adapter creates cannot drive them. So if the table was built on
-//! a `current_thread` runtime whose driver thread is the one now blocked here,
-//! the scan never finishes: no error, no panic, just a hang (a debugger shows
-//! the adapter parked in `epoll_wait` waiting for tasks that nothing polls).
-//!
-//! Construct the table on a multi-threaded runtime — `#[tokio::test(flavor =
-//! "multi_thread")]`, or
-//! `tokio::runtime::Builder::new_multi_thread().enable_all().build()` — and keep
-//! that runtime alive for as long as any source built from the table. This
-//! cannot be validated in [`IcebergSource::new`]: it receives an already-built
-//! table and has no way to inspect the runtime captured inside it.
+//! Async Iceberg observation followed by synchronous evaluation over pinned snapshots.
+//! No adapter-owned runtime or nested block_on is used. Construct tables and await reads
+//! on a live application runtime. Durable recovery uses UUID/snapshot identities;
+//! logical positions are snapshot sequence numbers, never rebuilt history indices.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
 use futures::TryStreamExt;
@@ -104,8 +15,9 @@ use iceberg::scan::ArrowRecordBatchStream;
 use iceberg::spec::{Schema, SchemaRef, TableMetadata};
 use iceberg::table::Table;
 
+use crate::cdc::{fingerprint, SourceCheckpoint};
 use crate::change::{Capabilities, Multiset, Position, Row, TableId, Value};
-use crate::source::DeltaSource;
+use crate::source::{DeltaSource, SourceError};
 
 /// What went wrong while reading Iceberg.
 #[derive(Debug)]
@@ -116,6 +28,10 @@ pub enum IcebergSourceError {
     UnsupportedType { column: String, data_type: String },
     /// A snapshot the timeline refers to is gone (expired from metadata).
     MissingSnapshot { snapshot_id: i64 },
+    /// Checkpoint is incompatible with this observation.
+    InvalidCheckpoint,
+    /// Checked row arithmetic or metadata encoding failed.
+    Source(SourceError),
 }
 
 impl std::fmt::Display for IcebergSourceError {
@@ -126,8 +42,16 @@ impl std::fmt::Display for IcebergSourceError {
                 write!(f, "column `{}` has unsupported type {}", column, data_type)
             }
             IcebergSourceError::MissingSnapshot { snapshot_id } => {
-                write!(f, "snapshot {} is no longer in the table metadata", snapshot_id)
+                write!(
+                    f,
+                    "snapshot {} is no longer in the table metadata",
+                    snapshot_id
+                )
             }
+            IcebergSourceError::InvalidCheckpoint => {
+                write!(f, "checkpoint is not on this source's mainline")
+            }
+            IcebergSourceError::Source(e) => write!(f, "{e}"),
         }
     }
 }
@@ -140,170 +64,190 @@ impl From<iceberg::Error> for IcebergSourceError {
     }
 }
 
-/// A change feed over one or more Iceberg tables, driven by snapshot history.
+/// A fully materialized, pinned observation over a single Iceberg source.
+/// Async IO finishes before this object is passed to the reference evaluator.
 pub struct IcebergSource {
-    runtime: tokio::runtime::Runtime,
-    tables: BTreeMap<TableId, Arc<Table>>,
-    /// `epochs[i]` is the snapshot id of each table at logical position `i + 1`.
-    /// A table absent from an epoch has no snapshot yet (an empty relation).
-    epochs: Vec<BTreeMap<TableId, i64>>,
-    cross_table_position: bool,
+    table_id: TableId,
+    current: Position,
+    snapshots: BTreeMap<Position, (FieldLayout, Multiset)>,
+    checkpoint: SourceCheckpoint,
 }
 
 impl IcebergSource {
-    /// Build a feed from tables that are already resolved (via a catalog, or
-    /// [`iceberg::table::StaticTable`] when the metadata file is known).
-    ///
-    /// Epochs line up the tables' mainlines: epoch `i` is the `i`-th snapshot of
-    /// each table. A table with fewer snapshots keeps its last one, so positions
-    /// stay monotone per table and comparable across them.
-    ///
-    /// The timeline is captured here and does not follow later commits — see the
-    /// module docs.
-    pub fn new(tables: Vec<(TableId, Table)>) -> Result<Self, IcebergSourceError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| iceberg::Error::new(iceberg::ErrorKind::Unexpected, e.to_string()))?;
-
-        // Snapshot ids on each table's mainline, in commit order.
-        let mut timelines: BTreeMap<TableId, Vec<i64>> = BTreeMap::new();
-        let mut by_id: BTreeMap<TableId, Arc<Table>> = BTreeMap::new();
-        for (id, table) in tables {
-            timelines.insert(id, mainline_snapshot_ids(table.metadata()));
-            by_id.insert(id, Arc::new(table));
+    /// Materialize retained snapshots for compatibility with arbitrary historical LOAD.
+    /// Multi-table observation is rejected until a consistency protocol is available.
+    pub async fn new(tables: Vec<(TableId, Table)>) -> Result<Self, IcebergSourceError> {
+        if tables.len() != 1 {
+            return Err(IcebergSourceError::InvalidCheckpoint);
         }
+        let (table_id, table) = tables
+            .into_iter()
+            .next()
+            .ok_or(IcebergSourceError::InvalidCheckpoint)?;
+        let mut source = Self::observe(table_id, &table, None).await?;
+        for id in mainline_snapshot_ids(table.metadata()) {
+            let seq = table
+                .metadata()
+                .snapshot_by_id(id)
+                .ok_or(IcebergSourceError::MissingSnapshot { snapshot_id: id })?
+                .sequence_number();
+            let at = u64::try_from(seq).map_err(|_| IcebergSourceError::InvalidCheckpoint)?;
+            source
+                .snapshots
+                .insert(at, read_snapshot(&table, id).await?);
+        }
+        Ok(source)
+    }
 
-        let depth = timelines.values().map(|v| v.len()).max().unwrap_or(0);
-        let mut epochs = Vec::with_capacity(depth);
-        for i in 0..depth {
-            let mut at = BTreeMap::new();
-            for (id, ids) in &timelines {
-                if ids.is_empty() {
-                    continue;
-                }
-                // Carry the last snapshot forward.
-                let snapshot_id = ids[i.min(ids.len() - 1)];
-                at.insert(*id, snapshot_id);
+    /// Observe latest metadata already loaded by the caller, pinning the checkpoint and head.
+    /// A refresh must call this again with a freshly loaded table to see later commits.
+    pub async fn observe(
+        table_id: TableId,
+        table: &Table,
+        previous: Option<&SourceCheckpoint>,
+    ) -> Result<Self, IcebergSourceError> {
+        check_supported(table.metadata().current_schema())?;
+        let head = checkpoint(table, table.metadata().current_snapshot_id())?;
+        let current = u64::try_from(head.sequence_number.unwrap_or(0))
+            .map_err(|_| IcebergSourceError::InvalidCheckpoint)?;
+        if head.snapshot_id.is_some() && current == 0 {
+            return Err(IcebergSourceError::InvalidCheckpoint);
+        }
+        let mut snapshots = BTreeMap::new();
+        if let Some(old) = previous {
+            if old.table_id != head.table_id
+                || old.reference != "main"
+                || old.schema_fingerprint != head.schema_fingerprint
+            {
+                return Err(IcebergSourceError::InvalidCheckpoint);
             }
-            epochs.push(at);
+            let expected = checkpoint(table, old.snapshot_id)?;
+            if &expected != old {
+                return Err(IcebergSourceError::InvalidCheckpoint);
+            }
+            if let Some(id) = old.snapshot_id {
+                if !mainline_snapshot_ids(table.metadata()).contains(&id) {
+                    return Err(IcebergSourceError::InvalidCheckpoint);
+                }
+                let seq = u64::try_from(
+                    old.sequence_number
+                        .ok_or(IcebergSourceError::InvalidCheckpoint)?,
+                )
+                .map_err(|_| IcebergSourceError::InvalidCheckpoint)?;
+                snapshots.insert(seq, read_snapshot(table, id).await?);
+            }
         }
-
+        if let Some(id) = head.snapshot_id {
+            snapshots.insert(current, read_snapshot(table, id).await?);
+        }
+        let layout = field_layout(table.metadata().current_schema());
+        snapshots.insert(0, (layout, Multiset::new()));
         Ok(Self {
-            runtime,
-            tables: by_id,
-            epochs,
-            cross_table_position: false,
+            table_id,
+            current,
+            snapshots,
+            checkpoint: head,
         })
     }
 
-    /// Declare whether the epoch schedule is assumed to be consistent across
-    /// tables, which unlocks multi-table views. The default is `false`: lining up
-    /// snapshots by index does not by itself prove they were committed in one
-    /// transaction, and a torn read would be a silent error.
-    pub fn with_cross_table_position(mut self, assume_consistent: bool) -> Self {
-        self.cross_table_position = assume_consistent;
-        self
-    }
-
-    /// The relation of `table` at logical position, plus the field-id layout used.
-    ///
-    /// `None` for the layout means "no snapshot at this position" (position 0, or
-    /// a table that has never been written); the relation is then empty.
-    fn scan_at(&self, table: TableId, position: Position) -> (Option<Vec<i32>>, Multiset) {
-        if position == 0 {
-            return (None, Multiset::new());
-        }
-        let idx = (position - 1) as usize;
-        assert!(
-            idx < self.epochs.len(),
-            "position {} is beyond the feed's current position {}",
-            position,
-            self.epochs.len()
-        );
-        let Some(&snapshot_id) = self.epochs[idx].get(&table) else {
-            return (None, Multiset::new());
-        };
-        let Some(table_ref) = self.tables.get(&table) else {
-            panic!("table {} is not part of this feed", table);
-        };
-        match self.scan_snapshot(table_ref, snapshot_id) {
-            Ok(v) => v,
-            // A read failure must not look like "no rows" — that would silently
-            // retract the whole table from the view. Panicking is the honest
-            // option until the trait can report errors.
-            Err(e) => panic!(
-                "iceberg read failed for table {} at snapshot {}: {}",
-                table, snapshot_id, e
-            ),
-        }
-    }
-
-    fn scan_snapshot(
-        &self,
-        table: &Table,
-        snapshot_id: i64,
-    ) -> Result<(Option<Vec<i32>>, Multiset), IcebergSourceError> {
-        let schema = snapshot_schema(table, snapshot_id)?;
-        // Reject unsupported columns before touching data, with real names.
-        check_supported(&schema)?;
-        let layout = field_layout(&schema);
-
-        let scan = table.scan().snapshot_id(snapshot_id).build()?;
-        let stream: ArrowRecordBatchStream = self.runtime.block_on(scan.to_arrow())?;
-        let batches = self.runtime.block_on(stream.try_collect::<Vec<_>>())?;
-        let mut out = Multiset::new();
-        for batch in &batches {
-            batch_into(&mut out, batch)?;
-        }
-        Ok((Some(layout), out))
+    /// Durable input identity for the observed head.
+    pub fn checkpoint(&self) -> &SourceCheckpoint {
+        &self.checkpoint
     }
 }
 
 impl DeltaSource for IcebergSource {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            cross_table_position: self.cross_table_position,
-            ..Capabilities::snapshot_diff()
-        }
+        Capabilities::snapshot_diff()
     }
-
     fn current_position(&self) -> Position {
-        self.epochs.len() as Position
+        self.current
     }
-
-    fn changes(&self, table: TableId, from: Position, to: Position) -> Multiset {
-        debug_assert!(
-            to <= self.current_position(),
-            "change request past the feed's current position"
-        );
-        if from >= to {
-            return Multiset::new();
+    fn changes(
+        &self,
+        table: TableId,
+        from: Position,
+        to: Position,
+    ) -> Result<Multiset, SourceError> {
+        if from > to || to > self.current {
+            return Err(SourceError::InvalidPosition);
         }
-        let (after_layout, after) = self.scan_at(table, to);
-        let (before_layout, before) = self.scan_at(table, from);
-
-        // Rows are compared positionally. A changed field-id layout (add/drop/
-        // reorder) makes that comparison meaningless, and a silent misalignment is
-        // worse than refusing. Rebuild the view instead.
-        if let (Some(after), Some(before)) = (&after_layout, &before_layout) {
-            if after != before {
-                panic!(
-                    "iceberg schema layout changed for table {} between position {} and {} \
-                     ({:?} -> {:?}); this snapshot-diff feed compares rows positionally, so \
-                     rebuild the view instead of maintaining it",
-                    table, from, to, before, after
-                );
-            }
+        let before = self.snapshot_at(table, from)?;
+        let after = self.snapshot_at(table, to)?;
+        let a = &self
+            .snapshots
+            .get(&from)
+            .ok_or(SourceError::MissingSnapshot)?
+            .0;
+        let b = &self
+            .snapshots
+            .get(&to)
+            .ok_or(SourceError::MissingSnapshot)?
+            .0;
+        if a != b {
+            return Err(SourceError::IncompatibleSchema);
         }
-
-        after.difference(&before)
+        after
+            .try_difference(&before)
+            .map_err(|_| SourceError::Overflow)
     }
-
-    fn snapshot(&self, table: TableId) -> Multiset {
-        let (_, contents) = self.scan_at(table, self.current_position());
-        contents
+    fn snapshot_at(&self, table: TableId, position: Position) -> Result<Multiset, SourceError> {
+        if table != self.table_id || position > self.current {
+            return Err(SourceError::InvalidPosition);
+        }
+        self.snapshots
+            .get(&position)
+            .map(|(_, m)| m.clone())
+            .ok_or(SourceError::MissingSnapshot)
     }
+}
+
+/// Fingerprint and stable identity of an exact source state, without scanning rows.
+pub fn checkpoint(
+    table: &Table,
+    snapshot_id: Option<i64>,
+) -> Result<SourceCheckpoint, IcebergSourceError> {
+    let schema = match snapshot_id {
+        Some(id) => snapshot_schema(table, id)?,
+        None => table.current_schema_ref(),
+    };
+    let schema_json = serde_json::to_value(schema.as_ref())
+        .map_err(|e| IcebergSourceError::Source(SourceError::Storage(e.to_string())))?;
+    let schema_fingerprint = fingerprint(&serde_json::json!(["optd-source-schema/1", schema_json]))
+        .map_err(|e| IcebergSourceError::Source(SourceError::Storage(e.to_string())))?;
+    let sequence_number = match snapshot_id {
+        Some(id) => Some(
+            table
+                .metadata()
+                .snapshot_by_id(id)
+                .ok_or(IcebergSourceError::MissingSnapshot { snapshot_id: id })?
+                .sequence_number(),
+        ),
+        None => None,
+    };
+    Ok(SourceCheckpoint {
+        table_id: table.metadata().uuid().to_string(),
+        reference: "main".into(),
+        snapshot_id,
+        sequence_number,
+        schema_fingerprint,
+    })
+}
+
+async fn read_snapshot(
+    table: &Table,
+    id: i64,
+) -> Result<(FieldLayout, Multiset), IcebergSourceError> {
+    let schema = snapshot_schema(table, id)?;
+    check_supported(&schema)?;
+    let scan = table.scan().snapshot_id(id).build()?;
+    let stream: ArrowRecordBatchStream = scan.to_arrow().await?;
+    let batches = stream.try_collect::<Vec<_>>().await?;
+    let mut out = Multiset::new();
+    for batch in &batches {
+        batch_into(&mut out, batch)?;
+    }
+    Ok((field_layout(&schema), out))
 }
 
 /// Snapshot ids on the table's mainline, oldest first.
@@ -313,7 +257,7 @@ impl DeltaSource for IcebergSource {
 /// snapshot gives commit order and excludes branch snapshots (a branch tip is not
 /// an ancestor of `current_snapshot_id()`). If an ancestor has been expired, the
 /// walk stops there — the surviving suffix is still correctly ordered.
-fn mainline_snapshot_ids(metadata: &TableMetadata) -> Vec<i64> {
+pub(crate) fn mainline_snapshot_ids(metadata: &TableMetadata) -> Vec<i64> {
     let mut ids = Vec::new();
     let mut current = metadata.current_snapshot_id();
     while let Some(id) = current {
@@ -335,10 +279,16 @@ fn snapshot_schema(table: &Table, snapshot_id: i64) -> Result<SchemaRef, Iceberg
     Ok(snapshot.schema(metadata)?)
 }
 
-/// The top-level field ids, in order. Two endpoints with equal layouts can be
-/// compared row-by-row positionally.
-fn field_layout(schema: &Schema) -> Vec<i32> {
-    schema.as_struct().fields().iter().map(|f| f.id).collect()
+/// Complete positional layout: stable ids alone do not catch a changed type or nullability.
+type FieldLayout = Vec<(i32, String, Box<iceberg::spec::Type>, bool)>;
+
+fn field_layout(schema: &Schema) -> FieldLayout {
+    schema
+        .as_struct()
+        .fields()
+        .iter()
+        .map(|f| (f.id, f.name.clone(), f.field_type.clone(), f.required))
+        .collect()
 }
 
 /// Reject columns whose Arrow type this adapter cannot map, before reading data.
@@ -359,8 +309,7 @@ fn is_supported(ty: &ArrowDataType) -> bool {
     use ArrowDataType::*;
     matches!(
         ty,
-        Null
-            | Boolean
+        Null | Boolean
             | Int8
             | Int16
             | Int32
@@ -392,11 +341,11 @@ fn batch_into(
 ) -> Result<(), IcebergSourceError> {
     use arrow::array::{Array, AsArray};
     use arrow::datatypes::{
-        DataType, Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int8Type,
-        Int16Type, Int32Type, Int64Type, Time32MillisecondType, Time32SecondType,
+        DataType, Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int16Type,
+        Int32Type, Int64Type, Int8Type, Time32MillisecondType, Time32SecondType,
         Time64MicrosecondType, Time64NanosecondType, TimeUnit, TimestampMicrosecondType,
-        TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt8Type,
-        UInt16Type, UInt32Type,
+        TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, UInt16Type,
+        UInt32Type, UInt8Type,
     };
 
     let columns = batch.columns();
@@ -470,10 +419,7 @@ fn batch_into(
                     }
                     other => {
                         return Err(IcebergSourceError::UnsupportedType {
-                            column: names
-                                .get(i)
-                                .cloned()
-                                .unwrap_or_else(|| format!("#{}", i)),
+                            column: names.get(i).cloned().unwrap_or_else(|| format!("#{}", i)),
                             data_type: format!("{:?}", other),
                         })
                     }
@@ -484,7 +430,9 @@ fn batch_into(
         rows.push(row);
     }
     for row in rows {
-        multiset.add_row(row, 1);
+        multiset
+            .try_add_row(row, 1)
+            .map_err(|_| IcebergSourceError::Source(SourceError::Overflow))?;
     }
     Ok(())
 }
@@ -560,6 +508,35 @@ mod tests {
         assert_eq!(
             mainline_snapshot_ids(&metadata).last().copied(),
             metadata.current_snapshot_id()
+        );
+    }
+}
+
+#[cfg(test)]
+mod layout_regressions {
+    use super::*;
+    use iceberg::spec::{NestedField, PrimitiveType, Type};
+    use std::sync::Arc;
+    #[test]
+    fn equal_field_ids_do_not_hide_changed_type_or_nullability() {
+        let schema = |typ, required| {
+            Schema::builder()
+                .with_fields(vec![Arc::new(if required {
+                    NestedField::required(1, "x", Type::Primitive(typ))
+                } else {
+                    NestedField::optional(1, "x", Type::Primitive(typ))
+                })])
+                .build()
+                .unwrap()
+        };
+        let before = schema(PrimitiveType::Long, true);
+        assert_ne!(
+            field_layout(&before),
+            field_layout(&schema(PrimitiveType::String, true))
+        );
+        assert_ne!(
+            field_layout(&before),
+            field_layout(&schema(PrimitiveType::Long, false))
         );
     }
 }

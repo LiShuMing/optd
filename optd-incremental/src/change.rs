@@ -26,7 +26,9 @@ pub type TableId = u32;
 
 /// A single column value. Deliberately small: the framework is about the
 /// *algebra*, not about a type system.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(
+    Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
+)]
 pub enum Value {
     Null,
     Int(i64),
@@ -54,7 +56,59 @@ pub struct Multiset {
     entries: BTreeMap<Row, i64>,
 }
 
+/// Arithmetic that would corrupt signed multiplicities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArithmeticError;
+
+impl fmt::Display for ArithmeticError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "signed multiset arithmetic overflow")
+    }
+}
+impl std::error::Error for ArithmeticError {}
+
 impl Multiset {
+    /// Add a weight without wrapping or mutating on overflow.
+    pub fn try_add_row(&mut self, row: Row, weight: i64) -> Result<(), ArithmeticError> {
+        let next = self
+            .entries
+            .get(&row)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(weight)
+            .filter(|n| *n != i64::MIN)
+            .ok_or(ArithmeticError)?;
+        if next == 0 {
+            self.entries.remove(&row);
+        } else {
+            self.entries.insert(row, next);
+        }
+        Ok(())
+    }
+
+    /// Checked union, leaving both inputs unchanged on failure.
+    pub fn try_union(&self, other: &Multiset) -> Result<Self, ArithmeticError> {
+        let mut out = self.clone();
+        for (row, weight) in other.iter() {
+            out.try_add_row(row.clone(), *weight)?;
+        }
+        Ok(out)
+    }
+
+    /// Checked weight negation.
+    pub fn try_negate(&self) -> Result<Self, ArithmeticError> {
+        let mut out = Self::new();
+        for (row, weight) in self.iter() {
+            out.try_add_row(row.clone(), weight.checked_neg().ok_or(ArithmeticError)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Checked endpoint difference.
+    pub fn try_difference(&self, other: &Multiset) -> Result<Self, ArithmeticError> {
+        self.try_union(&other.try_negate()?)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

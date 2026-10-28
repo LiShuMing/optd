@@ -32,7 +32,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn below(&mut self, n: u64) -> u64 {
@@ -45,7 +48,12 @@ impl Lcg {
 /// Deletes are what separate a real delta rule from an insert-only one, so the
 /// generator must produce them, and must sometimes delete a row that is
 /// currently present rather than always a fresh one.
-fn random_batch(src: &mut InMemorySource, rng: &mut Lcg, live_a: &mut Vec<Row>, live_b: &mut Vec<Row>) {
+fn random_batch(
+    src: &mut InMemorySource,
+    rng: &mut Lcg,
+    live_a: &mut Vec<Row>,
+    live_b: &mut Vec<Row>,
+) {
     let mut batch: Vec<(u32, Row, i64)> = Vec::new();
 
     for _ in 0..rng.below(4) + 1 {
@@ -122,7 +130,13 @@ fn run_differential(name: &str, plan: IncPlanNode, batches: usize) {
 
 #[test]
 fn projection_and_filter_agree_with_recompute() {
-    let plan = project(filter(scan(T_A), Expr::Gt(Box::new(Expr::Col(1)), Box::new(Expr::Lit(Value::Int(1))))), vec![0]);
+    let plan = project(
+        filter(
+            scan(T_A),
+            Expr::Gt(Box::new(Expr::Col(1)), Box::new(Expr::Lit(Value::Int(1)))),
+        ),
+        vec![0],
+    );
     run_differential("filter+project", plan, 40);
 }
 
@@ -157,7 +171,10 @@ fn aggregate_agrees_with_recompute() {
 #[test]
 fn filter_then_aggregate_agrees_with_recompute() {
     let plan = agg(
-        filter(scan(T_A), Expr::Gt(Box::new(Expr::Col(1)), Box::new(Expr::Lit(Value::Int(0))))),
+        filter(
+            scan(T_A),
+            Expr::Gt(Box::new(Expr::Col(1)), Box::new(Expr::Lit(Value::Int(0)))),
+        ),
         vec![0],
         vec![AggKind::Count, AggKind::Sum(1)],
     );
@@ -204,5 +221,8 @@ fn an_unsupported_operator_is_refused() {
     // A view defined in terms of itself is not representable; the point is that
     // the failure is an error and not a wrong result.
     let err = View::load(stored_view(), &src, vec![T_A]).unwrap_err();
-    assert!(matches!(err, optd_incremental::RefreshError::CannotMaintain(_)));
+    assert!(matches!(
+        err,
+        optd_incremental::RefreshError::CannotMaintain(_)
+    ));
 }

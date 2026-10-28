@@ -27,21 +27,28 @@
 //! `Sort`/`Limit` and subqueries return [`rules::RewriteError`] and are expected
 //! to be rebuilt, which is the documented policy rather than a gap.
 
+pub mod cdc;
 pub mod change;
+#[cfg(feature = "iceberg")]
+pub mod consumer;
 pub mod engine;
+#[cfg(feature = "iceberg")]
+pub mod iceberg_sink;
 #[cfg(feature = "iceberg")]
 pub mod iceberg_source;
 pub mod interp;
+#[cfg(feature = "iceberg")]
+pub mod local_catalog;
 pub mod plan;
 pub mod rules;
 pub mod source;
 
 pub use change::{Capabilities, Multiset, Position, Row, TableId, Value};
-pub use engine::{RefreshError, View};
+pub use engine::{PreparedRefresh, RefreshError, View};
 #[cfg(feature = "iceberg")]
 pub use iceberg_source::{IcebergSource, IcebergSourceError};
 pub use plan::{
     agg, delta, empty, filter, join, negate, project, scan, stored_view, union, AggKind, Expr,
     IncNodeType, IncPlanNode,
 };
-pub use source::{DeltaSource, InMemorySource};
+pub use source::{DeltaSource, InMemorySource, SourceError};

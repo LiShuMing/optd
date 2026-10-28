@@ -17,6 +17,7 @@
 //!    position rather than in a half-applied state.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::change::{Capabilities, Multiset, Position, TableId};
 use crate::interp::{eval, EvalContext, Ranges};
@@ -38,6 +39,10 @@ pub enum RefreshError {
     TableListMismatch { missing: Vec<TableId> },
     /// The plan is not evaluable.
     Eval(String),
+    /// Prepared refresh belongs to another view or no longer follows this state.
+    StaleCandidate,
+    /// A requested source position moved backwards.
+    InvalidPosition,
 }
 
 impl std::fmt::Display for RefreshError {
@@ -54,12 +59,53 @@ impl std::fmt::Display for RefreshError {
                 missing
             ),
             RefreshError::Eval(m) => write!(f, "evaluation failed: {}", m),
+            RefreshError::StaleCandidate => {
+                write!(f, "prepared refresh is stale or belongs to another view")
+            }
+            RefreshError::InvalidPosition => {
+                write!(f, "source position moved backwards or is out of range")
+            }
         }
+    }
+}
+
+impl std::error::Error for RefreshError {}
+
+static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
+
+/// An immutable refresh result; the driver commits output before acknowledging it.
+#[derive(Debug)]
+pub struct PreparedRefresh {
+    owner: u64,
+    revision: u64,
+    before: BTreeMap<TableId, Position>,
+    after: BTreeMap<TableId, Position>,
+    contents: Multiset,
+    delta: Multiset,
+}
+impl PreparedRefresh {
+    /// Changes to publish, including an empty net change for a nonempty range.
+    pub fn delta(&self) -> &Multiset {
+        &self.delta
+    }
+    /// Pinned predecessor positions.
+    pub fn from(&self) -> &BTreeMap<TableId, Position> {
+        &self.before
+    }
+    /// Pinned target positions.
+    pub fn to(&self) -> &BTreeMap<TableId, Position> {
+        &self.after
+    }
+    /// Candidate full contents, useful for independent validation.
+    pub fn contents(&self) -> &Multiset {
+        &self.contents
     }
 }
 
 /// A maintained view.
 pub struct View {
+    owner: u64,
+    revision: u64,
     /// The view definition, with no change marker.
     plan: IncPlanNode,
     /// `Δ(view)`, rewritten once at LOAD — the plan shape does not change between
@@ -80,6 +126,19 @@ impl View {
         source: &dyn DeltaSource,
         tables: Vec<TableId>,
     ) -> Result<Self, RefreshError> {
+        Self::load_at(plan, source, tables, source.current_position())
+    }
+
+    /// LOAD at an exact retained snapshot, never at current state with an old watermark.
+    pub fn load_at(
+        plan: IncPlanNode,
+        source: &dyn DeltaSource,
+        tables: Vec<TableId>,
+        start: Position,
+    ) -> Result<Self, RefreshError> {
+        if start > source.current_position() {
+            return Err(RefreshError::InvalidPosition);
+        }
         check_capabilities(&plan, &tables, source.capabilities())?;
 
         // The aggregate rule merges into `StoredView`, which is *this view's*
@@ -110,10 +169,8 @@ impl View {
 
         let tables = plan_tables;
 
-        let delta_plan = rewrite(delta(plan.clone()))
-            .map_err(RefreshError::CannotMaintain)?;
+        let delta_plan = rewrite(delta(plan.clone())).map_err(RefreshError::CannotMaintain)?;
 
-        let start = source.current_position();
         let watermarks = tables.iter().map(|t| (*t, start)).collect();
 
         // The initial contents are the plan evaluated with **no changes** in
@@ -121,12 +178,18 @@ impl View {
         let empty_ranges: Ranges = BTreeMap::new();
         let ctx = EvalContext {
             source,
+            position: start,
             ranges: &empty_ranges,
             stored_view: &Multiset::new(),
         };
         let contents = eval(&plan, &ctx).map_err(RefreshError::Eval)?;
 
+        if !contents.is_valid_relation() {
+            return Err(RefreshError::Eval("negative row count at LOAD".into()));
+        }
         Ok(Self {
+            owner: NEXT_VIEW.fetch_add(1, Ordering::Relaxed),
+            revision: 0,
             plan,
             delta_plan,
             tables,
@@ -139,10 +202,25 @@ impl View {
     ///
     /// Returns the delta applied, or `None` when there was nothing to do.
     pub fn refresh(&mut self, source: &dyn DeltaSource) -> Result<Option<Multiset>, RefreshError> {
+        let Some(candidate) = self.prepare_refresh(source)? else {
+            return Ok(None);
+        };
+        self.acknowledge(&candidate)?;
+        Ok(Some(candidate.delta))
+    }
+
+    /// Compute a refresh without changing contents or watermarks.
+    pub fn prepare_refresh(
+        &self,
+        source: &dyn DeltaSource,
+    ) -> Result<Option<PreparedRefresh>, RefreshError> {
         let now = source.current_position();
         let mut ranges: Ranges = BTreeMap::new();
         for t in &self.tables {
-            let from = *self.watermarks.get(t).unwrap_or(&0);
+            let from = self.watermarks[t];
+            if now < from {
+                return Err(RefreshError::InvalidPosition);
+            }
             if now > from {
                 ranges.insert(*t, (from, now));
             }
@@ -150,44 +228,58 @@ impl View {
         if ranges.is_empty() {
             return Ok(None);
         }
-
-        // Guard: a marker left unresolved means the plan is not maintainable.
         if has_unresolved_delta(&self.delta_plan) {
             return Err(RefreshError::CannotMaintain(RewriteError::Unresolved(
                 "marker not pushed to a scan".into(),
             )));
         }
-
         let ctx = EvalContext {
             source,
+            position: now,
             ranges: &ranges,
             stored_view: &self.contents,
         };
-        let d = eval(&self.delta_plan, &ctx).map_err(RefreshError::Eval)?;
-
-        // Validate before committing. Assigning first and checking after would
-        // leave `contents` mutated while the watermark still points at the old
-        // position: the failed range would be replayed onto the corrupt state and
-        // the view could never recover (finding B).
-        let next = self.contents.union(&d);
-        if !next.is_valid_relation() {
+        let delta = eval(&self.delta_plan, &ctx).map_err(RefreshError::Eval)?;
+        let contents = self
+            .contents
+            .try_union(&delta)
+            .map_err(|e| RefreshError::Eval(e.to_string()))?;
+        if !contents.is_valid_relation() {
             return Err(RefreshError::Eval(
                 "incremental maintenance produced a negative row count".into(),
             ));
         }
-        // Commit: contents, then watermarks. The window between the two is not
-        // recoverable by replaying: a delta is not idempotent, so re-applying the
-        // same range would apply it twice (aggregates show it first). Recovery
-        // from a crash at this point is a fresh LOAD, not a hot resume.
-        //
-        // Both statements are plain assignments with no I/O in between, so the
-        // window is a panic-only one; a process crash leaves neither durable and
-        // is handled by the same rule.
-        self.contents = next;
-        for t in &self.tables {
-            self.watermarks.insert(*t, now);
+        self.revision
+            .checked_add(1)
+            .ok_or(RefreshError::StaleCandidate)?;
+        Ok(Some(PreparedRefresh {
+            owner: self.owner,
+            revision: self.revision,
+            before: self.watermarks.clone(),
+            after: self.tables.iter().map(|t| (*t, now)).collect(),
+            contents,
+            delta,
+        }))
+    }
+
+    /// Acknowledge a durably committed candidate. Returns false if already acknowledged.
+    pub fn acknowledge(&mut self, candidate: &PreparedRefresh) -> Result<bool, RefreshError> {
+        if candidate.owner != self.owner {
+            return Err(RefreshError::StaleCandidate);
         }
-        Ok(Some(d))
+        if self.revision == candidate.revision + 1
+            && self.watermarks == candidate.after
+            && self.contents == candidate.contents
+        {
+            return Ok(false);
+        }
+        if self.revision != candidate.revision || self.watermarks != candidate.before {
+            return Err(RefreshError::StaleCandidate);
+        }
+        self.contents = candidate.contents.clone();
+        self.watermarks = candidate.after.clone();
+        self.revision += 1;
+        Ok(true)
     }
 
     pub fn contents(&self) -> &Multiset {
@@ -205,13 +297,13 @@ impl View {
         let empty_ranges: Ranges = BTreeMap::new();
         let ctx = EvalContext {
             source,
+            position: source.current_position(),
             ranges: &empty_ranges,
             stored_view: &Multiset::new(),
         };
         eval(&self.plan, &ctx).map_err(RefreshError::Eval)
     }
 }
-
 
 impl std::fmt::Debug for View {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -235,7 +327,9 @@ fn check_capabilities(
         return Err(RefreshError::InsufficientCapabilities { missing: "ordered" });
     }
     if !caps.gap_free {
-        return Err(RefreshError::InsufficientCapabilities { missing: "gap_free" });
+        return Err(RefreshError::InsufficientCapabilities {
+            missing: "gap_free",
+        });
     }
     // A view over any table that can be mutated needs deletes to be representable.
     // Assuming "nothing is deleted" is exactly the silent-staleness trap of a

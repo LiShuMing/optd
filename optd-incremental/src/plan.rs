@@ -78,7 +78,10 @@ pub enum IncNodeType {
     /// aggregate's intermediate state, not a finalised value. Storing state rather
     /// than the value is what lets a later batch merge into it
     /// (`docs/src/incremental/agg.md` §1).
-    Agg { groups: Vec<ColRef>, aggs: Vec<AggKind> },
+    Agg {
+        groups: Vec<ColRef>,
+        aggs: Vec<AggKind>,
+    },
     /// Flip every weight of the input. This is what makes
     /// `Σ(before) = Σ(after) ⊖ Δ` expressible as a plan, so no versioned storage
     /// is needed for the join rule's snapshot side.
@@ -86,7 +89,10 @@ pub enum IncNodeType {
     /// Merge a partial aggregate of a delta into the stored aggregate state:
     /// children are `[partial, stored]`. Groups whose count reaches zero are
     /// dropped (a group that sums to zero is *not* empty — see `agg.md` §1).
-    MergeAgg { groups: Vec<ColRef>, aggs: Vec<AggKind> },
+    MergeAgg {
+        groups: Vec<ColRef>,
+        aggs: Vec<AggKind>,
+    },
     /// The **change marker**: `Δ(child)` is the change to `child`, not its value.
     Delta,
     /// The view's own current contents, readable as an input relation.
@@ -131,7 +137,7 @@ fn node(typ: IncNodeType, children: Vec<IncPlanNode>) -> IncPlanNode {
         typ,
         children: children
             .into_iter()
-            .map(|c| PlanNodeOrGroup::PlanNode(c))
+            .map(PlanNodeOrGroup::PlanNode)
             .collect(),
         predicates: vec![],
     })
@@ -147,7 +153,7 @@ fn node_with_pred(typ: IncNodeType, children: Vec<IncPlanNode>, pred: Expr) -> I
         typ,
         children: children
             .into_iter()
-            .map(|c| PlanNodeOrGroup::PlanNode(c))
+            .map(PlanNodeOrGroup::PlanNode)
             .collect(),
         predicates: vec![predicate],
     })
@@ -202,12 +208,18 @@ pub fn merge_agg(
     groups: Vec<ColRef>,
     aggs: Vec<AggKind>,
 ) -> IncPlanNode {
-    node(IncNodeType::MergeAgg { groups, aggs }, vec![partial, stored])
+    node(
+        IncNodeType::MergeAgg { groups, aggs },
+        vec![partial, stored],
+    )
 }
 
-
 /// Rebuild a node with new children, preserving its type and predicates.
-pub fn rebuild(typ: IncNodeType, children: Vec<IncPlanNode>, predicates: Vec<ArcPredNode<IncNodeType>>) -> IncPlanNode {
+pub fn rebuild(
+    typ: IncNodeType,
+    children: Vec<IncPlanNode>,
+    predicates: Vec<ArcPredNode<IncNodeType>>,
+) -> IncPlanNode {
     Arc::new(PlanNode {
         typ,
         children: children

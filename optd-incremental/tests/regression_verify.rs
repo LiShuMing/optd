@@ -50,7 +50,12 @@ fn source_with(seed: &[(u32, Row)]) -> InMemorySource {
 /// Finding A. An aggregate below another operator must either be refused at
 /// LOAD or maintained correctly; what it must not do is load and then diverge
 /// from a full recompute.
-fn aggregate_plan_must_be_refused_or_correct(name: &str, plan: IncPlanNode, seed: &[(u32, Row)], extra: (u32, Row)) {
+fn aggregate_plan_must_be_refused_or_correct(
+    name: &str,
+    plan: IncPlanNode,
+    seed: &[(u32, Row)],
+    extra: (u32, Row),
+) {
     let mut src = source_with(seed);
 
     let mut view = match View::load(plan, &src, vec![T_A]) {
@@ -130,7 +135,8 @@ fn a_failed_refresh_must_not_mutate_the_view() {
 
     // Retract a row that is not there: the maintained view would go negative.
     src.apply_batch(vec![(T_A, row(&[9, 9]), -1)]);
-    view.refresh(&src).expect_err("the negative-count guard must fire");
+    view.refresh(&src)
+        .expect_err("the negative-count guard must fire");
 
     assert_eq!(
         view.contents(),
@@ -187,10 +193,7 @@ fn d_sum_over_a_non_integer_column_is_refused() {
     use optd_incremental::plan::AggKind;
 
     let mut input = Multiset::new();
-    input.add_row(
-        vec![Value::Int(1), Value::Str("12.5".into())],
-        1,
-    );
+    input.add_row(vec![Value::Int(1), Value::Str("12.5".into())], 1);
     let err = aggregate(&input, &[0], &[AggKind::Sum(1)]).unwrap_err();
     assert!(err.contains("SUM"), "{err}");
 }

@@ -1,0 +1,35 @@
+name: Incremental CDC
+on:
+  pull_request:
+    paths:
+      - 'optd-incremental/**'
+      - 'optd-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/agent-check.sh'
+      - '.github/workflows/incremental.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'optd-incremental/**'
+      - 'optd-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/agent-check.sh'
+      - '.github/workflows/incremental.yaml'
+permissions:
+  contents: read
+jobs:
+  cdc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt, clippy
+      - name: Protocol, core and real process recovery gates
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/optd-cdc-target
+        run: scripts/agent-check.sh iceberg

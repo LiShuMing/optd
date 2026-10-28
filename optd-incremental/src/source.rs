@@ -16,6 +16,27 @@ use std::collections::BTreeMap;
 
 use crate::change::{Capabilities, Multiset, Position, Row, TableId};
 
+/// A rejected source range or a failed snapshot read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceError {
+    /// Requested range is outside this pinned observation.
+    InvalidPosition,
+    /// The source no longer retains the requested historical state.
+    MissingSnapshot,
+    /// The source or schema does not match the checkpoint.
+    IncompatibleSchema,
+    /// Checked multiset arithmetic failed.
+    Overflow,
+    /// A storage operation failed; the message carries storage context.
+    Storage(String),
+}
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "source: {self:?}")
+    }
+}
+impl std::error::Error for SourceError {}
+
 /// A change feed for one or more base tables.
 pub trait DeltaSource {
     /// What this feed can express. Consult before choosing incremental maintenance.
@@ -26,10 +47,20 @@ pub trait DeltaSource {
 
     /// The changes to `table` in the half-open range `(from, to]`, as a weighted
     /// multiset (`+1` insert, `-1` delete).
-    fn changes(&self, table: TableId, from: Position, to: Position) -> Multiset;
+    fn changes(
+        &self,
+        table: TableId,
+        from: Position,
+        to: Position,
+    ) -> Result<Multiset, SourceError>;
 
     /// The full contents of `table` at the current position.
-    fn snapshot(&self, table: TableId) -> Multiset;
+    fn snapshot(&self, table: TableId) -> Result<Multiset, SourceError> {
+        self.snapshot_at(table, self.current_position())
+    }
+
+    /// Read the exact historical state within this pinned observation.
+    fn snapshot_at(&self, table: TableId, position: Position) -> Result<Multiset, SourceError>;
 }
 
 /// An in-memory source used for tests and for the differential harness.
@@ -97,21 +128,33 @@ impl DeltaSource for InMemorySource {
         self.position
     }
 
-    fn changes(&self, table: TableId, from: Position, to: Position) -> Multiset {
+    fn changes(
+        &self,
+        table: TableId,
+        from: Position,
+        to: Position,
+    ) -> Result<Multiset, SourceError> {
+        if from > to || to > self.position {
+            return Err(SourceError::InvalidPosition);
+        }
         let mut out = Multiset::new();
-        // (from, to] — half-open, so the entry at `from` itself is excluded.
-        for (_pos, batch) in self.log.range((from + 1)..=to) {
+        use std::ops::Bound::{Excluded, Included};
+        for (_, batch) in self.log.range((Excluded(from), Included(to))) {
             for (t, row, weight) in batch {
                 if *t == table {
-                    out.add_row(row.clone(), *weight);
+                    out.try_add_row(row.clone(), *weight)
+                        .map_err(|_| SourceError::Overflow)?;
                 }
             }
         }
-        out
+        Ok(out)
     }
 
-    fn snapshot(&self, table: TableId) -> Multiset {
-        self.tables.get(&table).cloned().unwrap_or_default()
+    fn snapshot_at(&self, table: TableId, position: Position) -> Result<Multiset, SourceError> {
+        if position > self.position {
+            return Err(SourceError::InvalidPosition);
+        }
+        self.changes(table, 0, position)
     }
 }
 
@@ -132,7 +175,7 @@ mod tests {
         src.insert(0, row(3)); // position 3
 
         // (1, 3] must contain rows 2 and 3, not row 1.
-        let d = src.changes(0, 1, 3);
+        let d = src.changes(0, 1, 3).unwrap();
         assert_eq!(d.len(), 2);
         assert!(d.iter().all(|(r, _)| r != &row(1)));
     }
@@ -143,7 +186,7 @@ mod tests {
         src.insert(0, row(1));
         src.insert(0, row(2));
         src.delete(0, row(1));
-        let snap = src.snapshot(0);
+        let snap = src.snapshot(0).unwrap();
         assert_eq!(snap.total(), 1);
     }
 
