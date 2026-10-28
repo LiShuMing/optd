@@ -75,6 +75,24 @@
 //! call. Calling a method from inside another Tokio runtime panics —
 //! `block_on` cannot nest. Treat that as known debt: the honest fix is an async
 //! `DeltaSource`, which is a trait-wide change rather than a local one.
+//!
+//! ### The table's runtime, not ours, runs the reads
+//!
+//! A [`Table`] captures the Tokio runtime that was current when it was
+//! **constructed** — `StaticTable::from_metadata_file` calls
+//! `iceberg::Runtime::try_current()` and keeps the handle — and the Arrow
+//! reader spawns its file-read tasks on that captured runtime. The blocking
+//! runtime this adapter creates cannot drive them. So if the table was built on
+//! a `current_thread` runtime whose driver thread is the one now blocked here,
+//! the scan never finishes: no error, no panic, just a hang (a debugger shows
+//! the adapter parked in `epoll_wait` waiting for tasks that nothing polls).
+//!
+//! Construct the table on a multi-threaded runtime — `#[tokio::test(flavor =
+//! "multi_thread")]`, or
+//! `tokio::runtime::Builder::new_multi_thread().enable_all().build()` — and keep
+//! that runtime alive for as long as any source built from the table. This
+//! cannot be validated in [`IcebergSource::new`]: it receives an already-built
+//! table and has no way to inspect the runtime captured inside it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
