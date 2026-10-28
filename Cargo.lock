@@ -4272,10 +4272,15 @@ name = "optd-incremental"
 version = "0.1.1"
 dependencies = [
  "arrow",
+ "async-trait",
+ "base64 0.22.1",
  "futures",
  "iceberg",
  "optd-core",
+ "serde",
  "serde_json",
+ "sha2 0.10.8",
+ "tempfile",
  "tokio",
 ]
 

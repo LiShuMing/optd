@@ -11,21 +11,24 @@ repository = { workspace = true }
 rust-version = "1.95"
 
 [features]
-# Enables the Iceberg-backed `DeltaSource` (`iceberg_source`). Off by default:
-# it pulls in the Iceberg crate and a Tokio runtime, which only views reading
-# real tables need.
-iceberg = ["dep:iceberg", "dep:tokio", "dep:futures", "dep:arrow"]
+# Enables async Iceberg observation, the durable local CDC sink and the demo.
+# Off by default so pure algebra/protocol users do not need a storage runtime.
+iceberg = ["dep:iceberg", "dep:tokio", "dep:futures", "dep:arrow", "dep:async-trait"]
 
 [dependencies]
 optd-core = { path = "../optd-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
 # The rev is the one `apache/datafusion-iceberg` pins, so the read path and this
 # feed agree on the Iceberg crate version if both are enabled together.
 iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3", optional = true }
-tokio = { version = "1.47", features = ["rt"], optional = true }
+tokio = { version = "1.47", features = ["rt-multi-thread", "macros", "time"], optional = true }
 futures = { version = "0.3", optional = true }
 arrow = { version = "59.2", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
-# Only the iceberg-feature tests need this: they deserialize Iceberg's own
-# metadata fixtures to pin the snapshot-timeline ordering.
-serde_json = "1"
+# Isolated, reproducible warehouses for real storage and subprocess recovery tests.
+tempfile = "3"
