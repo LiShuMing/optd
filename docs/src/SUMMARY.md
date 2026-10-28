@@ -44,6 +44,7 @@
   - [Install Tools]()
   - [Contribution Workflow]() 
   - [Add a Datafusion Rule]()
+  - [Agentic Development Workflow](./development/agentic-workflow.md)
 - [What's Next]()
   - [Ideas]()
   - [RFCs]()
