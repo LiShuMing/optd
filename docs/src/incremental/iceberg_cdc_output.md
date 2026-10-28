@@ -306,7 +306,10 @@ destination. This document resolves two of them structurally:
 * **M1 — minimal loop.** Unpartitioned, unkeyed, one delta per snapshot, summary properties as
   specified, bootstrap commit, `IcebergSource` self-check. Uses `fast_append` only. Add
   `snapshot_at`/`load_at` in this milestone — without them "restart from summary" is not
-  implementable and M1 cannot be accepted as crash-safe (§4.2).
+  implementable and M1 cannot be accepted as crash-safe (§4.2). Acceptance requires **real
+  process kills** in both windows — after the data files are written but before the commit, and
+  immediately after the commit — because bootstrap and `snapshot_at`/`load_at` only fail on the
+  restart path, never in a simulated unit test.
 * **M2 — consumption.** `CdcLogSource` (§7.1) plus periodic state checkpoints; acceptance is a
   view over the log equalling a view over the base table at every step.
 * **M3 — keyed updates.** `KeySpec` on views; fuse `-old`/`+new`; keep the changelog shape
