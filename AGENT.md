@@ -96,6 +96,9 @@ Rules:
 
 * One logical change per commit; imperative subject; body states what and why.
 * Work on a branch. Never commit directly to `main`. Never force-push a shared branch.
+* After completing and validating a repair increment, commit it on the task branch and push it
+  to `origin/main` with a normal fast-forward update. Fetch first and integrate any newer mainline
+  changes before pushing. Report outstanding verification gates; never hide a failed check.
 * A lockfile/dependency change is its own commit with a manifest of what moved and what forced it.
 * Do not mix refactoring with behavior changes unless the refactor is required for the fix.
 * Revert by reverting; do not rewrite a shared history.
