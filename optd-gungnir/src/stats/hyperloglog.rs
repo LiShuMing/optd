@@ -233,7 +233,7 @@ mod tests {
                 .collect();
 
             let occ: usize = rng.gen_range(1..=max_occ);
-            strings.extend(std::iter::repeat(rand_string).take(occ));
+            strings.extend(std::iter::repeat_n(rand_string, occ));
         }
 
         strings

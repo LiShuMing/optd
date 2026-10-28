@@ -229,11 +229,7 @@ impl<T: NodeType> HeuristicsOptimizer<T> {
         };
         let mut children = Vec::with_capacity(root_rel.children.len());
         let mut children_output_properties = Vec::with_capacity(root_rel.children.len());
-        for (child, required_properties) in root_rel
-            .children
-            .iter()
-            .zip(children_required_props.into_iter())
-        {
+        for (child, required_properties) in root_rel.children.iter().zip(children_required_props) {
             let (child, child_output_properties) = self.enforce_physical_properties_inner(
                 child.unwrap_plan_node(),
                 &required_properties,

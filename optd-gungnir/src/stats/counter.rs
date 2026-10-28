@@ -134,7 +134,7 @@ mod tests {
                 mcv_freq.get(item),
                 frequencies
                     .get(item)
-                    .map(|e| (*e as f64 / flattened.len() as f64))
+                    .map(|e| *e as f64 / flattened.len() as f64)
                     .as_ref()
             );
         });
@@ -172,7 +172,7 @@ mod tests {
                             mcv_local_freq.get(item),
                             local_frequencies
                                 .get(item)
-                                .map(|e| (*e as f64 / flattened.len() as f64))
+                                .map(|e| *e as f64 / flattened.len() as f64)
                                 .as_ref()
                         );
                     });
@@ -197,7 +197,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .get(item)
-                    .map(|e| (*e as f64 / *total_count as f64))
+                    .map(|e| *e as f64 / *total_count as f64)
                     .as_ref()
             );
         });

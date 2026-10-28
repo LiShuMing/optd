@@ -400,10 +400,7 @@ impl PostgresDBMS {
         if let Some(caps) = ROWS_RE.captures(explain_line) {
             if let Some(matched) = caps.get(1) {
                 let rows_str = matched.as_str();
-                match rows_str.parse::<usize>() {
-                    Ok(row_cnt) => Some(row_cnt),
-                    Err(_) => None,
-                }
+                rows_str.parse::<usize>().ok()
             } else {
                 None
             }

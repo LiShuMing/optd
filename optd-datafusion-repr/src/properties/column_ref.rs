@@ -228,11 +228,7 @@ impl EqBaseTableColumnSets {
     /// Union two `EqBaseTableColumnSets` to produce a new disjoint sets.
     pub fn union(x: EqBaseTableColumnSets, y: EqBaseTableColumnSets) -> EqBaseTableColumnSets {
         let mut eq_col_sets = Self::new();
-        for predicate in x
-            .eq_predicates
-            .into_iter()
-            .chain(y.eq_predicates.into_iter())
-        {
+        for predicate in x.eq_predicates.into_iter().chain(y.eq_predicates) {
             eq_col_sets.add_predicate(predicate);
         }
         eq_col_sets

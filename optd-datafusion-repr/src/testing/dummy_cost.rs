@@ -8,7 +8,7 @@ use optd_core::cost::{Cost, CostModel, Statistics};
 
 use crate::plan_nodes::{ArcDfPredNode, DfNodeType};
 
-/// Dummy cost model that returns a 0 cost in all cases.
+/// Dummy cost model with one unit of cost per operation.
 /// Intended for testing with the cascades optimizer.
 pub struct DummyCostModel;
 
@@ -56,4 +56,15 @@ impl CostModel<DfNodeType, NaiveMemo<DfNodeType>> for DummyCostModel {
     fn zero(&self) -> Cost {
         Cost(vec![0.0])
     }
+}
+
+#[test]
+fn dummy_cost_accumulates_without_changing_the_input() {
+    let model = DummyCostModel;
+    let mut total = model.zero();
+    let cost = Cost(vec![2.0]);
+    model.accumulate(&mut total, &cost);
+    model.accumulate(&mut total, &cost);
+    assert_eq!(model.weighted_cost(&total), 4.0);
+    assert_eq!(model.weighted_cost(&cost), 2.0);
 }

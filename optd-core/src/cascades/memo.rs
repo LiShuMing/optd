@@ -50,8 +50,9 @@ pub struct WinnerInfo {
     pub statistics: Arc<Statistics>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum Winner {
+    #[default]
     Unknown,
     Impossible,
     Full(WinnerInfo),
@@ -71,12 +72,6 @@ impl Winner {
             Self::Full(info) => Some(info),
             _ => None,
         }
-    }
-}
-
-impl Default for Winner {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 

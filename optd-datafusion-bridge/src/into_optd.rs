@@ -517,9 +517,9 @@ impl OptdPlanContext<'_> {
             let expr = BinOpPred::new(left, right, op).into_pred_node();
             log_ops.push(expr);
         }
-        if node.filter.is_some() {
+        if let Some(filter_expr) = &node.filter {
             let filter = self.conv_into_optd_expr(
-                node.filter.as_ref().unwrap(),
+                filter_expr,
                 node.schema.as_ref(),
                 dep_ctx,
                 &mut subqueries,

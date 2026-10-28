@@ -605,7 +605,7 @@ impl<'a, T: NodeType, M: Memo<T>> TaskContext<'a, T, M> {
 
     fn on_task_start(&self) {
         if (self.optimizer.ctx.all_budget_used || self.optimizer.ctx.logical_budget_used)
-            && self.steps % 100000 == 0
+            && self.steps.is_multiple_of(100000)
         {
             println!("out of budget, dumping info");
             println!("step={}", self.steps);
