@@ -50,6 +50,7 @@
 - [Incremental Engine Design]()
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
+  - [CDC Output to Iceberg](./incremental/iceberg_cdc_output.md)
   - [ΔScan — Table Scan](./incremental/scan.md)
   - [ΔProjection](./incremental/projection.md)
   - [ΔFilter](./incremental/filter.md)
