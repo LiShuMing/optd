@@ -4289,6 +4289,9 @@ name = "optd-incremental-sql"
 version = "0.1.1"
 dependencies = [
  "datafusion",
+ "futures",
+ "iceberg",
+ "optd-incremental",
  "serde",
  "serde_json",
  "sha2 0.10.8",

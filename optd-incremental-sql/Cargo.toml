@@ -7,14 +7,22 @@ license.workspace = true
 repository.workspace = true
 rust-version = "1.95"
 
+[features]
+# Typed source ingestion is opt-in; the default graph/store has no catalog IO.
+iceberg = ["dep:iceberg", "dep:futures", "dep:optd-incremental"]
+
 [dependencies]
-# Reuse the workspace's pinned SQL/type implementation. Storage and the legacy
-# optd bridge are deliberately not dependencies of the typed execution layer.
+# Reuse the workspace's pinned SQL/type implementation. The default graph has
+# no catalog dependency; optional IO reuse never uses the legacy Value bridge.
 datafusion = { version = "55.0.0", default-features = false, features = ["sql", "datetime_expressions", "regex_expressions", "string_expressions", "unicode_expressions", "nested_expressions", "math_expressions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+iceberg = { git = "https://github.com/apache/iceberg-rust", rev = "5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3", optional = true }
+futures = { version = "0.3", optional = true }
+# Reuse only the qualified local catalog; do not reuse its lossy Value adapter.
+optd-incremental = { path = "../optd-incremental", features = ["iceberg"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

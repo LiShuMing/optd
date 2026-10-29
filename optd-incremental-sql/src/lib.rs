@@ -51,3 +51,24 @@ pub enum Error {
 
 /// Result returned by the typed SQL backend.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(all(test, feature = "iceberg"))]
+mod dependency_contract {
+    #[test]
+    fn iceberg_and_sql_use_the_same_arrow_schema_type() -> Result<(), Box<dyn std::error::Error>> {
+        use ::iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
+        use datafusion::arrow::datatypes::{DataType, Schema as ArrowSchema};
+
+        let source = Schema::builder()
+            .with_schema_id(1)
+            .with_fields([std::sync::Arc::new(NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Int),
+            ))])
+            .build()?;
+        let arrow: ArrowSchema = ::iceberg::arrow::schema_to_arrow_schema(&source)?;
+        assert_eq!(arrow.field(0).data_type(), &DataType::Int32);
+        Ok(())
+    }
+}

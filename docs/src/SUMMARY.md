@@ -59,6 +59,7 @@
   - [Typed SQL Dependency Scaffold](./incremental/sql_dependencies.md)
   - [Typed SQL Incremental Execution](./incremental/sql_execution.md)
   - [Run the Typed SQL Loop](./incremental/sql_cli.md)
+  - [Typed Iceberg Source Vectors](./incremental/typed_iceberg_sources.md)
   - [Changed-group Aggregate Maintenance](./incremental/group_maintenance.md)
   - [Checkpoint Directory Creation Durability](./incremental/checkpoint_directory_durability.md)
   - [Test Process Creation and Local File Locks](./incremental/test_process_isolation.md)
