@@ -132,7 +132,9 @@ pointer to a staging file, fsyncs, renames and fsyncs the directory
 it can make the same definitive claim.
 
 Keep an `audit` switch (default off) that forces read-back after a successful commit. It is an
-operational verification tool as much as a test hook.
+operational verification tool as much as a test hook. It is implemented as
+`IcebergCdcSink::set_audit(true)`; on the fast return the sink hands back the prepared envelopes,
+which are byte-identical to what a read-back would reconstruct.
 
 ### 4.3 Validate only the new batches against a trusted predecessor relation
 

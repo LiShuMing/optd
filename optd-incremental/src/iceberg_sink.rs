@@ -222,6 +222,7 @@ pub struct IcebergCdcSink {
     _owner: Option<WriterLock>,
     pending: Option<Vec<(String, String)>>,
     path: PublishPath,
+    audit: bool,
     full_reads: AtomicUsize,
 }
 impl IcebergCdcSink {
@@ -263,6 +264,7 @@ impl IcebergCdcSink {
             _owner: Some(owner),
             pending: None,
             path: PublishPath::FullReplay,
+            audit: false,
             full_reads: AtomicUsize::new(0),
         };
         sink.validate_table(&sink.load().await?)?;
@@ -281,9 +283,17 @@ impl IcebergCdcSink {
     pub fn last_publish_path(&self) -> PublishPath {
         self.path
     }
-    /// Full log scans performed by this sink, including the post-commit read-back.
+    /// Full log scans performed by this sink, including any post-commit read-back.
     pub fn full_reads(&self) -> usize {
         self.full_reads.load(Ordering::Relaxed)
+    }
+    /// Force the post-commit read-back even after a definitive catalog success.
+    ///
+    /// Off by default: `LocalCatalog` fsyncs the snapshot files, the pointer staging file, the
+    /// rename and the directory before returning `Ok`, so a successful commit is durable. Turn
+    /// this on to audit a commit path end to end; the reset is not persistent.
+    pub fn set_audit(&mut self, audit: bool) {
+        self.audit = audit;
     }
     async fn load(&self) -> Result<Table, CdcError> {
         let table = self
@@ -758,6 +768,13 @@ impl IcebergCdcSink {
             Ok(_) => observer(CommitStage::CatalogCommitted),
             Err(e) => Err(e),
         };
+        if outcome.is_ok() && !self.audit {
+            // `Ok` from the local catalog is durable, so the prepared envelopes are the result.
+            self.pending = None;
+            return Ok(batches.iter().map(|b| b.envelope().clone()).collect());
+        }
+        // Unknown outcome, observer failure after a durable commit, or audit mode: resolve by
+        // inspecting the log before reporting success.
         let committed = self.read_batches().await?;
         let found = batches
             .iter()
@@ -800,6 +817,7 @@ impl CdcLogReader {
             _owner: None,
             pending: None,
             path: PublishPath::FullReplay,
+            audit: false,
             full_reads: AtomicUsize::new(0),
         };
         inner.validate_table(&table)?;

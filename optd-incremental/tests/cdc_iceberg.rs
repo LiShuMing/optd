@@ -397,15 +397,15 @@ async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back()
     )
     .unwrap();
 
-    // The request continues the durable log, so validation uses the trusted relation and the
-    // only remaining scan is the post-commit read-back.
+    // The request continues the durable log, so validation uses the trusted relation and a
+    // definitive commit needs no read-back.
     let reads = sink.full_reads();
     let committed = sink
         .emit_many_against(&expected(&[1]), std::slice::from_ref(&second), &|_| Ok(()))
         .await
         .unwrap();
     assert_eq!(sink.last_publish_path(), PublishPath::TrustedDelta);
-    assert_eq!(sink.full_reads(), reads + 1);
+    assert_eq!(sink.full_reads(), reads);
     assert_eq!(committed[0].batch_id, second.envelope().batch_id);
 
     // The same request again is answered by the snapshot summary: no scan and no append.
@@ -505,6 +505,63 @@ async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back()
     assert_eq!(sink.full_reads(), reads + 1);
     assert_eq!(retried.len(), 2);
     assert_eq!(sink.read_batches().await.unwrap().len(), 5);
+
+    // Audit mode forces the read-back after a definitive success; the default path does not.
+    append(&catalog, &[6]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let sixth = PreparedBatch::new(
+        &gen,
+        Some(fifth.envelope()),
+        vec![point],
+        &expected(&[6]),
+        6,
+        "w".into(),
+    )
+    .unwrap();
+    sink.set_audit(true);
+    let reads = sink.full_reads();
+    sink.emit_many_against(
+        &expected(&[1, 2, 3, 4, 5]),
+        std::slice::from_ref(&sixth),
+        &|_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sink.last_publish_path(), PublishPath::TrustedDelta);
+    assert_eq!(sink.full_reads(), reads + 1);
+    sink.set_audit(false);
+
+    append(&catalog, &[7]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let seventh = PreparedBatch::new(
+        &gen,
+        Some(sixth.envelope()),
+        vec![point],
+        &expected(&[7]),
+        7,
+        "w".into(),
+    )
+    .unwrap();
+    let reads = sink.full_reads();
+    sink.emit_many_against(
+        &expected(&[1, 2, 3, 4, 5, 6]),
+        std::slice::from_ref(&seventh),
+        &|_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sink.full_reads(), reads);
+    assert_eq!(sink.read_batches().await.unwrap().len(), 7);
 }
 
 // The parent launches this exact test in a new process. Normal test runs have no worker env.
