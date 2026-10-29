@@ -79,8 +79,11 @@ Rust 1.95.0 by default; set `OPTD_RUST_TOOLCHAIN` only when deliberately testing
 toolchain. Scoped lint uses `--no-deps`; full workspace lint is a separate gate.
 
 For a fresh configuration build, set `CARGO_TARGET_DIR` to an unused directory before running the
-gate. `scripts/agent-check.sh full` additionally requires full workspace test services and mdBook;
-it fails when a required tool/check is missing instead of claiming it passed.
+gate. `scripts/agent-check.sh full` additionally runs workspace lint/tests and the mdBook build;
+it fails when a required tool/check is missing instead of claiming it passed. The full mode skips
+`cli_run_cardbench_twice`, which needs a running Postgres and the `test_user` role; run
+`scripts/agent-check.sh perfbench` on a machine that provides them. Every step runs even when an
+earlier one fails, and the final status lists every failed step.
 
 The recovery test launches a real child process, waits at deterministic file/commit barriers,
 kills it without cleanup, advances the input and launches recovery against the same warehouse.
