@@ -182,6 +182,36 @@ The measured shape is unkeyed, so it exercises the delta-sized path. Keyed
 generations still build a key index per call (`O(n log n)`); that path is not
 measured here and no claim is made for it.
 
+## Writer increment 4.1: idempotency from the snapshot summary
+
+§4.1 removes the pre-write `read_batches()` from the normal path: the sink
+answers a retry from the current snapshot summary and otherwise appends against
+the caller's trusted relation. The before arm is the 4.3 measurement above
+(`e98ad04`), the after arm is `0b9df71`; both run from fresh copies of the same
+frozen warehouse, with the same command, and both report `dirty=False`.
+
+| shape | metric | before (4.3) | after (4.1) | change |
+|-------|--------|-------:|------:|-------:|
+| A, 134k rows / 17 batches | step | 6.11 s | 3.37 s | −45 % |
+| | pre-commit | 3.04 s | 0.53 s | −83 % |
+| | commit | 0.11 s | 0.06 s | — |
+| | recover | 9.78 s | 9.53 s | — |
+| B, 420k rows / 16 batches | step | 13.76 s | 8.02 s | −42 % |
+| | pre-commit | 7.01 s | 1.71 s | −76 % |
+| | commit | 0.059 s | 0.06 s | — |
+| | recover | 22.09 s | 21.91 s | — |
+
+The pre-write scan is gone from the step and pre-commit is now the delta-sized
+write (0.53 s for 2,000 rows, 1.71 s for 20,000). What is left of the step is
+almost entirely the post-commit read-back: 3.37 − 0.53 − 0.06 ≈ 2.8 s at A and
+8.02 − 1.71 − 0.06 ≈ 6.2 s at B, matching the measured full scan. That is the
+target of increment 4.2.
+
+One residual to watch rather than conclude from: at B, pre-commit grew from
+1.59 s to 1.71 s across the three steps as history grew from 420k to 460k rows,
+while at A it stayed flat. The 4.2 record should check whether that is summary
+loading, file listing, or write-path work that still touches history.
+
 ## What this implies, and what it does not
 
 The measured ceiling on any throughput claim today: a refresh is
