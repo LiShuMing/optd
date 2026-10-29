@@ -221,16 +221,45 @@ writer work. That distinction matters when 4.2 is credited: the writer is
 already delta-sized, and any remaining growth in a `refresh` step after 4.2
 should be attributed to the source side before it is called a regression.
 
+## Writer increment 4.2: read-back only for an unknown outcome
+
+§4.2 stops reading the log back after a definitive commit and a successful
+`CatalogCommitted` observer; the read-back remains for unknown outcomes and is
+forced by `set_audit(true)`. The before arm is the 4.1 measurement
+(`0b9df71`), the after arm is `4f18b71`; same command, fresh copies, and both
+report `dirty=False`.
+
+| shape | metric | before (4.1) | after (4.2) | change |
+|-------|--------|-------:|------:|-------:|
+| A, 134k rows / 17 batches | step | 3.37 s | 0.63 s | −81 % |
+| | pre-commit | 0.53 s | 0.53 s | — |
+| | commit | 0.06 s | 0.06 s | — |
+| | recover | 9.53 s | 9.65 s | — |
+| B, 420k rows / 16 batches | step | 8.02 s | 1.92 s | −76 % |
+| | pre-commit | 1.71 s | 1.71 s | — |
+| | commit | 0.06 s | 0.09 s | — |
+| | recover | 21.91 s | 21.94 s | — |
+
+With increments 4.1–4.3 in place, a writer step no longer scales with the output
+history: at 134k rows it is 0.63 s and at 420k rows 1.92 s, and the difference
+is the larger batch (20,000 vs 2,000 rows), not the history. The `phases` split
+of the writer's own share is 0.21 s and 0.72 s; the rest of the step is source
+observation and Δ evaluation (0.36 s / 1.16 s), which follow the *source*
+table. A refresh step is therefore no longer the right place to look for a
+history-dependent regression; recovery still is, until 4.4.
+
 ## What this implies, and what it does not
 
-The measured ceiling on any throughput claim today: a refresh is
-`O(total history)` because it re-validates the history three times, and a
-restart is `O(total history)` because it reads it three times. Both fixes are
-local and protocol-preserving; they are specified in
-[Writer I/O Reduction](./writer_io_reduction.md) and are not implemented here.
-A producer-side state checkpoint (the structural fix that makes restart
-independent of history) stays after those reductions, and only if the numbers
-still justify it.
+After increments 4.1–4.3 the writer no longer follows the output history: a
+2,000-row batch costs 0.63 s and a 20,000-row batch 1.92 s at 134k and 420k rows
+respectively, with the writer's share at 0.21 s and 0.72 s. What remains
+history-dependent is recovery: it still reads the log three times, which
+increment 4.4 addresses. A producer-side state checkpoint (the structural fix
+that makes restart independent of history) stays after that reduction, and only
+if the numbers still justify it.
+
+The figures below this section describe the state before 4.1–4.3 and are kept
+as the baseline the increments are argued against.
 
 None of these figures is a regression gate yet. They are one run per shape on a
 shared machine; repeated runs are needed before any threshold is set.
