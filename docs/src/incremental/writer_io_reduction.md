@@ -73,32 +73,63 @@ Four independent increments. Each lands as its own commit and is measured with t
 
 Replace the pre-write `read_batches()` with a `latest_commit_index()` that loads table metadata
 and decodes `optd.commit` (one envelope) or `optd.commits` (the commit group) from the current
-snapshot summary. Use it to decide the already-committed prefix and to return committed envelopes
-when every requested batch is present.
+snapshot summary. The step loads metadata once and uses the same `Table` for the checks and the
+append.
 
-Fallbacks and checks:
+The fast path covers **the latest commit group only**; older groups are not in the summary.
 
-* verify the decoded envelopes belong to this generation and form a `follows()` chain;
-* if the requested prefix cannot be resolved from the summary (for example a compaction archive
-  that does not contain it), fall back to the current full read; never append on a mismatch;
-* `optd.envelopes` decoding after compaction is accepted as a slow path; it is not on the normal
-  refresh path.
+* If `requested.last.batch_seq` is greater than the summary's commit sequence, nothing is
+  committed: append all requested batches (the normal path).
+* If it equals the summary commit sequence and the batch ids match, **and** the summary supplies
+  an envelope for every requested batch (`optd.commits` covers the slice, or the request has one
+  batch and `optd.commit` matches it), return those committed envelopes without reading data.
+* If the requested sequence is older than the summary commit, or the summary cannot supply every
+  requested envelope, fall back to the full `read_batches()`; never reconstruct envelopes from
+  partial data and never append on a mismatch.
+
+Checks before returning: `optd.protocol`, generation identity, `follows()` continuity within the
+slice, and `delta_hash` equality per batch. Row equality is not available on this path, so the
+fast path must not be described as equivalent to `same_logical_batch` (which also compares rows,
+`iceberg_sink.rs:1065-1069`).
+
+The pre-write validation of the older chain is not repeated on the fast path; `open` performs it
+once at startup. `optd.envelopes` is deliberately not decoded on the normal path because its size
+grows with history; after compaction, a multi-batch retry therefore falls back unless the
+compaction snapshot's single `optd.commit` already answers a one-batch request.
+
+Emit reports which validation path ran (a `CommitStage` variant, or an equivalent test counter) so
+tests and measurements can prove the fast path is actually taken rather than silently falling
+back on every step.
 
 ### 4.2 Post-commit read-back only for an unknown outcome
 
-When `Transaction::commit` returns a definitive success, return the prepared envelopes directly.
-Read back only when the commit result is an error or otherwise unresolved, preserving the rule
-that an unknown outcome is resolved before another append.
+The fast return requires **both** a definitive `commit` success **and** a successful
+`CatalogCommitted` observer. If either returns an error, keep the current read-back resolution:
+an observer failure after a durable commit must still be resolved by inspecting the log, exactly
+as today.
 
-Keep an `audit` switch (test-only by default) that forces read-back after a successful commit so
-the crash and corruption tests can still exercise the independent check.
+"`Ok` means durable" is stated for `LocalCatalog` only: it fsyncs every new file, writes the
+pointer to a staging file, fsyncs, renames and fsyncs the directory
+(`local_catalog.rs:139-165`). A future remote or renamed catalog must restore the read-back unless
+it can make the same definitive claim.
+
+Keep an `audit` switch (default off) that forces read-back after a successful commit. It is an
+operational verification tool as much as a test hook.
 
 ### 4.3 Validate only the new batches against a trusted predecessor relation
 
 Do not delete the `apply_to` call: it verifies that each batch is exactly the endpoint difference
-between its predecessor and successor. Instead, let `emit_many` accept the caller's trusted
-predecessor relation (in `CdcLoop::step`, `self.view.contents()`) and replay only the batches
-being written from that relation. The check stays, its cost drops to O(delta).
+between its predecessor and successor. Instead, add a separate entry point
+`emit_many_against(trusted_before, batches, observer)`; `emit_many_with_observer` keeps its
+current signature and `DeltaSink::emit` is unchanged. In `CdcLoop::step` the trusted relation is
+`self.view.contents()` — the view at the predecessor checkpoint.
+
+The trusted relation is only valid when **nothing from the request is already committed**
+(`skip == 0`). With a partial overlap the committed prefix is not part of the trusted relation and
+replaying only `remaining` would fail a correct batch. Rule: use the trusted relation only when
+`skip == 0` and it was supplied; any partial overlap falls back to the current full replay.
+Group commits are atomic, so partial overlap is a defensive path and does not cost normal-path
+performance.
 
 If no trusted relation is supplied, keep the current full replay. A mismatch still fails before
 the commit with `InvalidRow`; the durable state and the checkpoint are unchanged.
@@ -109,6 +140,10 @@ Return the validated batches from the sink constructor (or add an internal const
 accepts them) so `recover` derives the last checkpoint from `batches.last()` and folds the same
 vector for the digest comparison. `CdcLogReader::open` already validates the envelope chain
 without scanning data; use the same separation for the producer.
+
+`DeltaSink::last_checkpoint` also uses `latest_commit_index()` instead of walking every snapshot,
+since it only needs the current commit group. Recovery still performs its one full read for the
+digest comparison; the summary lookup does not replace that read.
 
 ## 5. Failure modes and recovery
 
@@ -121,6 +156,9 @@ without scanning data; use the same separation for the producer.
 | Commit outcome unknown | Unchanged: read-back resolves success or reports `UnknownCommit` |
 | Predecessor relation passed by the caller is stale | `apply_to` endpoint comparison fails before writing |
 | Log corrupted between startup and the next step | Not detected on the fast path by design; `audit` mode and startup validation cover tests and operational checks |
+| Summary has no `optd.commit` (older table or foreign snapshot) | Full read; no append unless the full read validates |
+| Compaction happens between startup and the next step | The next step sees the archive snapshot's `optd.commit`; a one-batch request can use it, a multi-batch retry falls back |
+| Observer fails after a durable commit | Read-back resolves the outcome, as today; the fast path is not taken |
 
 ## 6. Acceptance criteria
 
@@ -128,6 +166,8 @@ without scanning data; use the same separation for the producer.
   pre-commit/commit split, recover, and the single-read model.
 * Regression tests that fail before the change: lost-ack retry, partial overlap, retry after
   compaction, stale trusted relation, and `audit` mode detecting an injected envelope mismatch.
+* Path assertions: the normal path takes zero full reads, and each fallback case takes exactly one.
+  A test that injects a summary decode failure must show the fallback path was selected.
 * Existing real process-kill windows (bootstrap, incremental, post-commit) still pass.
 * `scripts/agent-check.sh full` passes on the recorded toolchain; 1.95 and 1.96 are reported
   separately.
@@ -135,14 +175,14 @@ without scanning data; use the same separation for the producer.
 
 ## 7. Rollout
 
-Local implementation and measurements first. No push until the owner authorizes it. The accepted
-protocol page needs one paragraph only if the `audit` switch becomes an operational feature; the
-normal semantics are unchanged.
+Local implementation and measurements first. No push until the owner authorizes it. The `audit`
+switch is documented as an operational verification tool, not only a test hook; the normal
+semantics are unchanged.
 
 ## 8. Open questions
 
-* Whether the compaction archive decode is cheap enough to stay on the fast path, or should always
-  fall back once the archive exceeds a measured size.
 * Whether the producer-side folded-state checkpoint is still worth designing after 4.1–4.4.
-* Whether `read_since` should also take a scan predicate, now that the validation cost is known to
-  dominate the scan cost.
+* The `read_since` scan predicate is **deferred**. The scan costs about 3.5 µs/row while validation
+  costs about 10.2 µs/row, and the pinned Iceberg release has no row-level filter
+  (`row_selection_enabled` defaults to false, so only file/row-group pruning is available).
+  Revisit it after 4.1–4.4, when the consumer scan becomes a measured first-order cost.
