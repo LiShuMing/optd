@@ -201,16 +201,25 @@ frozen warehouse, with the same command, and both report `dirty=False`.
 | | commit | 0.059 s | 0.06 s | — |
 | | recover | 22.09 s | 21.91 s | — |
 
-The pre-write scan is gone from the step and pre-commit is now the delta-sized
-write (0.53 s for 2,000 rows, 1.71 s for 20,000). What is left of the step is
-almost entirely the post-commit read-back: 3.37 − 0.53 − 0.06 ≈ 2.8 s at A and
+The pre-write scan is gone from the step. What is left of the step is almost
+entirely the post-commit read-back: 3.37 − 0.53 − 0.06 ≈ 2.8 s at A and
 8.02 − 1.71 − 0.06 ≈ 6.2 s at B, matching the measured full scan. That is the
 target of increment 4.2.
 
-One residual to watch rather than conclude from: at B, pre-commit grew from
-1.59 s to 1.71 s across the three steps as history grew from 420k to 460k rows,
-while at A it stayed flat. The 4.2 record should check whether that is summary
-loading, file listing, or write-path work that still touches history.
+`pre-commit` is the whole step up to `FilesWritten`, so it also contains source
+observation and Δ evaluation. The `phases` record splits it at 4.1:
+
+| shape | observe | Δ evaluate | write (by subtraction) | pre-commit |
+|-------|--------:|-----------:|-----------------------:|-----------:|
+| A, 2,000-row batch | 0.193 s | 0.254 s | 0.297 s | 0.745 s |
+| B, 20,000-row batch | 0.480 s | 0.683 s | 0.721 s | 1.884 s |
+
+So the writer's own share after 4.1 is 0.30 s and 0.72 s. The small growth of
+`pre-commit` across B's three steps (1.59 → 1.71 s) is source observation and Δ
+evaluation over the source table, which also grows by one batch per step — not
+writer work. That distinction matters when 4.2 is credited: the writer is
+already delta-sized, and any remaining growth in a `refresh` step after 4.2
+should be attributed to the source side before it is called a regression.
 
 ## What this implies, and what it does not
 
