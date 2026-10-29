@@ -57,6 +57,7 @@
   - [Measured Costs (E10)](./incremental/measurements.md)
   - [Writer I/O Reduction](./incremental/writer_io_reduction.md)
   - [Typed SQL Dependency Scaffold](./incremental/sql_dependencies.md)
+  - [Test Process Creation and Local File Locks](./incremental/test_process_isolation.md)
   - [Streams, Keyed Updates and Maintenance](./incremental/streams_and_maintenance.md)
   - [ΔScan — Table Scan](./incremental/scan.md)
   - [ΔProjection](./incremental/projection.md)

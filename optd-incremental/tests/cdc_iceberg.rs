@@ -1,8 +1,10 @@
 #![cfg(feature = "iceberg")]
 //! Real Parquet/catalog and subprocess-kill acceptance for CDC streams and maintenance.
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
+use std::process::{Child, Command};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use arrow::array::{Int64Array, RecordBatch};
@@ -16,6 +18,100 @@ use optd_incremental::iceberg_sink::{
 };
 use optd_incremental::local_catalog::LocalCatalog;
 use optd_incremental::{filter, scan, Expr, Multiset, Value};
+
+// Ordinary test activity remains parallel. Only fork/exec waits for a quiet
+// boundary, because a child can retain another test's flock until exec closes
+// CLOEXEC descriptors, even after the owning test has dropped its File.
+static PROCESS_ACTIVITY: ProcessActivity = ProcessActivity::new();
+
+struct ProcessActivity {
+    active: Mutex<usize>,
+    idle: Condvar,
+}
+
+struct ActivityLease<'a>(&'a ProcessActivity);
+
+impl ProcessActivity {
+    const fn new() -> Self {
+        Self {
+            active: Mutex::new(0),
+            idle: Condvar::new(),
+        }
+    }
+
+    fn enter(&self) -> ActivityLease<'_> {
+        *self.active.lock().unwrap() += 1;
+        ActivityLease(self)
+    }
+
+    // The exclusive callback must be synchronous and must neither reenter this
+    // gate nor wait for a child. Production use here is only Command::spawn's
+    // fork/exec handshake; no standard mutex guard is held across an await.
+    fn while_idle<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut active = self.active.lock().unwrap();
+        while *active != 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "process creation still blocked by {active} test activities after 30 seconds"
+            );
+            let (current, _) = self.idle.wait_timeout(active, remaining).unwrap();
+            active = current;
+        }
+        // Retain the mutex through the callback so new activities cannot start.
+        let result = operation();
+        drop(active);
+        result
+    }
+}
+
+impl Drop for ActivityLease<'_> {
+    fn drop(&mut self) {
+        let mut active = self.0.active.lock().unwrap();
+        // The lease is non-cloneable; each successful enter has exactly one drop.
+        *active -= 1;
+        if *active == 0 {
+            self.0.idle.notify_all();
+        }
+    }
+}
+
+fn block_on_without_fork<F: Future>(runtime: &tokio::runtime::Runtime, future: F) -> F::Output {
+    let _activity = PROCESS_ACTIVITY.enter();
+    runtime.block_on(future)
+}
+
+fn spawn_without_activity(command: &mut Command) -> Child {
+    PROCESS_ACTIVITY.while_idle(|| command.spawn()).unwrap()
+}
+
+#[test]
+fn process_gate_shares_activities_and_excludes_spawn_until_the_last_drop() {
+    let gate = ProcessActivity::new();
+    std::thread::scope(|scope| {
+        let first = gate.enter();
+        let second = gate.enter();
+        assert_eq!(*gate.active.lock().unwrap(), 2);
+        let (requested, request) = std::sync::mpsc::channel();
+        let (entered, entry) = std::sync::mpsc::channel();
+        let worker_gate = &gate;
+        let worker = scope.spawn(move || {
+            requested.send(()).unwrap();
+            worker_gate.while_idle(|| entered.send(()).unwrap());
+        });
+        request.recv_timeout(Duration::from_secs(2)).unwrap();
+        let excluded_with_two = entry.recv_timeout(Duration::from_millis(20)).is_err();
+        drop(first);
+        let excluded_with_one = entry.recv_timeout(Duration::from_millis(20)).is_err();
+        drop(second);
+        let admitted_after_last = entry.recv_timeout(Duration::from_secs(2)).is_ok();
+        worker.join().unwrap();
+        assert!(excluded_with_two);
+        assert!(excluded_with_one);
+        assert!(admitted_after_last);
+    });
+}
 
 fn ident(name: &str) -> TableIdent {
     TableIdent::new(NamespaceIdent::new("test".into()), name.into())
@@ -173,6 +269,7 @@ fn snapshot_files(root: &Path, table: &str) -> (String, usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_parquet_bootstrap_duplicates_empty_commits_and_changed_source() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     let mut loop_ = recover(catalog.clone()).await;
@@ -206,6 +303,7 @@ async fn real_parquet_bootstrap_duplicates_empty_commits_and_changed_source() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_file_stage_keeps_candidate_and_lost_ack_is_resolved_without_append_retry() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1]).await;
@@ -245,6 +343,7 @@ async fn failed_file_stage_keeps_candidate_and_lost_ack_is_resolved_without_appe
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn identical_deltas_at_different_source_ranges_are_not_deduplicated() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1]).await;
@@ -264,6 +363,7 @@ async fn identical_deltas_at_different_source_ranges_are_not_deduplicated() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retry_settings_are_enforced_and_existing_batches_are_idempotent() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1]).await;
@@ -294,6 +394,7 @@ async fn retry_settings_are_enforced_and_existing_batches_are_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trusted_predecessor_rejects_a_stale_relation_and_partial_overlap_falls_back() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(&catalog, &[1]).await;
@@ -413,6 +514,7 @@ async fn trusted_predecessor_rejects_a_stale_relation_and_partial_overlap_falls_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(&catalog, &[1]).await;
@@ -616,6 +718,7 @@ async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bootstrap_retry_with_unreadable_summary_does_not_double_append() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let catalog = fixture(root).await;
@@ -660,6 +763,7 @@ async fn bootstrap_retry_with_unreadable_summary_does_not_double_append() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delta_retry_with_unreadable_summary_fails_closed_without_appending() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let catalog = fixture(root).await;
@@ -720,6 +824,7 @@ async fn delta_retry_with_unreadable_summary_fails_closed_without_appending() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_folds_the_single_startup_read() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(&catalog, &[1]).await;
@@ -748,7 +853,7 @@ fn subprocess_worker() {
         .enable_all()
         .build()
         .unwrap();
-    runtime.block_on(async {
+    block_on_without_fork(&runtime, async {
         let catalog = Arc::new(LocalCatalog::open(&root).unwrap());
         let mut loop_ = recover(catalog).await;
         loop_
@@ -781,28 +886,28 @@ fn real_process_kills_recover_bootstrap_and_incremental_windows() {
     for bootstrap in [true, false] {
         for stage in ["files", "commit"] {
             let temp = tempfile::tempdir().unwrap();
-            let catalog = runtime.block_on(fixture(temp.path()));
-            runtime.block_on(append(catalog.as_ref(), &[1, 1, 2]));
+            let catalog = block_on_without_fork(&runtime, fixture(temp.path()));
+            block_on_without_fork(&runtime, append(catalog.as_ref(), &[1, 1, 2]));
             if !bootstrap {
-                runtime.block_on(async {
+                block_on_without_fork(&runtime, async {
                     let mut loop_ = recover(catalog.clone()).await;
                     loop_.step().await.unwrap();
                 });
-                runtime.block_on(append(catalog.as_ref(), &[3]));
+                block_on_without_fork(&runtime, append(catalog.as_ref(), &[3]));
             }
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "subprocess_worker",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env("OPTD_CDC_TEST_WAREHOUSE", temp.path())
-                .env("OPTD_CDC_TEST_STAGE", stage)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
+            let mut child = spawn_without_activity(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "subprocess_worker",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("OPTD_CDC_TEST_WAREHOUSE", temp.path())
+                    .env("OPTD_CDC_TEST_STAGE", stage)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped()),
+            );
             let start = Instant::now();
             while !temp.path().join("barrier").exists() {
                 if let Some(status) = child.try_wait().unwrap() {
@@ -824,8 +929,8 @@ fn real_process_kills_recover_bootstrap_and_incremental_windows() {
             let status = child.wait().unwrap();
             assert!(!status.success());
             // Advance the source before restart: loading at NOW with an old watermark doubles it.
-            runtime.block_on(append(catalog.as_ref(), &[4]));
-            runtime.block_on(async {
+            block_on_without_fork(&runtime, append(catalog.as_ref(), &[4]));
+            block_on_without_fork(&runtime, async {
                 let reopened = Arc::new(LocalCatalog::open(temp.path()).unwrap());
                 let mut loop_ = recover(reopened).await;
                 loop_.step().await.unwrap();
@@ -960,6 +1065,7 @@ async fn publish_source_fixture(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_overwrite_retracts_duplicates_and_deletes_all_rows_with_full_images() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1, 1, 2]).await;
@@ -994,6 +1100,7 @@ async fn external_overwrite_retracts_duplicates_and_deletes_all_rows_with_full_i
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn expired_checkpoint_and_changed_view_definition_are_rejected_on_restart() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1]).await;
@@ -1040,6 +1147,7 @@ async fn expired_checkpoint_and_changed_view_definition_are_rejected_on_restart(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sink_refuses_over_retraction_before_writing_a_snapshot() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1]).await;
@@ -1084,6 +1192,7 @@ async fn sink_refuses_over_retraction_before_writing_a_snapshot() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_catalog_retains_required_input_snapshots() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(catalog.as_ref(), &[1]).await;
@@ -1130,6 +1239,7 @@ async fn consumer(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn independent_consumers_pin_ranges_and_commit_effects_with_cursor() {
+    let _activity = PROCESS_ACTIVITY.enter();
     use optd_incremental::consumer::ConsumeStage;
     use optd_incremental::{DeltaSource, View};
     let temp = tempfile::tempdir().unwrap();
@@ -1224,6 +1334,7 @@ async fn independent_consumers_pin_ranges_and_commit_effects_with_cursor() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keyed_aggregate_pairs_survive_parquet_restart_and_key_changes() {
+    let _activity = PROCESS_ACTIVITY.enter();
     use optd_incremental::{agg, AggKind};
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
@@ -1295,6 +1406,7 @@ async fn keyed_aggregate_pairs_survive_parquet_restart_and_key_changes() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batched_empty_commits_compaction_expiration_preserve_replay_and_lagging_cursors() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(&catalog, &[1]).await;
@@ -1453,7 +1565,7 @@ fn maintenance_consumer_subprocess_worker() {
             std::thread::park();
         }
     };
-    runtime.block_on(async {
+    block_on_without_fork(&runtime, async {
         let catalog = Arc::new(LocalCatalog::open(&root).unwrap());
         if operation == "consume" {
             let mut target = consumer(catalog, "crash").await;
@@ -1512,8 +1624,8 @@ fn real_process_kills_preserve_consumer_transactions_and_compaction_identity() {
     for operation in ["consume", "compact"] {
         for after in [false, true] {
             let temp = tempfile::tempdir().unwrap();
-            let catalog = runtime.block_on(fixture(temp.path()));
-            let before = runtime.block_on(async {
+            let catalog = block_on_without_fork(&runtime, fixture(temp.path()));
+            let before = block_on_without_fork(&runtime, async {
                 append(&catalog, &[1, 1]).await;
                 let mut driver = recover(catalog.clone()).await;
                 driver.step().await.unwrap();
@@ -1526,7 +1638,7 @@ fn real_process_kills_preserve_consumer_transactions_and_compaction_identity() {
                 driver.sink().read_batches().await.unwrap()
             });
             kill_maintenance_worker(temp.path(), operation, after);
-            runtime.block_on(async {
+            block_on_without_fork(&runtime, async {
                 let reopened = Arc::new(LocalCatalog::open(temp.path()).unwrap());
                 let mut destination = consumer(reopened.clone(), "crash").await;
                 let committed = operation == "consume" && after;
@@ -1580,20 +1692,20 @@ fn real_process_kills_preserve_consumer_transactions_and_compaction_identity() {
 }
 
 fn kill_maintenance_worker(root: &Path, operation: &str, after: bool) {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "maintenance_consumer_subprocess_worker",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("OPTD_CDC_MAINT_WAREHOUSE", root)
-        .env("OPTD_CDC_MAINT_OPERATION", operation)
-        .env("OPTD_CDC_MAINT_AFTER", if after { "yes" } else { "no" })
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = spawn_without_activity(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "maintenance_consumer_subprocess_worker",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("OPTD_CDC_MAINT_WAREHOUSE", root)
+            .env("OPTD_CDC_MAINT_OPERATION", operation)
+            .env("OPTD_CDC_MAINT_AFTER", if after { "yes" } else { "no" })
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()),
+    );
     let start = Instant::now();
     while !root.join("barrier").exists() {
         if let Some(status) = child.try_wait().unwrap() {
@@ -1616,6 +1728,7 @@ fn kill_maintenance_worker(root: &Path, operation: &str, after: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maintenance_refuses_scan_contention_and_consumer_detects_corrupt_state() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(&catalog, &[1]).await;
@@ -1697,6 +1810,7 @@ async fn assert_summary_checksum_rejected(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn corrupted_multi_batch_index_or_compaction_archive_fails_closed() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     append(&catalog, &[1]).await;
@@ -1765,8 +1879,8 @@ fn real_process_kills_publish_all_or_none_of_a_multi_batch_prefix() {
         .unwrap();
     for after in [false, true] {
         let temp = tempfile::tempdir().unwrap();
-        let catalog = runtime.block_on(fixture(temp.path()));
-        let previous = runtime.block_on(async {
+        let catalog = block_on_without_fork(&runtime, fixture(temp.path()));
+        let previous = block_on_without_fork(&runtime, async {
             append(&catalog, &[1, 1]).await;
             let mut driver = recover(catalog.clone()).await;
             let previous = driver.step().await.unwrap().unwrap();
@@ -1775,7 +1889,7 @@ fn real_process_kills_publish_all_or_none_of_a_multi_batch_prefix() {
             previous
         });
         kill_maintenance_worker(temp.path(), "batch", after);
-        runtime.block_on(async {
+        block_on_without_fork(&runtime, async {
             let gen = generation(&catalog).await;
             let mut sink = IcebergCdcSink::open(catalog.clone(), ident("changes"), gen.clone())
                 .await
@@ -1811,6 +1925,7 @@ fn real_process_kills_publish_all_or_none_of_a_multi_batch_prefix() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn all_empty_bootstrap_compacts_expires_and_resumes_from_no_source_snapshot() {
+    let _activity = PROCESS_ACTIVITY.enter();
     let temp = tempfile::tempdir().unwrap();
     let catalog = fixture(temp.path()).await;
     let first = {
