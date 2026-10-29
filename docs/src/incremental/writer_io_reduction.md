@@ -116,8 +116,9 @@ silently falling back on every step.
 The decoder is `IcebergCdcSink::commit_index(&Table)`: it reads the current snapshot only, uses
 `optd.commits` when present (checking that its last entry equals `optd.commit`), and after a
 compaction takes just the single `optd.commit` envelope rather than decoding the archive. An
-undecodable or foreign summary is treated as "no index" and falls back to the full read, which
-fails closed on the same corruption.
+undecodable or foreign summary must take the full read: it is not quietly treated as "no index",
+because continuing the log on an unverified history is what the read exists to prevent, and the
+read fails closed on the same corruption.
 
 The fallback distinguishes "no snapshot yet" from "snapshot present, index unreadable". Only the
 first may continue the log on the trusted path; the second must read, because the summary is also
