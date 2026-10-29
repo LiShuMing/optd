@@ -61,6 +61,8 @@
   - [Run the Typed SQL Loop](./incremental/sql_cli.md)
   - [Typed Iceberg Source Vectors](./incremental/typed_iceberg_sources.md)
   - [Changed-group Aggregate Maintenance](./incremental/group_maintenance.md)
+  - [Query-directed SQL Witness Fixtures](./incremental/query_witness_fixtures.md)
+  - [SQL Qualification Evidence](./incremental/sql_qualification.md)
   - [Checkpoint Directory Creation Durability](./incremental/checkpoint_directory_durability.md)
   - [Test Process Creation and Local File Locks](./incremental/test_process_isolation.md)
   - [Streams, Keyed Updates and Maintenance](./incremental/streams_and_maintenance.md)

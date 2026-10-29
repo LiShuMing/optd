@@ -1,0 +1,419 @@
+{
+  "format_version": 1,
+  "suite": "tpch",
+  "source": "existing_repository_sql_logic_tests",
+  "logical_queries": 22,
+  "schema": "schema.sql",
+  "schema_sha256": "e99da0640b4f15c3381867d8b284476d0e3edb89a3739806d1dc99ce490f0534",
+  "csv_path_base": "repository_root",
+  "csv_delimiter": "|",
+  "csv_has_header": false,
+  "scale_factor": null,
+  "scale_note": "Directory name sf0_01 is historical; exact observed row counts are authoritative.",
+  "tables": [
+    {
+      "name": "nation",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/nation.csv",
+      "rows": 25,
+      "sha256": "dc456efe79a51cc6aab9567fed7bc1f2d14e6aa84e0adea7c350a7d11a22b70e"
+    },
+    {
+      "name": "region",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/region.csv",
+      "rows": 5,
+      "sha256": "27f3b57fa3cc5aac2315fe2f02551f040476caca247941098a5bc03a0615f5ca"
+    },
+    {
+      "name": "part",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/part.csv",
+      "rows": 200,
+      "sha256": "67922e4f9ecd47af66c6d3ce6ae21c986beb4878e9b7e280f8cc1ce590ca99de"
+    },
+    {
+      "name": "supplier",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/supplier.csv",
+      "rows": 10,
+      "sha256": "0ae3d1b204293b53accf6db8f0af28226ebd0a28067c690052ed6e6eb53ff3ff"
+    },
+    {
+      "name": "partsupp",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/partsupp.csv",
+      "rows": 800,
+      "sha256": "b4734e9a8b1d571619562ef3909a7adc4c1094803e2518a0d254bd61899cb233"
+    },
+    {
+      "name": "customer",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/customer.csv",
+      "rows": 150,
+      "sha256": "31008b38ead9837aff92d474effce4b84c6563293da73a982a434449315f1527"
+    },
+    {
+      "name": "orders",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/orders.csv",
+      "rows": 1500,
+      "sha256": "32d74b9f374b6b4afd2325e29a4c63366cb85dcd965bb57077e250b8239443d7"
+    },
+    {
+      "name": "lineitem",
+      "csv": "datafusion-optd-cli/tpch-sf0_01/lineitem.csv",
+      "rows": 6005,
+      "sha256": "f9842fcc1a5239645a5d95b096c36455d4d5c5fd9e23d2ed96b60e12d2fd3a7b"
+    }
+  ],
+  "queries": [
+    {
+      "query_id": 1,
+      "variants": [
+        {
+          "variant_id": "1",
+          "sql": "queries/q01.sql",
+          "sha256": "a20d254175c1ba75cf84cda19ba69010e8eb79c2a609cc4a28f39159b2e80b3f"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q1.slt",
+      "source_sha256": "d359217885d597f2786b6abe6568a7d3eaa0ac541b868c65c1cda5b937d5126a",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 2,
+      "variants": [
+        {
+          "variant_id": "2",
+          "sql": "queries/q02.sql",
+          "sha256": "a15b4d188cdce5a5edf6d0fa628014d91ebf4b39cd49c49c7ebb240775a93ad1"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q2.slt.disabled",
+      "source_sha256": "2a781bf8230a45cd65748079a4cd3f1fa6387b436fb28121fb9973654191b0dc",
+      "old_harness_disabled": true,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 3,
+      "variants": [
+        {
+          "variant_id": "3",
+          "sql": "queries/q03.sql",
+          "sha256": "294426f4b38545b45c36ffc0e4e59be5cb4120b271b1ea19d14b10caa40fa59e"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q3.slt",
+      "source_sha256": "fa3617d3555e1cc28cfc9183b072e441a91a448c621aa396f50af2f53cacdacd",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 4,
+      "variants": [
+        {
+          "variant_id": "4",
+          "sql": "queries/q04.sql",
+          "sha256": "471f6ccfd0786b91994eb0a71db822c66b70a3e507354abd0a55c29ef9a84782"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q4.slt",
+      "source_sha256": "6a20f1ad634fdd574cd3c7ec29f83d09c6d9f5f5c6138f07a3c2ec826aa042ca",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 5,
+      "variants": [
+        {
+          "variant_id": "5",
+          "sql": "queries/q05.sql",
+          "sha256": "f608c56d3f32e0d63935818473ba3a36dd8f1e72a360ded36c153510772bb6ea"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q5.slt",
+      "source_sha256": "20c3dd12c0f6fbdf780839a6bd21ce3a13a4f77eb93cc756b7fa36040d6a41c9",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 6,
+      "variants": [
+        {
+          "variant_id": "6",
+          "sql": "queries/q06.sql",
+          "sha256": "a0ed1cd7ee4817ab7792f34ce0cbc0d0b1e59ff6c535769852740431ac43b522"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q6.slt",
+      "source_sha256": "531c1c897324bf35621542ff3c3351559e70b410ba7014a15047f35882379da0",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 7,
+      "variants": [
+        {
+          "variant_id": "7",
+          "sql": "queries/q07.sql",
+          "sha256": "7522f7e8907d824c79212fa29411364cdf87455512f96719256e6a5918127737"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q7.slt",
+      "source_sha256": "0cda45a15c79c876a177b4fa7bc958c2b700a80f97a73229db4cc4dbfd197e99",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 8,
+      "variants": [
+        {
+          "variant_id": "8",
+          "sql": "queries/q08.sql",
+          "sha256": "578051642c11d508fcc3e10556ab55824c3bf47ff0b2c00752fd85e41345b1ab"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q8.slt",
+      "source_sha256": "90ca7180210f171a3c491acd8758fdd937258b202a8d2215a4e475f18a8b818d",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 9,
+      "variants": [
+        {
+          "variant_id": "9",
+          "sql": "queries/q09.sql",
+          "sha256": "2f5e60fccda7e72db48444668ae94afbebf46ab3957caac6db2f6d4b480b4345"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q9.slt",
+      "source_sha256": "d327b9b33b6436492697079a48573fc9e39a4555b7718e389a9eff1e14d6d21a",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 10,
+      "variants": [
+        {
+          "variant_id": "10",
+          "sql": "queries/q10.sql",
+          "sha256": "0523dc9a93785f85e9df70dfd927c33530d6a1c73f36bc79c530ae293c212609"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q10.slt",
+      "source_sha256": "231b0a7f8f9ed12041f6858e192c81c788257d458ad2782ef8dd2be477ae0755",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 11,
+      "variants": [
+        {
+          "variant_id": "11",
+          "sql": "queries/q11.sql",
+          "sha256": "32ded7a972c1ca2eba61998557a82f214fa7148ab5fbaa75a1de465e095e5e7c"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q11.slt",
+      "source_sha256": "0f369cd5f1b212023fdcf1a0180b77958c94ca8bd7ffd9a0f2f07cd39222e260",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 12,
+      "variants": [
+        {
+          "variant_id": "12",
+          "sql": "queries/q12.sql",
+          "sha256": "4e87880e3b9a4bb942e5c88196cb1147f407feefb6ee571fea5daba145160bf0"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q12.slt",
+      "source_sha256": "657659357f54f2cbd196b523aead61fcf7f95daebca942f5ec83b38953019c57",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 13,
+      "variants": [
+        {
+          "variant_id": "13",
+          "sql": "queries/q13.sql",
+          "sha256": "1071a1fec00b0856bf4038f2ea67d112f4d78c580208775275d1cff58356c38d"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q13.slt",
+      "source_sha256": "40e5f62f10c3893a2805e60c16782e791e97cd61b1a7768b9a5ad47dc95de40f",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 14,
+      "variants": [
+        {
+          "variant_id": "14",
+          "sql": "queries/q14.sql",
+          "sha256": "4bb12538f4ea55cf95f692a99972b19712df1c6fcbe11f21845bd69c26f6b87e"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q14.slt",
+      "source_sha256": "a7e49eba0136499e720a01d75ea0055ecebe0a00cfab6de060ed49b8f6905415",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 15,
+      "variants": [
+        {
+          "variant_id": "15",
+          "sql": "queries/q15.sql",
+          "sha256": "7a2305f163a117566d84807377ffd7f32aa5d7142435d41145414e675aecf3b7"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q15.slt",
+      "source_sha256": "54a6f5c502e89ab341bddde8ba99a0a8a4a77689d5774e9c09ea10e18f2ecbfc",
+      "old_harness_disabled": false,
+      "transformations": [
+        "ddl_view_to_cte_preserving_parameters"
+      ],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 16,
+      "variants": [
+        {
+          "variant_id": "16",
+          "sql": "queries/q16.sql",
+          "sha256": "93828464e6c7ab77ed773bb0a3240e3a242fe37b8c5ebe671b4c4d7960c247c5"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q16.slt",
+      "source_sha256": "e6373f1a5af7f14eb7f1f6aa8d9d02814a7489eb81b2749d4679a3f4d4960c87",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 17,
+      "variants": [
+        {
+          "variant_id": "17",
+          "sql": "queries/q17.sql",
+          "sha256": "dd1d5e36c2f3096904516cff0056198884ee00c47d9335906cf45e1c1b985589"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q17.slt",
+      "source_sha256": "3251d550821f05fc609d0b8f95a5d56caa84bbe8a05a814716b9a6d6bc2b0bc1",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 18,
+      "variants": [
+        {
+          "variant_id": "18",
+          "sql": "queries/q18.sql",
+          "sha256": "9885968c014c82e839d606c2d12e1812bc9461c1325becd40bcdabadf9451d48"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q18.slt.disabled",
+      "source_sha256": "1c34533f4b47463d80e4028495e5c20a78ba81bcc79cbd400bfded13c204cdd3",
+      "old_harness_disabled": true,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 19,
+      "variants": [
+        {
+          "variant_id": "19",
+          "sql": "queries/q19.sql",
+          "sha256": "9e82207699f31054f40c491a998130cbf547a51736df1ee60b77e3b8ca21454d"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q19.slt",
+      "source_sha256": "96a2feffb46c81f11cba1c94c718a649e931f2b9aabbd453736c875ac5a82889",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 20,
+      "variants": [
+        {
+          "variant_id": "20",
+          "sql": "queries/q20.sql",
+          "sha256": "36c6e7fdd74873c8cc6dec8d09bdaa8a2ad71346b46a6797177cf6c0d48e8167"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q20.slt",
+      "source_sha256": "21eb1f33821ad4499145dc61d3678625cb7272b2da153546afe4950a924e08f2",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 21,
+      "variants": [
+        {
+          "variant_id": "21",
+          "sql": "queries/q21.sql",
+          "sha256": "7bf085c8d3ecaee4ecc6738be408e4033d60379d28e36eed455d4b5437fbf10f"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q21.slt.disabled",
+      "source_sha256": "a882b9ad0620171fc12663eb8be6903c15d90f12035c71fadfa4c28f13189e4f",
+      "old_harness_disabled": true,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 22,
+      "variants": [
+        {
+          "variant_id": "22",
+          "sql": "queries/q22.sql",
+          "sha256": "c6d257a66b06cdc07ec58b4e4cb53a5c821dbe0c602e7c36266ed51c5ede360e"
+        }
+      ],
+      "source": "optd-sqllogictest/slt/tpch-q22.slt",
+      "source_sha256": "d673c722a98205ace63237bfe2f831db5d1d93a9ac5770dd20d3ae7e4acf0941",
+      "old_harness_disabled": false,
+      "transformations": [],
+      "qualification": "repository_parameter_variant_not_tpc_certification",
+      "status": "available_not_executed"
+    }
+  ]
+}

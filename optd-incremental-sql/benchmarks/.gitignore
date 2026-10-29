@@ -1,0 +1,9 @@
+# TPC-derived upstream material is prepared locally from pinned URL/hash metadata.
+# Do not redistribute it as part of this repository's MIT source package.
+/tpcds/queries/*.sql
+/tpcds/schema.sql
+/tpcds/sources/*
+# These are reproducible extracts of already tracked SLT source, not new source.
+/tpch/queries/*.sql
+/tpch/schema.sql
+/tools/__pycache__/

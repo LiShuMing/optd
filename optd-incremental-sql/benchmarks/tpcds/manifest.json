@@ -1,0 +1,1900 @@
+{
+  "format_version": 1,
+  "suite": "tpcds",
+  "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen",
+  "source_ref": "v1.4.3",
+  "download_mirror": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen",
+  "logical_queries": 99,
+  "schema": "schema.sql",
+  "schema_sha256": "e9e1df6e61b2de380a51960704fa60fcb3227ef0736b1b1dba11c01c496ff9ae",
+  "schema_source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/include/dsdgen_schema.hpp",
+  "schema_source_sha256": "f8161105c0ff34d8660d617016e1040e870e8c744787bf410a8a37a2852b2dc3",
+  "schema_transformation": "exact_columns_and_types_from_upstream_generator_header_without_keys",
+  "csv_path_base": "manifest_directory",
+  "csv_delimiter": "|",
+  "csv_has_header": false,
+  "scale_factor": null,
+  "data_status": "not_generated",
+  "tables": [
+    {
+      "name": "call_center",
+      "columns": 31
+    },
+    {
+      "name": "catalog_page",
+      "columns": 9
+    },
+    {
+      "name": "catalog_returns",
+      "columns": 27
+    },
+    {
+      "name": "catalog_sales",
+      "columns": 34
+    },
+    {
+      "name": "customer",
+      "columns": 18
+    },
+    {
+      "name": "customer_address",
+      "columns": 13
+    },
+    {
+      "name": "customer_demographics",
+      "columns": 9
+    },
+    {
+      "name": "date_dim",
+      "columns": 28
+    },
+    {
+      "name": "household_demographics",
+      "columns": 5
+    },
+    {
+      "name": "income_band",
+      "columns": 3
+    },
+    {
+      "name": "inventory",
+      "columns": 4
+    },
+    {
+      "name": "item",
+      "columns": 22
+    },
+    {
+      "name": "promotion",
+      "columns": 19
+    },
+    {
+      "name": "reason",
+      "columns": 3
+    },
+    {
+      "name": "ship_mode",
+      "columns": 6
+    },
+    {
+      "name": "store",
+      "columns": 29
+    },
+    {
+      "name": "store_returns",
+      "columns": 20
+    },
+    {
+      "name": "store_sales",
+      "columns": 23
+    },
+    {
+      "name": "time_dim",
+      "columns": 10
+    },
+    {
+      "name": "warehouse",
+      "columns": 14
+    },
+    {
+      "name": "web_page",
+      "columns": 14
+    },
+    {
+      "name": "web_returns",
+      "columns": 24
+    },
+    {
+      "name": "web_sales",
+      "columns": 34
+    },
+    {
+      "name": "web_site",
+      "columns": 26
+    }
+  ],
+  "queries": [
+    {
+      "query_id": 1,
+      "variants": [
+        {
+          "variant_id": "1",
+          "sql": "queries/q01.sql",
+          "sha256": "e2bd6ebe714fda2c2af76542448918f6511b474fa7ac041d0392d3764ca0a95f"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/01.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/01.sql",
+      "source_sha256": "4bb3e9f7f14954669ce4c685eda1caf89f112ce1bedb5c7275318fbfd73e97f2",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 2,
+      "variants": [
+        {
+          "variant_id": "2",
+          "sql": "queries/q02.sql",
+          "sha256": "20de387d99e0ea6ef34cc333d29021862887e413fb29f492d6f4d79f86817d1c"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/02.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/02.sql",
+      "source_sha256": "20de387d99e0ea6ef34cc333d29021862887e413fb29f492d6f4d79f86817d1c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 3,
+      "variants": [
+        {
+          "variant_id": "3",
+          "sql": "queries/q03.sql",
+          "sha256": "043bcb3c8518cc44ec132a6e4ab299d567f17d3ad8a6f5b14abb0d44ba53e9ed"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/03.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/03.sql",
+      "source_sha256": "aa90e325656bd08a5ffab30ef660c6fce06e856c2f7975562e221562f5054c36",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 4,
+      "variants": [
+        {
+          "variant_id": "4",
+          "sql": "queries/q04.sql",
+          "sha256": "221f73ea8c56cabe6508f909aa2cbd72b43e105cfc203675f3f7b4bdb1818279"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/04.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/04.sql",
+      "source_sha256": "97c5894b2651a60ffe18177af6072bc8afd0e50a8f0000699974da771ceeffd3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 5,
+      "variants": [
+        {
+          "variant_id": "5",
+          "sql": "queries/q05.sql",
+          "sha256": "228fb8f1a69c0899ced8c696d0da63ea1ac712eba99c77d85b490dd76038e84f"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/05.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/05.sql",
+      "source_sha256": "228fb8f1a69c0899ced8c696d0da63ea1ac712eba99c77d85b490dd76038e84f",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 6,
+      "variants": [
+        {
+          "variant_id": "6",
+          "sql": "queries/q06.sql",
+          "sha256": "81e4ba8d0f149f15d8b0a197cf7fc48c39b2fea78738441692d16e6028787e4e"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/06.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/06.sql",
+      "source_sha256": "5461b610eb2c3101167f3a0f18dc05fdccdef1763b46816a2b4105f1ebc070b9",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 7,
+      "variants": [
+        {
+          "variant_id": "7",
+          "sql": "queries/q07.sql",
+          "sha256": "7857faaffa2dfbe1cf134793ab0053a5de3e2c0f51dc5f1ab7bec49f8740f2fd"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/07.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/07.sql",
+      "source_sha256": "3a43a0860a86b6f0d6ee182d05b41b1b8422d267e8c35a3fc8d8f9907d406b98",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 8,
+      "variants": [
+        {
+          "variant_id": "8",
+          "sql": "queries/q08.sql",
+          "sha256": "60ddd57ff4a7aaffdc79bfdbea9d7e7dbf9219fcaa8d327a2a757afe2afd2369"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/08.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/08.sql",
+      "source_sha256": "657f0e625b26009d6ec73d9d09ac32687209af63a3e9f78d2de777833216b5b9",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 9,
+      "variants": [
+        {
+          "variant_id": "9",
+          "sql": "queries/q09.sql",
+          "sha256": "4866452491c6fb7d06bfd74a4b1a9bd3ee7d1137b2297365f1fd2e3567b7bb95"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/09.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/09.sql",
+      "source_sha256": "2ee44aea575f87c2eaa014b7091974475aa8949b0248e3ee674358b78ac4d386",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 10,
+      "variants": [
+        {
+          "variant_id": "10",
+          "sql": "queries/q10.sql",
+          "sha256": "6ced103d6970b0e200415864e9299878c85ab4757f783c946e3b217fa5ab0978"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/10.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/10.sql",
+      "source_sha256": "d4199508dbc233b3d7b877001645beeafb4699677b6efc1d7d464d653662d42b",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 11,
+      "variants": [
+        {
+          "variant_id": "11",
+          "sql": "queries/q11.sql",
+          "sha256": "5bb4c2137adf37346ed02fd4c433020d60cfe97cee3fc0530d5e816c7c81b173"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/11.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/11.sql",
+      "source_sha256": "b9f6dee534ee5dc1c2693fd4d9668f6e8d7e52797ece829968861c4da14aa342",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 12,
+      "variants": [
+        {
+          "variant_id": "12",
+          "sql": "queries/q12.sql",
+          "sha256": "9c6fa3cbb57ad6ad91dd62e321848c7e210efd1832453ff2dc925fb3ffb841e3"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/12.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/12.sql",
+      "source_sha256": "4f31a294bbb2fb066e918361e86f524271871ceb635e10ac9afa9b72a068068b",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 13,
+      "variants": [
+        {
+          "variant_id": "13",
+          "sql": "queries/q13.sql",
+          "sha256": "cb18d8da82fadea05092c9ba10ccac6f536c256c00a0adba907cc3fff97f5b16"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/13.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/13.sql",
+      "source_sha256": "3146ad643f6bb4b9fcdf32fe77da440205653c3871003909cd728b0100fe437d",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 14,
+      "variants": [
+        {
+          "variant_id": "14",
+          "sql": "queries/q14.sql",
+          "sha256": "a10708d77bfb2da2b7c2b2b876a51a5141641809af4ca243099faa6e9ea4f0f3"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/14.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/14.sql",
+      "source_sha256": "a10708d77bfb2da2b7c2b2b876a51a5141641809af4ca243099faa6e9ea4f0f3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 15,
+      "variants": [
+        {
+          "variant_id": "15",
+          "sql": "queries/q15.sql",
+          "sha256": "3eb11cdc24aef375e44258792b1e6c800856a67228805b6963f9796e462ce65f"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/15.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/15.sql",
+      "source_sha256": "7e7cc81e4eb44752d10c47af788a364f70bcd647d70b4329452c1b567929f833",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 16,
+      "variants": [
+        {
+          "variant_id": "16",
+          "sql": "queries/q16.sql",
+          "sha256": "faec004413637715558b40d50c95760b4b8fe3a9dce75ed756170e0ebb5a0f0c"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/16.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/16.sql",
+      "source_sha256": "45049a2ecd9261d941812b4b52309be5454ea25281c3e0bca2b21f84502e7465",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 17,
+      "variants": [
+        {
+          "variant_id": "17",
+          "sql": "queries/q17.sql",
+          "sha256": "f4eac88b697e308f5addba7072977c9aa2cd4555085305364653dd285064bee1"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/17.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/17.sql",
+      "source_sha256": "311a7271a53d72e07acd829f09c2a17bc090d5af4773e7de399f066f94d8c35b",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 18,
+      "variants": [
+        {
+          "variant_id": "18",
+          "sql": "queries/q18.sql",
+          "sha256": "ebc1e6cc069902abc3ac87b637b5b02e3f08f076cd3d9dd15303327e8c6b225c"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/18.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/18.sql",
+      "source_sha256": "ebc1e6cc069902abc3ac87b637b5b02e3f08f076cd3d9dd15303327e8c6b225c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 19,
+      "variants": [
+        {
+          "variant_id": "19",
+          "sql": "queries/q19.sql",
+          "sha256": "b08eb935f761a7be2519dcb5fe69d5af9513f126953df172ccd6137f0a26507d"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/19.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/19.sql",
+      "source_sha256": "bb7638aa2f322ded77c8eb6e9f06ba8a9bd21fdb3ecb27e2acbe7da681e7ad39",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 20,
+      "variants": [
+        {
+          "variant_id": "20",
+          "sql": "queries/q20.sql",
+          "sha256": "c9f9ff08184f4207252b052ce054c55d2de462c1803f859ae4c03ab54fdf4d35"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/20.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/20.sql",
+      "source_sha256": "cad0d675d7acb5dae53950a38501b5ac2ce23e9fa3c95e1b606b6b2efd4d7b4e",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 21,
+      "variants": [
+        {
+          "variant_id": "21",
+          "sql": "queries/q21.sql",
+          "sha256": "03b87250d6ee5badc16adb2efd7461f1e2ed21d67c5b71f15d2d9f2d1f8bb0c8"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/21.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/21.sql",
+      "source_sha256": "640f57dfc60d25f60171b9b6c6f2eada8083b5f4577858b9cc3c1c304ea83294",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 22,
+      "variants": [
+        {
+          "variant_id": "22",
+          "sql": "queries/q22.sql",
+          "sha256": "935579b8b9b82fc3065f504af045e4e7e1e87185a26e7bc36a98bd3eee5ec1df"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/22.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/22.sql",
+      "source_sha256": "935579b8b9b82fc3065f504af045e4e7e1e87185a26e7bc36a98bd3eee5ec1df",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 23,
+      "variants": [
+        {
+          "variant_id": "23",
+          "sql": "queries/q23.sql",
+          "sha256": "ac14d74ed9b53d331bd88b6bd001183f273d1e4349b31557f2ab9ab59cbf3895"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/23.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/23.sql",
+      "source_sha256": "ac14d74ed9b53d331bd88b6bd001183f273d1e4349b31557f2ab9ab59cbf3895",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 24,
+      "variants": [
+        {
+          "variant_id": "24",
+          "sql": "queries/q24.sql",
+          "sha256": "6b037790df281c0b59a6dbb915b749d193b7f5848ec7bb477c0cac7ea0fe54f5"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/24.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/24.sql",
+      "source_sha256": "6b037790df281c0b59a6dbb915b749d193b7f5848ec7bb477c0cac7ea0fe54f5",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 25,
+      "variants": [
+        {
+          "variant_id": "25",
+          "sql": "queries/q25.sql",
+          "sha256": "4072b49e6bb9bef30dbd21ae0c050de92d7b545d86926167d55b215fbf70152b"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/25.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/25.sql",
+      "source_sha256": "e25301476c5ce8007b6cc94f72a1d62c898d9cbaac6b17bfb9528f24ac91edfc",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 26,
+      "variants": [
+        {
+          "variant_id": "26",
+          "sql": "queries/q26.sql",
+          "sha256": "9f921504676b681f238d16a3a67a6b321ad1004b7c8f310c15be4fae31f379b6"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/26.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/26.sql",
+      "source_sha256": "32d208d11cc5a1663528a81abd4168ec9c46c39e591ab5f80e37d0b98da190bb",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 27,
+      "variants": [
+        {
+          "variant_id": "27",
+          "sql": "queries/q27.sql",
+          "sha256": "bb7928b546f36d99bad2d369ddfcef13d43b5b30ecb10a63e688628e876eb115"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/27.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/27.sql",
+      "source_sha256": "bb7928b546f36d99bad2d369ddfcef13d43b5b30ecb10a63e688628e876eb115",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 28,
+      "variants": [
+        {
+          "variant_id": "28",
+          "sql": "queries/q28.sql",
+          "sha256": "78209bf8e7b43f67c239ce4e2d5cac385032f76d0b3098c3b1cbad15a08e406b"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/28.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/28.sql",
+      "source_sha256": "231f3723e527b0a1855253f7e399b4b54c14e5bbdf49c2218416aaf6b533a28c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 29,
+      "variants": [
+        {
+          "variant_id": "29",
+          "sql": "queries/q29.sql",
+          "sha256": "e716e2e4d3f1746b2ffd58459bfdd091e3258b65039dae8f4d8f9f5ff04cea54"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/29.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/29.sql",
+      "source_sha256": "30f64f3635410e873a06169215e382851c868f73319149a527adfbceb2434bc8",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 30,
+      "variants": [
+        {
+          "variant_id": "30",
+          "sql": "queries/q30.sql",
+          "sha256": "70347fd63cab82d04dc6902dbdb0de39508753e07d2222f532f932b697a9967b"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/30.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/30.sql",
+      "source_sha256": "b20d5113977e5936f53e7f2cb99eaeabbfa63c6d8fa98c8cf6629a06b10076e8",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 31,
+      "variants": [
+        {
+          "variant_id": "31",
+          "sql": "queries/q31.sql",
+          "sha256": "d1d1ee84af35662f8e0b766c0c7bbc38c1277c243a87433ee10c1e63c30c4d8c"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/31.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/31.sql",
+      "source_sha256": "37801a48a2277a3618d39b4bf621397b53da45d9b0f384f03b3f8a6532d53924",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 32,
+      "variants": [
+        {
+          "variant_id": "32",
+          "sql": "queries/q32.sql",
+          "sha256": "52609e8cb884c899985c041176bddb0655b09a2c786b377cf598c22c04bf3cc0"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/32.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/32.sql",
+      "source_sha256": "19234afe1bcf1db9c9f07d1a86ecb164119a2d2b1a1f9a926f8dbec7f8258f2d",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 33,
+      "variants": [
+        {
+          "variant_id": "33",
+          "sql": "queries/q33.sql",
+          "sha256": "cf523e0317ea5bf3cd2de40e1ae1869dd2887ef44b7df276e527d12ec98d4d16"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/33.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/33.sql",
+      "source_sha256": "947bbb2cd3db4fb94ea833e16c3330df368ade50a32cd74c62cf2915605f1150",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 34,
+      "variants": [
+        {
+          "variant_id": "34",
+          "sql": "queries/q34.sql",
+          "sha256": "62d93af535f740ba24505f2ce726381adfa97a1e727107c9b4fc025ceb162f19"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/34.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/34.sql",
+      "source_sha256": "3765075f5566834c9e45be8b0d3728c4599f614306df0ded4cedae86daa3594c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 35,
+      "variants": [
+        {
+          "variant_id": "35",
+          "sql": "queries/q35.sql",
+          "sha256": "f77250d762a24da226142a0e48afbf9a9bb21ee58785f7102526aca5b6e74f7f"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/35.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/35.sql",
+      "source_sha256": "0ea20c6c2e25c56d1b256aaa531318661b907d839d2925d2bb48d3345346065d",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 36,
+      "variants": [
+        {
+          "variant_id": "36",
+          "sql": "queries/q36.sql",
+          "sha256": "b0ce70d30282b65761588626d32dc8b8826ac917de38b09bb2ca5af0220ff0d4"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/36.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/36.sql",
+      "source_sha256": "188c47bcba1bf229310ba36622c37c9c632af5f6950b83cb5fff29d59b8a732e",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 37,
+      "variants": [
+        {
+          "variant_id": "37",
+          "sql": "queries/q37.sql",
+          "sha256": "0bfd111dcf72699c9c84185e56c3cc0fa50152cc9523799303533ca0b72169ea"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/37.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/37.sql",
+      "source_sha256": "f0c4d121766f5112a92cd2f6c14cec3ee28d689431e3d155ae521c53d9c80d21",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 38,
+      "variants": [
+        {
+          "variant_id": "38",
+          "sql": "queries/q38.sql",
+          "sha256": "11683f904d6007f72076d70def3bd1c912d5eab50c40d960176c37595244552a"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/38.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/38.sql",
+      "source_sha256": "7c54ae009047285b53df3619392f87eab007197aaa39ebb3987e2a070759dad3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 39,
+      "variants": [
+        {
+          "variant_id": "39",
+          "sql": "queries/q39.sql",
+          "sha256": "42b0369099170ebbfd15d782c1427c7b4f60254a033e49b58e9556a67414ca73"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/39.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/39.sql",
+      "source_sha256": "a8b5c4867a595122e52f3823ceb116729c8ea4ad80cb446bab230982e96bd6be",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 40,
+      "variants": [
+        {
+          "variant_id": "40",
+          "sql": "queries/q40.sql",
+          "sha256": "c9d1d6af011ad46e327458eb85032f8f672eba812d7e3ed0faee7d9c216d4b45"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/40.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/40.sql",
+      "source_sha256": "d30c0576b8e7de9b43f26f1fbd92381ed9eacbb2c0ad7ed343d651afba552fe1",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 41,
+      "variants": [
+        {
+          "variant_id": "41",
+          "sql": "queries/q41.sql",
+          "sha256": "7f270876739ad5363be54da43aad1219456ca3920047ee04ef062930cf0d3f5d"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/41.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/41.sql",
+      "source_sha256": "939a111a6503d3a9f75c03f7888224b2537ec04e669ddb9bb3a74ccc7649f93c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 42,
+      "variants": [
+        {
+          "variant_id": "42",
+          "sql": "queries/q42.sql",
+          "sha256": "3182d6de8631035ead6df9ede70319d39ff0f5e2de048436a7e576f349529e83"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/42.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/42.sql",
+      "source_sha256": "5f5a73022aa2734b5c2a819332df5c288556ff3305b4da4e4c73dac3c5711a24",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 43,
+      "variants": [
+        {
+          "variant_id": "43",
+          "sql": "queries/q43.sql",
+          "sha256": "cbe87121913bc42846894117c064d34feb98bd9b040c141712d7d506d417af75"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/43.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/43.sql",
+      "source_sha256": "aef363e3bb67d0772cd184a7e55b0a337443eda9785657bf70edb3b4c685f875",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 44,
+      "variants": [
+        {
+          "variant_id": "44",
+          "sql": "queries/q44.sql",
+          "sha256": "ca28b5e39598763154e7f71d6e86c0ce36d90142c5c10b654054493ba35f6d02"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/44.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/44.sql",
+      "source_sha256": "b650f133b8f16088044d5feef737330ef0b9db1933a4ae8267d30d638a9bb64e",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 45,
+      "variants": [
+        {
+          "variant_id": "45",
+          "sql": "queries/q45.sql",
+          "sha256": "149563e4665a1abcc512dead10b209b00eae7337721f9a4c7f3225dbedead5f8"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/45.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/45.sql",
+      "source_sha256": "907c83f62e210e564bd9c60bff4c8e9af5e7dcfb4ca6fccd946b22a55b0320f9",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 46,
+      "variants": [
+        {
+          "variant_id": "46",
+          "sql": "queries/q46.sql",
+          "sha256": "9883550a979153b840b45039e132525173a8c854a031f218c70cece5734e8407"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/46.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/46.sql",
+      "source_sha256": "0c87a152ab2e194901ef6e429c783011c76825a1e656bb4067729207196b07b3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 47,
+      "variants": [
+        {
+          "variant_id": "47",
+          "sql": "queries/q47.sql",
+          "sha256": "0d4a1bdd0a0bd73455dcefc88d9e54ec8aad1a7105148ef3545bc39a79bf7117"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/47.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/47.sql",
+      "source_sha256": "52a53fd26b6e8a4e0ef6bdc3f87799338f8c161af0b4cc31e23d68ca6072a9f3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 48,
+      "variants": [
+        {
+          "variant_id": "48",
+          "sql": "queries/q48.sql",
+          "sha256": "09546c6521662d2525055d0cb740f70ad7898de6a31aca5a46455f3a471cdfdf"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/48.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/48.sql",
+      "source_sha256": "e5771c956d7a39aa0d5a4b399e58b35c613f947fce2e9301141273cd6e7bc41c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 49,
+      "variants": [
+        {
+          "variant_id": "49",
+          "sql": "queries/q49.sql",
+          "sha256": "af45224645158997690206b3183f9b128441d22636a2e90c96c8ebb1d033ee01"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/49.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/49.sql",
+      "source_sha256": "cc63838caa7eff20a130494b4f8d12ec29de4b2b861bb84748ecd0edd01d7bb3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 50,
+      "variants": [
+        {
+          "variant_id": "50",
+          "sql": "queries/q50.sql",
+          "sha256": "c3dfd8672253b959e0235a0c042014bba17136ee2278791d8cde54e097f2dd2a"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/50.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/50.sql",
+      "source_sha256": "449e3ce036d72f31578b049c4b15bbd50350e2ad39628ee7358f228683f7dceb",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 51,
+      "variants": [
+        {
+          "variant_id": "51",
+          "sql": "queries/q51.sql",
+          "sha256": "89126f6d22d3a18da2dc7386ae871e240ac2586de7783aa267a09688a162ffb0"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/51.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/51.sql",
+      "source_sha256": "a68ba235faf1fec5f70e6833c0de4b82c955f17cbff8173acd76b8945e0d9fea",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 52,
+      "variants": [
+        {
+          "variant_id": "52",
+          "sql": "queries/q52.sql",
+          "sha256": "ecf45e1d64ffdcd6715acd37510f624f2c02fba187da1d20f138e0ff710f6fa3"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/52.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/52.sql",
+      "source_sha256": "3f810b09d758dc10c6f7300fa740bcf64ad3f99725ccdeff770a25c6d682d30f",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 53,
+      "variants": [
+        {
+          "variant_id": "53",
+          "sql": "queries/q53.sql",
+          "sha256": "ad7d1c096690703a625a4d35f9abc1ca0b124b144da70b4a358b9c491292d3ee"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/53.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/53.sql",
+      "source_sha256": "5410b708d2de9a86b9ecb8579fa6b9d24c2a00c378524e9071c18871f63b5271",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 54,
+      "variants": [
+        {
+          "variant_id": "54",
+          "sql": "queries/q54.sql",
+          "sha256": "d055b1a0409391a414595dc0bcd38d2e674f13c968d87f3d5fdbd68d06cc2dc3"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/54.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/54.sql",
+      "source_sha256": "9df16b46def919530282ddb7d18fb04d30c67424153f7a3c87f3d60565d977f4",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 55,
+      "variants": [
+        {
+          "variant_id": "55",
+          "sql": "queries/q55.sql",
+          "sha256": "54b39b3dc01c91f6f1310d810dd743434244bd9a1b03da3cb7f2ca93c10ab20f"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/55.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/55.sql",
+      "source_sha256": "8d611e03883ec0d593aa5d5ffd42d02d028529fe72fd604147c4e34fb84192df",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 56,
+      "variants": [
+        {
+          "variant_id": "56",
+          "sql": "queries/q56.sql",
+          "sha256": "66d9162a488249565e653aa061d34638b19e8deadc62bac7c1ea3a67ae7c92e9"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/56.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/56.sql",
+      "source_sha256": "c6a35d5f97cf87c2c059b17f0ec982614105ec19c2fc0a04c9326384f5fe4b0b",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 57,
+      "variants": [
+        {
+          "variant_id": "57",
+          "sql": "queries/q57.sql",
+          "sha256": "994abab067d0d80b640192cc91dfe9f237f306adc84d5daf5846060f85481fe1"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/57.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/57.sql",
+      "source_sha256": "3b72788cb9bd70911e7e4d1ab9bb2f5c47ce5b7f3bcaa1b004e200419de6c20e",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 58,
+      "variants": [
+        {
+          "variant_id": "58",
+          "sql": "queries/q58.sql",
+          "sha256": "909e7f5b4b920fc63a3b9d6950d8f3796f1f9ddef48bef2a411c12f0eab9650e"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/58.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/58.sql",
+      "source_sha256": "e1ca660c8b703f29d5124de6c4cf6e0f38ce1baeac56c08dd8c0201a2a6e56c3",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 59,
+      "variants": [
+        {
+          "variant_id": "59",
+          "sql": "queries/q59.sql",
+          "sha256": "78def261f31c1d92a3c3588d027538905d93a90dd589eb21e988a471f7aef906"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/59.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/59.sql",
+      "source_sha256": "2137eef7a8171764cf930f56bfc119b1033502880f89e912c9486ebef0a1f794",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 60,
+      "variants": [
+        {
+          "variant_id": "60",
+          "sql": "queries/q60.sql",
+          "sha256": "b63f01709bf2ef5321afc20a95b6bdffb2a964cd3dfec6f19547c2c3118e0892"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/60.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/60.sql",
+      "source_sha256": "0771b160900b88ac2b3cd85da31a6393bb44f9c98f51bb6e688455cbad5c990a",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 61,
+      "variants": [
+        {
+          "variant_id": "61",
+          "sql": "queries/q61.sql",
+          "sha256": "01d722754a223f9f101ab62bd756b7ef49aff91982e2fa06e078dd3f633282b6"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/61.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/61.sql",
+      "source_sha256": "96069e73d3bae7d90a76eef2e5e40f2c441100096865cd42c3ee6068e631b7ac",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 62,
+      "variants": [
+        {
+          "variant_id": "62",
+          "sql": "queries/q62.sql",
+          "sha256": "c2d8a1b4b675bb48ade33e6c2889c42f27c729d350948f5c07eb8aad41460bc0"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/62.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/62.sql",
+      "source_sha256": "a9776da0805af03d8010367b0d7427563e6e91f33616346a7457e074a450f167",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 63,
+      "variants": [
+        {
+          "variant_id": "63",
+          "sql": "queries/q63.sql",
+          "sha256": "e665934a7b8af11f690572952eda2b990bdcb127538ab0ade8fbece9eda6096a"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/63.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/63.sql",
+      "source_sha256": "30a83cd8e11a9d4b52d8c25694a2d578a187e1d75a8f32c3ac8fd12083a32ceb",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 64,
+      "variants": [
+        {
+          "variant_id": "64",
+          "sql": "queries/q64.sql",
+          "sha256": "e8d89fec973f7c5aed02885218ce9e67b5f5137301b3d7629a50fc39560b5bcf"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/64.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/64.sql",
+      "source_sha256": "1948dcb9b0d4b108f5a7696d39332b292090128801b513884323fc4012df52d7",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 65,
+      "variants": [
+        {
+          "variant_id": "65",
+          "sql": "queries/q65.sql",
+          "sha256": "a2f14a96bb6280a725a18e84a94b99fda0a299e0c1aacbdb56a07b40d364ceb3"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/65.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/65.sql",
+      "source_sha256": "ca2a5a2d0a80789388b7602c6ae1e32563db1172f88dd565bc7130e73b4d2d95",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 66,
+      "variants": [
+        {
+          "variant_id": "66",
+          "sql": "queries/q66.sql",
+          "sha256": "4e7eec2ac5311dba35c26fae2d759fd5aa9f1530054dfdf436eb4b51987b19c2"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/66.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/66.sql",
+      "source_sha256": "a3a07df1572b10ca5da7db0170b54045ffbfc60f73afe1a40d4d83d4ba3d573f",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 67,
+      "variants": [
+        {
+          "variant_id": "67",
+          "sql": "queries/q67.sql",
+          "sha256": "fd33ffe7f31cd116e8f1cc4077bbe927d462b4df94435507b3d49ee3ee40ecac"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/67.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/67.sql",
+      "source_sha256": "fd33ffe7f31cd116e8f1cc4077bbe927d462b4df94435507b3d49ee3ee40ecac",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 68,
+      "variants": [
+        {
+          "variant_id": "68",
+          "sql": "queries/q68.sql",
+          "sha256": "68aabc7647fabad36f7e504c5273fc497b63a149029b259d309c6b7c34fd2eb9"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/68.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/68.sql",
+      "source_sha256": "05ecbb96a41f83b622813cf6fa981181788c166c5ee7a8ca16cdc41813b6d154",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 69,
+      "variants": [
+        {
+          "variant_id": "69",
+          "sql": "queries/q69.sql",
+          "sha256": "da9ef73b7bbd7077c0eb8236aac61a7944b5c2e621c3e7e72d383159cf99e07d"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/69.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/69.sql",
+      "source_sha256": "70bf7fd5017ef9f43ee754f1da336c9fa5795c25b136efd937ec54d729ff06fb",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 70,
+      "variants": [
+        {
+          "variant_id": "70",
+          "sql": "queries/q70.sql",
+          "sha256": "712e80802f24b111e09f3cd685f46e75202009524b132609781d02f703fb08c7"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/70.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/70.sql",
+      "source_sha256": "712e80802f24b111e09f3cd685f46e75202009524b132609781d02f703fb08c7",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 71,
+      "variants": [
+        {
+          "variant_id": "71",
+          "sql": "queries/q71.sql",
+          "sha256": "77b037335139fbb8695f60c40dfd42486459a41b8b4c68dac64fb7c4e9426ef1"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/71.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/71.sql",
+      "source_sha256": "f0cc9268e08c4b3d6eda5fdd65f318bce68d915b1226b52e1dd80b1354256064",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 72,
+      "variants": [
+        {
+          "variant_id": "72",
+          "sql": "queries/q72.sql",
+          "sha256": "28c0755a201dca3d37930e135a3f0ca09784be6ee2897894fe915508dfe1b0f9"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/72.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/72.sql",
+      "source_sha256": "8646866ad7d1ba9e888b70c7f5ccf6480f8085475381b8ca747c85c0c409a744",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 73,
+      "variants": [
+        {
+          "variant_id": "73",
+          "sql": "queries/q73.sql",
+          "sha256": "d2c8ddddfb3d6658d0ebfeb0ebfd3ec085178d2961c958489ac869a399253393"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/73.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/73.sql",
+      "source_sha256": "4d64a45158234f57a34486d58a5c9fb2586df3f6817788131cdb2b70ba78e987",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 74,
+      "variants": [
+        {
+          "variant_id": "74",
+          "sql": "queries/q74.sql",
+          "sha256": "83f37477b0a50213c8da08fda00725199973b15077ed0e83c5753ee21b05113b"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/74.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/74.sql",
+      "source_sha256": "ce3c5bef42e6d8f44037afaee0802849888a47930053c7d5b28d8ba8ab1d4668",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 75,
+      "variants": [
+        {
+          "variant_id": "75",
+          "sql": "queries/q75.sql",
+          "sha256": "ce7ac2956121607cc4f9ea20b2847b31baaf336ceb80b3a76f925e208b2d650a"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/75.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/75.sql",
+      "source_sha256": "f9159e82033688a3cd5fa499dc55ef3be66bc7ce447d6239068eb6bd15945c5d",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 76,
+      "variants": [
+        {
+          "variant_id": "76",
+          "sql": "queries/q76.sql",
+          "sha256": "88cd2397b1dd4400dea984cda47ad34692be7bad2ec7d8823afaf7eaacf10565"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/76.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/76.sql",
+      "source_sha256": "29ab90a722582024074888f0c398da7b0c766ec97da56facdf41ee95e3616bc0",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 77,
+      "variants": [
+        {
+          "variant_id": "77",
+          "sql": "queries/q77.sql",
+          "sha256": "e4fff077e327e54143b705d9a3392b0dbca05bfaef67c9dbb4b305d438d05039"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/77.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/77.sql",
+      "source_sha256": "e4fff077e327e54143b705d9a3392b0dbca05bfaef67c9dbb4b305d438d05039",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 78,
+      "variants": [
+        {
+          "variant_id": "78",
+          "sql": "queries/q78.sql",
+          "sha256": "6593b962ce36d95e9021575a0967aa43ffbd1b747512d9485681dac409dadcfc"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/78.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/78.sql",
+      "source_sha256": "f2842fed01b2936d5dddb0afefe84f4309147664930f97f38515aff7f2819416",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 79,
+      "variants": [
+        {
+          "variant_id": "79",
+          "sql": "queries/q79.sql",
+          "sha256": "3e158c9089e06f5a801116469218c27e7fcaff705b2ceb4bba29b3dbe451f516"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/79.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/79.sql",
+      "source_sha256": "3e158c9089e06f5a801116469218c27e7fcaff705b2ceb4bba29b3dbe451f516",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 80,
+      "variants": [
+        {
+          "variant_id": "80",
+          "sql": "queries/q80.sql",
+          "sha256": "b05ac664972bde94ddd71accee4f7b90b43e090c3f349a08c2eb3fcb644b6fee"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/80.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/80.sql",
+      "source_sha256": "b05ac664972bde94ddd71accee4f7b90b43e090c3f349a08c2eb3fcb644b6fee",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 81,
+      "variants": [
+        {
+          "variant_id": "81",
+          "sql": "queries/q81.sql",
+          "sha256": "660218d5d0dc0776ffd0856b4e8d0f4271a07cebc4e9e4d9ea21c82e6ee8e1ca"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/81.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/81.sql",
+      "source_sha256": "26d45470b157d9aad80709b7529a0ec5f97a31c216cc7342423461d4d4040880",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 82,
+      "variants": [
+        {
+          "variant_id": "82",
+          "sql": "queries/q82.sql",
+          "sha256": "6f3389af8fa0424ae86e8342ca6a2607a4a3604e533786bde916d420399d7d94"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/82.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/82.sql",
+      "source_sha256": "126d0bda5bf9fc9824caf6620cf393f1aa0e66446a16db51be4891ddea7b4d54",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 83,
+      "variants": [
+        {
+          "variant_id": "83",
+          "sql": "queries/q83.sql",
+          "sha256": "0d714b7dc9742dbb2ae5a147bde80c28106244f9ead57d629425c3d627725d39"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/83.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/83.sql",
+      "source_sha256": "a518b319097f0f9cde099e550b03dc020d075b886d052d326fcef75bea88e030",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 84,
+      "variants": [
+        {
+          "variant_id": "84",
+          "sql": "queries/q84.sql",
+          "sha256": "2f8eedca3b710ecd4abcc5a3ee22b0a051ccd757fe6c31ce68d028e3c23e87bc"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/84.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/84.sql",
+      "source_sha256": "2f8eedca3b710ecd4abcc5a3ee22b0a051ccd757fe6c31ce68d028e3c23e87bc",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 85,
+      "variants": [
+        {
+          "variant_id": "85",
+          "sql": "queries/q85.sql",
+          "sha256": "7a394da230c77422f180902dcfadab2ebed59f107fd5aadc80a6a3f581d307e2"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/85.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/85.sql",
+      "source_sha256": "09f2031d466106cfe8a42db595bf2184d0db3144f1d323b74556b02911bde766",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 86,
+      "variants": [
+        {
+          "variant_id": "86",
+          "sql": "queries/q86.sql",
+          "sha256": "25014d455cbaf008a84a0c919cc6af8c502b7c147d69931bcf512e4634f4df16"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/86.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/86.sql",
+      "source_sha256": "25014d455cbaf008a84a0c919cc6af8c502b7c147d69931bcf512e4634f4df16",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 87,
+      "variants": [
+        {
+          "variant_id": "87",
+          "sql": "queries/q87.sql",
+          "sha256": "8fecb0293421f39bf53f420fed025d91b647af4e66d5d549b845e72d3e5f3fcd"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/87.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/87.sql",
+      "source_sha256": "8fecb0293421f39bf53f420fed025d91b647af4e66d5d549b845e72d3e5f3fcd",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 88,
+      "variants": [
+        {
+          "variant_id": "88",
+          "sql": "queries/q88.sql",
+          "sha256": "bdef7de26d2441180a2ef71e50fd5b0e291625feb7801794118b9299e9b628a7"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/88.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/88.sql",
+      "source_sha256": "45cdbfbeace0830783132bd88c3b1c870d1f53690d13253b8abe05eb27cbd758",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 89,
+      "variants": [
+        {
+          "variant_id": "89",
+          "sql": "queries/q89.sql",
+          "sha256": "37f4358848d167eba016662dd7a4c079e4c730ce288ad476c6f7c5e4912d3561"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/89.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/89.sql",
+      "source_sha256": "3a53eb42db11990dc11cab4183724b9328af6285cc9181dfb797440ba116ff2a",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 90,
+      "variants": [
+        {
+          "variant_id": "90",
+          "sql": "queries/q90.sql",
+          "sha256": "c1ff99d82ac6cbb9ec6cffeaa044587e403ac747a693088e11014c94e2d96419"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/90.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/90.sql",
+      "source_sha256": "866f422328ea50014e2704a9514ea537f3d93376e3941d39859a293f4c1b67e6",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 91,
+      "variants": [
+        {
+          "variant_id": "91",
+          "sql": "queries/q91.sql",
+          "sha256": "ab22f369552e74841761f8813c3517c0b2f98666539b7f9c6bf9038517120184"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/91.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/91.sql",
+      "source_sha256": "ba4bc7ae40d24da58abc28e13431e4526091c149b7b6b7fa5c3c2336624fef89",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 92,
+      "variants": [
+        {
+          "variant_id": "92",
+          "sql": "queries/q92.sql",
+          "sha256": "908730316f248736a0e1756fc78c7ac232725127238a331c5b80d9db969c1dde"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/92.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/92.sql",
+      "source_sha256": "b4fa45f2580bc30be6d3c1e0f9a968e55b9ff0e79a912f2d7a6050d5049b30bc",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 93,
+      "variants": [
+        {
+          "variant_id": "93",
+          "sql": "queries/q93.sql",
+          "sha256": "2e7628a2efdfca94572e2f421436484724c424133b55e857e9d62255210154f6"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/93.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/93.sql",
+      "source_sha256": "b0346b477c8f528d3a948eb3fef746b68d0abfa3dbe1a96f4516b17c37e09059",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 94,
+      "variants": [
+        {
+          "variant_id": "94",
+          "sql": "queries/q94.sql",
+          "sha256": "28b631cb929c93aa303812f43f42f55835fa407978acf07b61b2fd9ac7c7a81e"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/94.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/94.sql",
+      "source_sha256": "d6ee49b73dd7e24affd6973f95c2b77913a63789845ce81e6e373342db4e468f",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 95,
+      "variants": [
+        {
+          "variant_id": "95",
+          "sql": "queries/q95.sql",
+          "sha256": "f896e702c63ac56c500a45921da2595f0b1a261b7945d6dcaba998c7004aec8a"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/95.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/95.sql",
+      "source_sha256": "925f3944c0eeec6d675aef6599375671e06f1c320a90efbbdda89d5f91b6283c",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 96,
+      "variants": [
+        {
+          "variant_id": "96",
+          "sql": "queries/q96.sql",
+          "sha256": "c8b53e48341b47f933f87dd40e4013d6e00604e54602e74e5d79d9277c2fbdc5"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/96.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/96.sql",
+      "source_sha256": "ef0fb7bd1cadb3d1d011b04506e6b537221b8836eb99715e229692d838fb346e",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 97,
+      "variants": [
+        {
+          "variant_id": "97",
+          "sql": "queries/q97.sql",
+          "sha256": "ddcf3ba3e1897dc5f4fc6faf617bd92d684a0916d50219ea6b26eb8551b261cd"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/97.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/97.sql",
+      "source_sha256": "431ef57c32e3d4fe8e9f675fc2dd3f8e43b75fa2fb78456c3e26b32721a263e4",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 98,
+      "variants": [
+        {
+          "variant_id": "98",
+          "sql": "queries/q98.sql",
+          "sha256": "46e75e78e81a5d3bfb88da05b18b63a00e929042d8e8c2c075af3464d6cc1900"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/98.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/98.sql",
+      "source_sha256": "46e75e78e81a5d3bfb88da05b18b63a00e929042d8e8c2c075af3464d6cc1900",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    },
+    {
+      "query_id": 99,
+      "variants": [
+        {
+          "variant_id": "99",
+          "sql": "queries/q99.sql",
+          "sha256": "32a00d5b0c88ed75cfd19c6e4597b3eac8d71285ef16e429776ed86ebab34618"
+        }
+      ],
+      "source": "https://github.com/duckdb/duckdb/tree/v1.4.3/extension/tpcds/dsdgen/queries/99.sql",
+      "download_url": "https://cdn.jsdelivr.net/gh/duckdb/duckdb@v1.4.3/extension/tpcds/dsdgen/queries/99.sql",
+      "source_sha256": "ee7009261a59252e30d67def9e9fb58d350c54cd84c10df166c279f4a73df9c5",
+      "transformations": [
+        "split_statements_without_semantic_rewrite"
+      ],
+      "qualification": "duckdb_tpcds_dialect_and_fixed_parameters_not_tpc_certification",
+      "status": "available_not_executed"
+    }
+  ]
+}
