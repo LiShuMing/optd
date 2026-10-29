@@ -240,6 +240,125 @@ async fn retry_settings_are_enforced_and_existing_batches_are_idempotent() {
     assert!(sink.last_checkpoint().await.is_err());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trusted_predecessor_rejects_a_stale_relation_and_partial_overlap_falls_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = fixture(temp.path()).await;
+    append(&catalog, &[1]).await;
+    let gen = generation(&catalog).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let first =
+        PreparedBatch::new(&gen, None, vec![point], &expected(&[1]), 1, "w".into()).unwrap();
+    let mut sink = IcebergCdcSink::open(catalog.clone(), ident("changes"), gen.clone())
+        .await
+        .unwrap();
+    sink.emit(&first).await.unwrap();
+
+    append(&catalog, &[2]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let second = PreparedBatch::new(
+        &gen,
+        Some(first.envelope()),
+        vec![point],
+        &expected(&[2]),
+        2,
+        "w".into(),
+    )
+    .unwrap();
+    sink.emit_many_against(&expected(&[1]), std::slice::from_ref(&second), &|_| Ok(()))
+        .await
+        .unwrap();
+
+    append(&catalog, &[3]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    // A retraction whose predecessor row is absent from the trusted relation fails closed
+    // before anything is written. For unkeyed batches, extra untouched rows are invisible to
+    // the symmetric-difference check; the relation is trusted beyond the delta.
+    let mut retract = Multiset::new();
+    retract.try_add_row(vec![Value::Int(2)], -1).unwrap();
+    let third = PreparedBatch::new(
+        &gen,
+        Some(second.envelope()),
+        vec![point],
+        &retract,
+        3,
+        "w".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        sink.emit_many_against(&expected(&[1]), std::slice::from_ref(&third), &|_| Ok(()))
+            .await,
+        Err(CdcError::InvalidRow)
+    ));
+    assert_eq!(sink.read_batches().await.unwrap().len(), 2);
+    sink.emit_many_against(
+        &expected(&[1, 2]),
+        std::slice::from_ref(&third),
+        &|_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    // Partial overlap: commit `fourth` alone, then retry [fourth, fifth]. The committed prefix
+    // is not part of the trusted relation, so the call must use the full replay instead.
+    append(&catalog, &[4]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let fourth = PreparedBatch::new(
+        &gen,
+        Some(third.envelope()),
+        vec![point],
+        &expected(&[4]),
+        4,
+        "w".into(),
+    )
+    .unwrap();
+    append(&catalog, &[5]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let fifth = PreparedBatch::new(
+        &gen,
+        Some(fourth.envelope()),
+        vec![point],
+        &expected(&[5]),
+        5,
+        "w".into(),
+    )
+    .unwrap();
+    sink.emit(&fourth).await.unwrap();
+    sink.emit_many_against(&Multiset::new(), &[fourth.clone(), fifth.clone()], &|_| {
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let batches = sink.read_batches().await.unwrap();
+    assert_eq!(batches.len(), 5);
+    assert_eq!(folded(&batches), expected(&[1, 4, 5]));
+}
+
 // The parent launches this exact test in a new process. Normal test runs have no worker env.
 #[test]
 fn subprocess_worker() {

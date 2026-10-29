@@ -29,7 +29,7 @@ use iceberg::{Catalog, TableCreation, TableIdent};
 
 use crate::cdc::{
     system_fields, CdcError, ChangeRecord, CommitEnvelope, DeltaSink, Generation, PayloadType,
-    PreparedBatch, PROTOCOL,
+    PreparedBatch, TrustedRelation, PROTOCOL,
 };
 use crate::change::{Multiset, Value};
 use crate::local_catalog::{LocalCatalog, WriterLock};
@@ -497,6 +497,34 @@ impl IcebergCdcSink {
         batches: &[PreparedBatch],
         observer: &(dyn Fn(CommitStage) -> Result<(), CdcError> + Send + Sync),
     ) -> Result<Vec<CommitEnvelope>, CdcError> {
+        self.emit_many_inner(None, batches, observer).await
+    }
+    /// Publish with the caller's trusted predecessor relation.
+    ///
+    /// `trusted_before` must be the complete relation at the sink's last checkpoint, exactly as
+    /// the full replay would have accumulated it. It is used only when the request starts at the
+    /// next logical sequence (`skip == 0`); a partially committed request falls back to the full
+    /// replay so an already-committed prefix is never re-validated against the wrong relation.
+    /// Validation is delta-sized: unkeyed batches look up only the rows the delta touches, and
+    /// keyed batches build one key index and track only the touched keys. A relation that
+    /// conflicts with the batch fails before anything is written. Rows the delta does not touch
+    /// are not inspected: the relation is trusted as the caller's checkpoint relation, and
+    /// startup validation plus single-writer exclusion are what make that trust valid.
+    pub async fn emit_many_against(
+        &mut self,
+        trusted_before: &Multiset,
+        batches: &[PreparedBatch],
+        observer: &(dyn Fn(CommitStage) -> Result<(), CdcError> + Send + Sync),
+    ) -> Result<Vec<CommitEnvelope>, CdcError> {
+        self.emit_many_inner(Some(trusted_before), batches, observer)
+            .await
+    }
+    async fn emit_many_inner(
+        &mut self,
+        trusted_before: Option<&Multiset>,
+        batches: &[PreparedBatch],
+        observer: &(dyn Fn(CommitStage) -> Result<(), CdcError> + Send + Sync),
+    ) -> Result<Vec<CommitEnvelope>, CdcError> {
         if self._owner.is_none() {
             return Err(CdcError::Ownership);
         }
@@ -553,9 +581,19 @@ impl IcebergCdcSink {
         remaining[0]
             .envelope()
             .follows(existing.last().map(|b| b.envelope()))?;
-        let mut relation = Multiset::new();
-        for batch in existing.iter().chain(remaining.iter()) {
-            relation = batch.apply_to(&self.generation, &relation)?;
+        match (skip, trusted_before) {
+            (0, Some(trusted)) => {
+                let mut validation = TrustedRelation::new(&self.generation, trusted)?;
+                for batch in remaining {
+                    validation.apply(batch)?;
+                }
+            }
+            _ => {
+                let mut relation = Multiset::new();
+                for batch in existing.iter().chain(remaining.iter()) {
+                    relation = batch.apply_to(&self.generation, &relation)?;
+                }
+            }
         }
         self.pending = Some(identity);
         let table = self.load().await?;
@@ -817,7 +855,20 @@ impl CdcLoop {
             self.pending = Some((batch, Some(candidate)));
         }
         let (batch, candidate) = self.pending.as_ref().ok_or(CdcError::InvalidEnvelope)?;
-        let committed = self.sink.emit_with_observer(batch, observer).await?;
+        // The view holds the predecessor relation, except for a bootstrap where the
+        // predecessor is the empty relation and the view already holds the target.
+        let empty = Multiset::new();
+        let trusted_before = if batch.envelope().kind == "bootstrap" {
+            &empty
+        } else {
+            self.view.contents()
+        };
+        let committed = self
+            .sink
+            .emit_many_against(trusted_before, std::slice::from_ref(batch), observer)
+            .await?
+            .pop()
+            .ok_or(CdcError::InvalidEnvelope)?;
         if let Some(candidate) = candidate {
             self.view.acknowledge(candidate)?;
         }

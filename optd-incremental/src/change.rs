@@ -171,6 +171,11 @@ impl Multiset {
         self.entries.iter()
     }
 
+    /// Weight of one exact row; zero when absent.
+    pub fn weight_of(&self, row: &Row) -> i64 {
+        self.entries.get(row).copied().unwrap_or(0)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

@@ -129,21 +129,45 @@ operational verification tool as much as a test hook.
 
 ### 4.3 Validate only the new batches against a trusted predecessor relation
 
-Do not delete the `apply_to` call: it verifies that each batch is exactly the endpoint difference
-between its predecessor and successor. Instead, add a separate entry point
+Do not delete the `apply_to` endpoint check: it verifies that each batch is exactly the endpoint
+difference between its predecessor and successor. Add a separate entry point
 `emit_many_against(trusted_before, batches, observer)`; `emit_many_with_observer` keeps its
 current signature and `DeltaSink::emit` is unchanged. In `CdcLoop::step` the trusted relation is
-`self.view.contents()` — the view at the predecessor checkpoint.
+`self.view.contents()` — the view at the predecessor checkpoint — except for a bootstrap, where
+the predecessor is the empty relation and the view already holds the target.
+
+Calling `apply_to` on the trusted relation is not enough: it clones and unions the whole relation
+and validates it twice per batch, so the "delta-sized" claim would not hold. Use a new
+`TrustedRelation` instead, which checks the same invariant without materialising the accumulated
+relation:
+
+* **Unkeyed.** `after = before + delta`, and the endpoint difference algebraically equals the
+  delta, so the only failure `apply_to` can report is a negative resulting weight. One exact-row
+  lookup per record is therefore equivalent to the whole check: `O(delta log n)`.
+* **Keyed.** A retraction must find exactly its payload under the key; an insertion must find the
+  key absent. Both are checked against a single key index of `before`, plus a per-request overlay
+  for keys earlier batches touched. This is `O(n log n)` once per call, not per batch: the
+  producer does not yet maintain a key index, so keyed validation remains linear in the relation.
+  A producer-side index is now the concrete reason to revisit the deferred folded-state
+  checkpoint.
 
 The trusted relation is only valid when **nothing from the request is already committed**
-(`skip == 0`). With a partial overlap the committed prefix is not part of the trusted relation and
-replaying only `remaining` would fail a correct batch. Rule: use the trusted relation only when
-`skip == 0` and it was supplied; any partial overlap falls back to the current full replay.
-Group commits are atomic, so partial overlap is a defensive path and does not cost normal-path
-performance.
+(`skip == 0`). With a partial overlap the committed prefix is not part of the trusted relation
+and replaying only `remaining` would fail a correct batch. Rule: use `TrustedRelation` only when
+`skip == 0` and a relation was supplied; any partial overlap falls back to the current full
+replay. Group commits are atomic, so partial overlap is a defensive path and does not cost
+normal-path performance.
 
 If no trusted relation is supplied, keep the current full replay. A mismatch still fails before
 the commit with `InvalidRow`; the durable state and the checkpoint are unchanged.
+
+Rows the delta does not touch cannot be detected on this path — for unkeyed rows the endpoint
+check is the symmetric difference, and for keyed rows untouched keys never appear in the
+endpoint output. This is the same blind spot `apply_to` has, not a weaker check. The relation is
+therefore trusted, not verified: startup validation, single-writer exclusion and the `follows()`
+chain to the durable checkpoint are what make it valid. A bad relation that survives the delta
+check is caught by the next startup audit, or immediately when the `audit` switch (4.2) forces
+read-back.
 
 ### 4.4 Read the log once during recovery
 
@@ -166,6 +190,7 @@ digest comparison; the summary lookup does not replace that read.
 | Definitive commit followed by process death | Prepared envelopes are returned and the caller acknowledges; recovery reads the log as today |
 | Commit outcome unknown | Unchanged: read-back resolves success or reports `UnknownCommit` |
 | Predecessor relation passed by the caller is stale | `apply_to` endpoint comparison fails before writing |
+| Trusted relation does not match the batch semantics | `TrustedRelation` fails before writing with `InvalidRow`; durable state and checkpoint unchanged |
 | Log corrupted between startup and the next step | Not detected on the fast path by design; `audit` mode and startup validation cover tests and operational checks |
 | Summary has no `optd.commit` (older table or foreign snapshot) | Full read; no append unless the full read validates |
 | Compaction happens between startup and the next step | The next step sees the archive snapshot's `optd.commit`; a one-batch request can use it, a multi-batch retry falls back |
