@@ -55,6 +55,7 @@
   - [Iteration and Execution Plan](./incremental/execution_plan.md)
   - [Run the Local CDC Loop](./incremental/cdc_loop.md)
   - [Measured Costs (E10)](./incremental/measurements.md)
+  - [Writer I/O Reduction](./incremental/writer_io_reduction.md)
   - [Streams, Keyed Updates and Maintenance](./incremental/streams_and_maintenance.md)
   - [ΔScan — Table Scan](./incremental/scan.md)
   - [ΔProjection](./incremental/projection.md)
