@@ -3,6 +3,7 @@ members = [
     "datafusion-optd-cli",
     "optd-core",
     "optd-incremental",
+    "optd-incremental-sql",
     "optd-datafusion-bridge",
     "optd-datafusion-repr",
     "optd-sqlplannertest",
