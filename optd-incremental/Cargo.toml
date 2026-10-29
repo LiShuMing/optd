@@ -36,3 +36,7 @@ tempfile = "3"
 [[example]]
 name = "cdc_loop"
 required-features = ["iceberg"]
+
+[[example]]
+name = "cdc_bench"
+required-features = ["iceberg"]
