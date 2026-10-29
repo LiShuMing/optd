@@ -22,6 +22,18 @@ on:
 permissions:
   contents: read
 jobs:
+  sql-tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Explicitly prepare hash-pinned public query sources
+        run: python3 optd-incremental-sql/benchmarks/tools/fetch_duckdb_sources.py
+      - name: Verify pinned inputs and run strict qualification-tool tests
+        run: scripts/agent-check.sh sql-tools
   sql:
     runs-on: ubuntu-latest
     timeout-minutes: 30

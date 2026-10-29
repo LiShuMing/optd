@@ -182,7 +182,7 @@ all original query IDs/variants. Run only that target query for the recipe's
 intended qualification. The existing benchmark performs its unchanged
 bootstrap and three mutation rounds; a recipe is accepted only after actual
 nonempty results and signed output changes agree exactly with independent SQL.
-The [accepted design](../../../docs/src/incremental/query_witness_fixtures.md)
+The [accepted design](../../docs/src/incremental/query_witness_fixtures.md)
 explains the boundary between directed semantic coverage and generator data.
 
 Run all 99 target profiles with one already-built executable and an explicitly
@@ -218,3 +218,54 @@ verified bootstrap, all three successful rounds, a nonempty result and an actual
 signed output change. It never combines partial rounds from different profiles.
 The aggregate reports `total`, `with_pass` and `remaining`; a successful profile
 does not erase failures in another profile or establish scale/performance results.
+
+## Qualify through real Iceberg snapshots
+
+The optional backend uses real local Iceberg v2/Parquet tables and a format-2
+checkpoint. It writes the declared typed fixture values, freezes complete source
+vectors and performs bootstrap plus the same three mutation rounds. Each round
+compares independent scans of those exact endpoints, maintained source caches,
+full SQL results and signed deltas, strictly reopens the view and checks output
+log replay. VARCHAR's Arrow Utf8View representation is explicitly converted to
+Utf8 for Iceberg without changing string bytes or NULLs; no numeric/date casts
+or query edits occur.
+
+```sh
+cargo +1.95.0 build -p optd-incremental-sql --features iceberg --locked --example benchmark
+OPTD_SQL_BENCH_ICEBERG_ROOT=/tmp/optd-tpch-iceberg-sources target/debug/examples/benchmark optd-incremental-sql/benchmarks/tpch/manifest.json /tmp/optd-tpch-iceberg-coverage.json
+sha256sum target/debug/examples/benchmark
+python3 optd-incremental-sql/benchmarks/tools/run_query_witness_suite.py /tmp/optd-tpcds-iceberg-suite --binary /absolute/path/to/feature-built/benchmark --expected-sha256 EXPECTED_BINARY_SHA256 --expected-backend typed_iceberg_endpoint_vector --iceberg-root /tmp/optd-tpcds-iceberg-sources
+```
+
+Prepare pinned query sources first. The two suite paths must be new, disjoint
+children of `/tmp`; every query creates a separate catalog/store. For a manual
+manifest run the artifact root's parent must exist and each query's child must
+be new. Building without the feature while setting the environment variable is
+an error. Do not overwrite the chosen executable during qualification; the suite
+checks its identity before/after every target. `CARGO_TARGET_DIR` changes the
+example path above and must be reflected in the selected executable.
+
+Reports explicitly declare `typed_iceberg_endpoint_vector`, retain complete
+bootstrap/round source vectors and their SHA-256, endpoint work, SQL strategies,
+committed epochs and reopen/replay evidence. Aggregate this backend explicitly:
+
+```sh
+python3 optd-incremental-sql/benchmarks/tools/summarize_coverage.py /tmp/optd-iceberg-aggregate.json --expected-backend typed_iceberg_endpoint_vector --report PROFILE REPORT_PATH EXPECTED_REPORT_SHA256
+```
+
+The verifier rejects mixed backends or claimed Iceberg passes without complete
+source/recovery evidence. Old reports lacking a backend remain Arrow evidence.
+The suite records the selected backend, artifact root and only its relevant
+environment variable; inherited conflicting configuration fails before writes.
+
+These are whole-file source replacements and full endpoint differences, not
+native input CDC or O(delta) IO. SQL strategies still include local nonlinear
+operator recomputation. A source vector selects an explicit tuple, not an
+upstream distributed transaction; the writer is host-local. See
+[the source contract](../../docs/src/incremental/typed_iceberg_sources.md)
+for type, schema, delete-file and resource boundaries.
+
+`scripts/agent-check.sh sql` checks both default and Iceberg Rust configurations.
+`scripts/agent-check.sh sql-tools` verifies prepared public source hashes and
+runs all Python tool tests offline; it fails if sources are missing. CI prepares
+those ignored public sources in an explicit preceding fetch step.

@@ -7,7 +7,13 @@
 mod bag;
 mod engine;
 mod group_state;
+pub mod source_vector;
 pub mod store;
+
+#[cfg(feature = "iceberg")]
+pub mod coordinator;
+#[cfg(feature = "iceberg")]
+pub mod iceberg;
 
 pub use bag::MAX_MATERIALIZED_ROWS;
 pub use engine::{
@@ -47,6 +53,10 @@ pub enum Error {
     /// Checkpoint metadata could not be decoded.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// An admitted typed Iceberg source could not be loaded or scanned.
+    #[cfg(feature = "iceberg")]
+    #[error(transparent)]
+    Iceberg(#[from] ::iceberg::Error),
 }
 
 /// Result returned by the typed SQL backend.

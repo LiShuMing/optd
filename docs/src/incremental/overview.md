@@ -8,6 +8,17 @@ The documents here are **design, not implementation**. Each operator gets its ow
 operator-level decisions can be argued about independently. `overview.md` holds the decisions
 that are shared and must be made first.
 
+**Current implementation, 2026-10-29:** the original `optd-incremental` crate
+supplies the local CDC, consumer/keyed-state and conservative maintenance loop.
+The separate `optd-incremental-sql` crate supplies typed SQL graph maintenance,
+atomic named-table epochs, durable output deltas and recovery. Its optional
+Iceberg adapter binds explicit source snapshot tuples to the same checkpoint.
+See [SQL execution](./sql_execution.md), [typed Iceberg usage](./typed_iceberg_loop.md)
+and the [observed query qualification](./typed_iceberg_qualification.md).
+This implementation uses native delta propagation, changed-group recomputation
+and explicit nonlinear operator recomputation; the general operator designs
+below are not evidence that every operator has a native incremental algorithm.
+
 > **Scope note.** These documents describe a general incremental-maintenance design. They are
 > deliberately engine-neutral: the deltas, algebra, and correctness conditions below follow from
 > relational semantics and are written from scratch. No third-party engine's internal naming,

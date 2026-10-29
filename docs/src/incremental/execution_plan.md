@@ -2,8 +2,9 @@
 
 **Status:** proposed · 2026-10-28
 **Scope:** track delivery of the accepted CDC v1 contract through the existing M1–M4 milestones.
-Section 10 records the implemented and locally qualified M1 loop. The broader schedule remains
-proposed; later consumer/keyed/layout acceptance is independent of M1.
+Section 10 records M1, section 11 the local consumer/keyed/maintenance loop, and
+section 12 typed SQL/source-vector query qualification. The broader performance
+and distributed schedule remains proposed; each acceptance record is independent.
 
 ## 1. Problem
 
@@ -202,9 +203,11 @@ Product decisions that can follow M1: whether consumers need current SQL results
 state, the supported SQL/type subset, latency/file-size targets and when to implement the
 already specified keyed profile. Do not block recovery work on partition counts or broad operator coverage.
 
-The next implementation owner takes E7 (restricted SQL integration), using the M2–M4 local
-acceptance in §11. Workload-driven partitioning, logical TTL and orphan deletion remain deferred;
-the broader execution schedule remains proposed.
+E7's typed SQL and explicit Iceberg-source integration are now recorded in §12.
+The next optional workload-driven increment is E10: measure endpoint scans,
+operator recomputation and memory before selecting native changelogs, persistent
+accumulators or indexes. Logical TTL, orphan deletion, distributed fencing and
+production/scale qualification remain separate work.
 
 ## 9. Initial inspection and validation record
 
@@ -341,3 +344,44 @@ The owner has now requested commits and a fast-forward push to `origin/main` aft
 repair increment. Publish this increment from `codex/incremental-execution-plan`, preserving the
 PostgreSQL integration-gate limitation above. Next owner/action: E7 restricted SQL integration and accumulator/final-result semantics;
 measure workloads before choosing key buckets, log TTL or orphan-file deletion.
+
+## 12. Implementation loop 3 — 2026-10-29
+
+**Outcome:** typed SQL maintenance now closes the local source → calculation →
+output delta → durable checkpoint → restart/replay loop, including explicit
+multi-table Iceberg endpoint vectors. TPC-H 22/22 and TPC-DS 99/99 obtain complete
+nonempty/changing query evidence through both direct Arrow inputs and real
+Iceberg v2/Parquet fixtures. The complete records are
+[Arrow qualification](./sql_qualification.md) and
+[Iceberg qualification](./typed_iceberg_qualification.md); their backends and
+dataset limitations are kept separate.
+
+| Lane | Delivered and observed | Boundary |
+| --- | --- | --- |
+| Typed execution | Separate DataFusion 55 / Arrow 59 typed graph, exact signed bags, immutable multi-table prepare/acknowledge, native linear/inner-join deltas, changed-group indexes and explicit nonlinear operator recomputation | No old lossy Value bridge, hidden whole-query fallback or all-native/performance claim |
+| Local persistence | Immutable hashed IPC and predecessor manifests, fsync/atomic CURRENT, complete output and signed log, ordered rebuild validation, retry-directory-sync fix | Host-local ownership; no external sink transaction or hardware power-loss certification |
+| Source vectors | Optional local/main/v2/Parquet adapter; UUID/schema/descriptor/retained-ancestry checks, exact endpoint differences, vector/output format-2 atomicity and strict source re-read on reopen | Explicit tuple rather than upstream cross-table transaction; fixed schema/no delete manifests; full endpoint scans and local budgets |
+| Query acceptance | Original pinned SQL/schema, independent full-query plans over exact input endpoints, typed output and signed-delta comparisons, restart and per-prefix replay | Small independent profiles; directed DS witnesses; repository-specific H parameters; no TPC certification/scale/performance |
+| Reproduction | Source preparation, fixed manifests, 99 explicit typed recipes, executable-pinned hard-timeout suite, backend-aware strict aggregation, usable API documentation and CI gates | Public upstream inputs are explicit ignored local downloads; generated data stays outside the repository; remote CI is not proven by local tests |
+
+**Verified:** fresh-target current-source feature check; default SQL 72 passed /
+1 ignored; feature SQL 84 passed / 2 ignored; both scoped all-target strict lint
+configurations; full workspace strict lint and 350 passed / 4 ignored / 1 filtered;
+28 Python tools tests; mdBook build. The full gate's Postgres fixture exclusion
+and ignored driver/fixture meanings are recorded in the qualification page.
+The complete user API example also compiles in a separate temporary consumer.
+
+TPC-H source qualification retains its first Q21 120-second timeout in the
+aggregate; a new 600-second-budget run completes all checks. TPC-DS completes
+99 process exits of 0, 99 bootstrap comparisons and 297 mutation rounds. Every
+chosen complete profile has nonempty output and a real signed delta. Empty-only,
+unchanged and incomplete evidence cannot be selected as a passing profile.
+
+The standing publication scope for this continuous task is the established
+`optd-incremental-ivm` task branch and normal fast-forward updates to the verified
+`origin/main`, following fetch/integration and validation. It does not authorize
+force pushes, ref deletion, another destination, production deployment or remote
+runtime claims. Dependency edges were isolated in separately verified commits;
+no existing package version/source/checksum or MSRV changed. Root owns final
+integration and publication; subsequent performance/deployment work needs its
+own acceptance evidence.

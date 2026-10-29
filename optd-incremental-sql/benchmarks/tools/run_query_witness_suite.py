@@ -3,6 +3,8 @@
 
 All generated inputs, logs, progress and strict aggregate stay in a new /tmp
 directory. Defaults to all 99 queries; --query selects a visibly partial run.
+Iceberg requires explicit --expected-backend and --iceberg-root selection;
+conflicting inherited source-selection environment is rejected before writes.
 """
 
 import argparse
@@ -17,7 +19,10 @@ import sys
 import time
 
 from generate_query_witness_fixture import checked_source, generate
-from summarize_coverage import summarize
+from summarize_coverage import ARROW_BACKEND, BACKENDS, ICEBERG_BACKEND, check_backend, check_record, summarize
+
+
+ICEBERG_ROOT_ENV = "OPTD_SQL_BENCH_ICEBERG_ROOT"
 
 
 def file_digest(path):
@@ -55,7 +60,39 @@ def save_progress(path, data):
     temporary.replace(path)
 
 
-def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=180):
+def source_environment(expected_backend, iceberg_root, output):
+    """Make source selection explicit without recording unrelated environment."""
+    if expected_backend not in BACKENDS:
+        raise ValueError(f"unsupported expected backend: {expected_backend!r}")
+    inherited = os.environ.get(ICEBERG_ROOT_ENV)
+    environment = os.environ.copy()
+    if expected_backend == ARROW_BACKEND:
+        if iceberg_root is not None:
+            raise ValueError("--iceberg-root requires --expected-backend typed_iceberg_endpoint_vector")
+        if inherited is not None:
+            raise ValueError(f"inherited {ICEBERG_ROOT_ENV} conflicts with the default Arrow backend; unset it")
+        environment.pop(ICEBERG_ROOT_ENV, None)
+        return environment, {"source_backend": expected_backend, "iceberg_root": None,
+                             "environment": {ICEBERG_ROOT_ENV: None}}
+    if iceberg_root is None:
+        raise ValueError("the Iceberg backend requires an explicit --iceberg-root")
+    requested = Path(iceberg_root)
+    root = requested.resolve()
+    if root == Path("/tmp") or not root.is_relative_to(Path("/tmp")):
+        raise ValueError("Iceberg root must be a new child directory of /tmp")
+    if requested.is_symlink() or root.exists():
+        raise ValueError("Iceberg root already exists or is a symlink; choose a new /tmp directory")
+    if root == output or root.is_relative_to(output) or output.is_relative_to(root):
+        raise ValueError("Iceberg root and suite output must be separate non-overlapping directories")
+    if inherited is not None and (not inherited or Path(inherited).resolve() != root):
+        raise ValueError(f"inherited {ICEBERG_ROOT_ENV} conflicts with explicit --iceberg-root")
+    environment[ICEBERG_ROOT_ENV] = str(root)
+    return environment, {"source_backend": expected_backend, "iceberg_root": str(root),
+                         "environment": {ICEBERG_ROOT_ENV: str(root)}}
+
+
+def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=180, *,
+              expected_backend=ARROW_BACKEND, iceberg_root=None):
     """Execute selected queries and return the recorded suite progress object."""
     queries = selected_queries(query_ids)
     if not math.isfinite(timeout_seconds) or not 0.01 <= timeout_seconds <= 3600:
@@ -73,15 +110,19 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
         raise ValueError("suite output must be a new child directory of /tmp")
     if output.exists():
         raise ValueError("suite output already exists; choose a new /tmp directory")
+    environment, source_identity = source_environment(expected_backend, iceberg_root, output)
     source = Path(__file__).resolve().parents[1] / "tpcds/manifest.json"
     checked_source(source)
     output.mkdir(parents=True)
+    if source_identity["iceberg_root"] is not None:
+        Path(source_identity["iceberg_root"]).mkdir(parents=True, exist_ok=False)
     progress_path = output / "progress.json"
     progress = {
         "format_version": 1, "kind": "directed_tpcds_witness_suite", "binary": str(binary),
         "observed_executable_sha256": expected_sha256,
         "executable_checks": "initial/final SHA-256; per-query device/inode/size/mtime_ns/ctime_ns",
         "provenance_boundary": "Observed executable identity, not embedded compile-time source provenance",
+        "identity": source_identity,
         "runner_sha256": file_digest(Path(__file__)), "selected_query_ids": queries,
         "full99_requested": sorted(queries) == list(range(1, 100)),
         "per_query_hard_timeout_seconds": timeout_seconds, "records": [], "complete": False,
@@ -98,7 +139,7 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
             prepared = generate(source, fixture, query_id)
         except (ValueError, OSError) as error:
             record = {"query_id": query_id, "status": "fixture_error", "error": str(error),
-                      "exit_code": None, "hard_timeout": False}
+                      "exit_code": None, "hard_timeout": False, "identity": source_identity}
             progress["records"].append(record)
             save_progress(progress_path, progress)
             print(json.dumps({"query_id": query_id, "status": "fixture_error"}), flush=True)
@@ -107,13 +148,15 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
         log_path = fixture.parent / "execution.log"
         command = [str(binary), prepared["manifest"], str(report_path), str(query_id)]
         record = {"query_id": query_id, "preparation": prepared, "command": command,
+                  "command_audit": {"argv": command, **source_identity},
+                  "identity": source_identity,
                   "log": str(log_path), "report": str(report_path), "exit_code": None,
                   "status": "report_missing", "hard_timeout": False}
         start = time.monotonic()
         with log_path.open("w", encoding="utf-8") as log:
             try:
                 completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT,
-                                           timeout=timeout_seconds, check=False)
+                                           timeout=timeout_seconds, check=False, env=environment)
                 record["exit_code"] = completed.returncode
                 if completed.returncode != 0:
                     record["status"] = "process_failed"
@@ -127,9 +170,14 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
             specifications.append((f"witness-q{query_id:02}", str(report_path), record["report_sha256"]))
             try:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
+                check_backend(report, expected_backend, "report")
+                if (expected_backend == ICEBERG_BACKEND and
+                        report.get("iceberg_artifact_root") != source_identity["iceberg_root"]):
+                    raise ValueError("report Iceberg artifact root differs from explicit --iceberg-root")
                 observed = report["queries"]
                 if len(observed) != 1 or observed[0]["query_id"] != query_id:
                     raise ValueError("focused report has wrong query count/identity")
+                check_record(observed[0], expected_backend)
                 record["reported_status"] = observed[0]["status"]
                 record["reason"] = observed[0].get("reason")
                 record["completed_rounds"] = observed[0].get("completed_rounds")
@@ -150,12 +198,13 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
         progress["error"] = "benchmark binary final SHA-256/identity mismatch"
     if specifications:
         try:
-            aggregate = summarize(specifications, Path(__file__).resolve().parents[3])
+            aggregate = summarize(specifications, Path(__file__).resolve().parents[3], expected_backend)
             aggregate["observed_executable_sha256"] = expected_sha256
             aggregate["executable_evidence"] = str(progress_path)
             aggregate_path = output / "aggregate.json"
             aggregate_path.write_text(json.dumps(aggregate, indent=2) + "\n", encoding="utf-8")
             progress["aggregate"] = {"path": str(aggregate_path), "sha256": file_digest(aggregate_path),
+                                     "source_backend": aggregate["source_backend"],
                                      **aggregate["aggregate"]}
         except (ValueError, KeyError, TypeError, OSError) as error:
             progress["aggregation_error"] = str(error)
@@ -179,12 +228,16 @@ def main():
     parser.add_argument("--expected-sha256", required=True)
     parser.add_argument("--query", type=int, action="append")
     parser.add_argument("--timeout-seconds", type=float, default=180)
+    parser.add_argument("--expected-backend", choices=BACKENDS, default=ARROW_BACKEND)
+    parser.add_argument("--iceberg-root", type=Path)
     args = parser.parse_args()
     try:
-        progress = run_suite(args.binary, args.expected_sha256, args.output, args.query, args.timeout_seconds)
+        progress = run_suite(args.binary, args.expected_sha256, args.output, args.query, args.timeout_seconds,
+                             expected_backend=args.expected_backend, iceberg_root=args.iceberg_root)
     except (ValueError, OSError) as error:
         parser.exit(2, f"witness suite: {error}\n")
     print(json.dumps({"output": str(args.output.resolve()), "status": progress["status"],
+                      "identity": progress["identity"],
                       "full99_coverage": progress["full99_coverage"], "aggregate": progress.get("aggregate")}), flush=True)
     return 0 if progress["status"] == "pass" else 1
 

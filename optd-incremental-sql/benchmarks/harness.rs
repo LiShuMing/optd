@@ -22,6 +22,10 @@ use optd_incremental_sql::{SqlView, TableChange};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "iceberg")]
+#[path = "iceberg_harness.rs"]
+mod iceberg_harness;
+
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 type Tables = BTreeMap<String, RecordBatch>;
 type Bag = BTreeMap<Vec<u8>, i64>;
@@ -258,8 +262,17 @@ async fn referenced_tables(sql: &str, complete: &Tables) -> Result<Tables> {
         .collect()
 }
 
-async fn run_query(sql: &str, complete: &Tables) -> Result<Value> {
+async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) -> Result<Value> {
     let referenced = referenced_tables(sql, complete).await?;
+    if let Some(root) = iceberg_root {
+        #[cfg(feature = "iceberg")]
+        return iceberg_harness::run(sql, &referenced, root).await;
+        #[cfg(not(feature = "iceberg"))]
+        {
+            let _ = root;
+            return Err("Iceberg qualification requires --features iceberg".into());
+        }
+    }
     let registered_tables: Vec<_> = referenced.keys().cloned().collect();
     let complete = &referenced;
     let mut current: Tables = complete
@@ -359,6 +372,17 @@ async fn run_query(sql: &str, complete: &Tables) -> Result<Value> {
 
 /// Execute every selected manifest entry and retain failures in structured output.
 pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
+    let iceberg_root = std::env::var_os("OPTD_SQL_BENCH_ICEBERG_ROOT").map(PathBuf::from);
+    if let Some(root) = &iceberg_root {
+        #[cfg(not(feature = "iceberg"))]
+        return Err(format!(
+            "Iceberg qualification requires --features iceberg: {}",
+            root.display()
+        )
+        .into());
+        #[cfg(feature = "iceberg")]
+        iceberg_harness::prepare_root(root)?;
+    }
     let timeout_seconds = std::env::var("OPTD_SQL_BENCH_QUERY_TIMEOUT_SECS")
         .ok()
         .map(|value| value.parse::<u64>())
@@ -383,6 +407,15 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
         }
         for variant in query["variants"].as_array().ok_or("missing variants")? {
             let variant_id = required_string(variant, "variant_id")?;
+            if !variant_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err("unsafe query variant directory name".into());
+            }
+            let source_root = iceberg_root
+                .as_ref()
+                .map(|root| root.join(format!("query-{variant_id}")));
             eprintln!(
                 "BENCH start {} q{variant_id}",
                 required_string(&manifest, "suite")?
@@ -391,7 +424,7 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
                 let complete = loaded.as_ref().map_err(|error| error.to_string())?;
                 let file = directory.join(required_string(variant, "sql")?);
                 check_digest(&file, required_string(variant, "sha256")?)?;
-                run_query(&fs::read_to_string(file)?, complete).await
+                run_query(&fs::read_to_string(file)?, complete, source_root.as_deref()).await
             })
             .await;
             let mut record = match result {
@@ -410,6 +443,11 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
             record["variant_id"] = variant["variant_id"].clone();
             record["source"] = query["source"].clone();
             record["qualification"] = query["qualification"].clone();
+            record["source_backend"] = json!(if iceberg_root.is_some() {
+                "typed_iceberg_endpoint_vector"
+            } else {
+                "typed_arrow"
+            });
             records.push(record);
         }
     }
@@ -445,9 +483,14 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
         .iter()
         .filter(|record| record["completed_rounds"] == 3)
         .count();
-    Ok(
-        json!({"format_version":1,"suite":manifest["suite"],"manifest":path,"manifest_sha256":manifest_digest,"command":std::env::args().collect::<Vec<_>>(),"host_arch":std::env::consts::ARCH,"host_os":std::env::consts::OS,"query_timeout_seconds":timeout_seconds,"timeout_scope":"async_query_future","session_configuration":{"target_partitions":1,"comparison":"exact_typed_bag"},"source":manifest["source"],"schema_sha256":manifest["schema_sha256"],"data_status":manifest["data_status"],"fixture_qualification":manifest["fixture_qualification"],"fixture_error":fixture_error,"executed_variants":records.len(),"bootstrap_verified_variants":bootstrap_verified,"three_rounds_verified_variants":complete_rounds_verified,"passed_variants":passed,"failed_variants":failed,"verified_empty_only_variants":empty_only,"verified_unchanged_output_variants":unchanged,"incomplete_variants":records.len()-passed,"nonempty_final_variants":nonempty,"scale_or_performance_qualification":false,"queries":records}),
-    )
+    let mut report = json!({"format_version":1,"suite":manifest["suite"],"manifest":path,"manifest_sha256":manifest_digest,"command":std::env::args().collect::<Vec<_>>(),"host_arch":std::env::consts::ARCH,"host_os":std::env::consts::OS,"query_timeout_seconds":timeout_seconds,"timeout_scope":"async_query_future","session_configuration":{"target_partitions":1,"comparison":"exact_typed_bag"},"source":manifest["source"],"schema_sha256":manifest["schema_sha256"],"data_status":manifest["data_status"],"fixture_qualification":manifest["fixture_qualification"],"fixture_error":fixture_error,"executed_variants":records.len(),"bootstrap_verified_variants":bootstrap_verified,"three_rounds_verified_variants":complete_rounds_verified,"passed_variants":passed,"failed_variants":failed,"verified_empty_only_variants":empty_only,"verified_unchanged_output_variants":unchanged,"incomplete_variants":records.len()-passed,"nonempty_final_variants":nonempty,"scale_or_performance_qualification":false,"queries":records});
+    report["source_backend"] = json!(if iceberg_root.is_some() {
+        "typed_iceberg_endpoint_vector"
+    } else {
+        "typed_arrow"
+    });
+    report["iceberg_artifact_root"] = json!(iceberg_root);
+    Ok(report)
 }
 
 #[cfg(test)]

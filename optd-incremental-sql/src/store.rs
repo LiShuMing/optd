@@ -17,9 +17,11 @@ use datafusion::arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::source_vector::{valid_digest, PinnedSourceVector};
 use crate::{Error, Result};
 
 const FORMAT: &str = "optd-incremental-sql-checkpoint/1";
+const SOURCE_FORMAT: &str = "optd-incremental-sql-checkpoint/2";
 const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
@@ -36,6 +38,34 @@ pub struct Snapshot {
     pub output: RecordBatch,
     /// The typed, signed output changes for this epoch.
     pub delta: RecordBatch,
+}
+
+/// A format-2 epoch whose complete input tuple shares its commit authority.
+#[derive(Clone, Debug)]
+pub struct SourceSnapshot {
+    /// Complete typed source/output state at this epoch.
+    pub snapshot: Snapshot,
+    /// Exact external endpoints represented by the source IPC files.
+    pub vector: PinnedSourceVector,
+}
+
+/// Exact predecessor required for source-aware publication or retry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourcePosition {
+    /// Committed logical epoch.
+    pub epoch: u64,
+    /// Digest of the committed canonical source-vector file.
+    pub vector_digest: String,
+}
+
+impl SourceSnapshot {
+    /// Identify this epoch and its complete source tuple.
+    pub fn position(&self) -> Result<SourcePosition> {
+        Ok(SourcePosition {
+            epoch: self.snapshot.epoch,
+            vector_digest: self.vector.digest()?,
+        })
+    }
 }
 
 /// Instrumentation at the two actual durability boundaries.
@@ -66,6 +96,10 @@ struct Manifest {
     tables: BTreeMap<String, FileEntry>,
     output: FileEntry,
     delta: FileEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_vector: Option<FileEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_vector_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,6 +108,14 @@ struct Current {
     format: String,
     directory: String,
     manifest: FileEntry,
+}
+
+struct Publication<'a> {
+    expected: Option<u64>,
+    snapshot: &'a Snapshot,
+    previous: Option<Current>,
+    vector: Option<&'a PinnedSourceVector>,
+    previous_vector_digest: Option<String>,
 }
 
 /// An exclusively owned checkpoint store on a durable local filesystem.
@@ -151,6 +193,111 @@ impl CheckpointStore {
         Ok(history)
     }
 
+    /// Load a source-aware epoch and validate its complete immutable lineage.
+    ///
+    /// A nonempty format-1 store is rejected rather than adopted implicitly.
+    /// Source IO is deliberately absent; strict online writer restart must also
+    /// revalidate retained external endpoints through the source adapter.
+    pub fn load_source(&self) -> Result<Option<SourceSnapshot>> {
+        let _serial = self.serial()?;
+        Ok(self
+            .read_source_lineage()?
+            .pop()
+            .map(|(_, _, snapshot)| snapshot))
+    }
+
+    /// Read all source-aware epochs, verifying bindings, schemas and cursors.
+    pub fn history_source(&self) -> Result<Vec<SourceSnapshot>> {
+        let _serial = self.serial()?;
+        Ok(self
+            .read_source_lineage()?
+            .into_iter()
+            .map(|(_, _, snapshot)| snapshot)
+            .collect())
+    }
+
+    /// Atomically publish a typed snapshot together with its exact source tuple.
+    pub fn commit_source(
+        &self,
+        expected: Option<&SourcePosition>,
+        candidate: &SourceSnapshot,
+    ) -> Result<()> {
+        self.commit_source_with_observer(expected, candidate, |_| Ok(()))
+    }
+
+    /// Publish a source-aware epoch at the same durability barriers as format 1.
+    ///
+    /// Lost-response retries must match the complete vector, payload and exact
+    /// predecessor. A different vector with identical output is a conflict.
+    /// Callbacks must not recursively call this store while it holds its lock.
+    pub fn commit_source_with_observer(
+        &self,
+        expected: Option<&SourcePosition>,
+        candidate: &SourceSnapshot,
+        mut callback: impl FnMut(PublishPoint) -> Result<()>,
+    ) -> Result<()> {
+        self.commit_source_with_sync(expected, candidate, &mut callback, &mut sync_dir)
+    }
+
+    fn commit_source_with_sync(
+        &self,
+        expected: Option<&SourcePosition>,
+        candidate: &SourceSnapshot,
+        callback: &mut impl FnMut(PublishPoint) -> Result<()>,
+        synchronize: &mut impl FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
+        let _serial = self.serial()?;
+        candidate.vector.validate_for(&candidate.snapshot.tables)?;
+        if expected.is_some_and(|position| !valid_digest(&position.vector_digest)) {
+            return Err(invalid("invalid expected source-vector digest"));
+        }
+        let existing = self.read_source_lineage()?.pop();
+        if let Some((_, manifest, current)) = &existing {
+            if current.snapshot.epoch == candidate.snapshot.epoch {
+                if manifest.previous_epoch == expected.map(|position| position.epoch)
+                    && manifest.previous_vector_digest.as_deref()
+                        == expected.map(|position| position.vector_digest.as_str())
+                    && snapshots_equal(&current.snapshot, &candidate.snapshot)
+                    && current.vector == candidate.vector
+                {
+                    // A prior rename may be visible after its parent fsync
+                    // failed. Identical bytes alone do not prove durability.
+                    synchronize(&self.root)?;
+                    return Ok(());
+                }
+                return Err(invalid(
+                    "conflicting retry of an already committed source epoch",
+                ));
+            }
+        }
+        let actual = existing
+            .as_ref()
+            .map(|(_, _, current)| current.position())
+            .transpose()?;
+        if actual.as_ref() != expected {
+            return Err(invalid(
+                "source checkpoint predecessor does not match CURRENT",
+            ));
+        }
+        let previous_epoch = expected.map(|position| position.epoch);
+        validate_epoch(previous_epoch, &candidate.snapshot)?;
+        if let Some((_, _, current)) = &existing {
+            validate_definition(&current.snapshot, &candidate.snapshot)?;
+            candidate.vector.validate_successor(&current.vector)?;
+        }
+        self.publish_epoch(
+            Publication {
+                expected: previous_epoch,
+                snapshot: &candidate.snapshot,
+                previous: existing.map(|(current, _, _)| current),
+                vector: Some(&candidate.vector),
+                previous_vector_digest: expected.map(|position| position.vector_digest.clone()),
+            },
+            callback,
+            synchronize,
+        )
+    }
+
     /// Publish against an exact predecessor, or resolve an identical retry.
     pub fn commit(&self, expected: Option<u64>, snapshot: &Snapshot) -> Result<()> {
         self.commit_with_observer(expected, snapshot, |_| Ok(()))
@@ -167,11 +314,22 @@ impl CheckpointStore {
         snapshot: &Snapshot,
         mut callback: impl FnMut(PublishPoint) -> Result<()>,
     ) -> Result<()> {
+        self.commit_with_sync(expected, snapshot, &mut callback, &mut sync_dir)
+    }
+
+    fn commit_with_sync(
+        &self,
+        expected: Option<u64>,
+        snapshot: &Snapshot,
+        callback: &mut impl FnMut(PublishPoint) -> Result<()>,
+        synchronize: &mut impl FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
         let _serial = self.serial()?;
         let existing = self.read_committed()?;
         if let Some((_, manifest, current)) = &existing {
             if current.epoch == snapshot.epoch {
                 if manifest.previous_epoch == expected && snapshots_equal(current, snapshot) {
+                    synchronize(&self.root)?;
                     return Ok(());
                 }
                 return Err(invalid("conflicting retry of an already committed epoch"));
@@ -181,20 +339,37 @@ impl CheckpointStore {
         if actual != expected {
             return Err(invalid("checkpoint predecessor does not match CURRENT"));
         }
-        if let Some(previous) = expected {
-            if previous.checked_add(1) != Some(snapshot.epoch) {
-                return Err(invalid("checkpoint epoch must advance by exactly one"));
-            }
-        } else if snapshot.epoch != 0 {
-            return Err(invalid("checkpoint bootstrap must be epoch zero"));
-        }
-        if snapshot.sql.trim().is_empty() || snapshot.tables.keys().any(|name| name.is_empty()) {
-            return Err(invalid("SQL and registered table names must be nonempty"));
-        }
+        validate_epoch(expected, snapshot)?;
         if let Some((_, _, current)) = &existing {
             validate_definition(current, snapshot)?;
         }
 
+        self.publish_epoch(
+            Publication {
+                expected,
+                snapshot,
+                previous: existing.map(|(current, _, _)| current),
+                vector: None,
+                previous_vector_digest: None,
+            },
+            callback,
+            synchronize,
+        )
+    }
+
+    fn publish_epoch(
+        &self,
+        publication: Publication<'_>,
+        callback: &mut impl FnMut(PublishPoint) -> Result<()>,
+        synchronize: &mut impl FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
+        let Publication {
+            expected,
+            snapshot,
+            previous,
+            vector,
+            previous_vector_digest,
+        } = publication;
         let (name, directory) = self.reserve_attempt(snapshot.epoch)?;
         let mut tables = BTreeMap::new();
         for (index, (table, batch)) in snapshot.tables.iter().enumerate() {
@@ -203,25 +378,41 @@ impl CheckpointStore {
         }
         let output = write_batch(&directory, "output.arrow", &snapshot.output)?;
         let delta = write_batch(&directory, "delta.arrow", &snapshot.delta)?;
+        let source_vector = vector
+            .map(|vector| {
+                let bytes = vector.canonical_bytes()?;
+                if bytes.len() as u64 > MAX_JSON_BYTES {
+                    return Err(invalid("oversized source-vector JSON file"));
+                }
+                write_bytes(&directory, "source-vector.json", &bytes)
+            })
+            .transpose()?;
+        let format = if vector.is_some() {
+            SOURCE_FORMAT
+        } else {
+            FORMAT
+        };
         let manifest = Manifest {
-            format: FORMAT.into(),
+            format: format.into(),
             sql: snapshot.sql.clone(),
             epoch: snapshot.epoch,
             previous_epoch: expected,
-            previous: existing.map(|(current, _, _)| current),
+            previous,
             tables,
             output,
             delta,
+            source_vector,
+            previous_vector_digest,
         };
         let manifest_bytes = json_bytes(&manifest)?;
         let manifest_entry = write_bytes(&directory, "manifest.json", &manifest_bytes)?;
-        sync_dir(&directory)?;
+        synchronize(&directory)?;
         // Persist the attempt's directory entry before a pointer can name it.
-        sync_dir(&self.root)?;
+        synchronize(&self.root)?;
         callback(PublishPoint::FilesDurable)?;
 
         let current = Current {
-            format: FORMAT.into(),
+            format: format.into(),
             directory: name.clone(),
             manifest: manifest_entry,
         };
@@ -230,7 +421,7 @@ impl CheckpointStore {
         fs::rename(self.root.join(&pointer_name), self.root.join("CURRENT"))?;
         // Atomic visibility is not durability: sync CURRENT's direct parent
         // after rename, and only then allow the caller to acknowledge memory.
-        sync_dir(&self.root)?;
+        synchronize(&self.root)?;
         callback(PublishPoint::CurrentDurable)
     }
 
@@ -275,7 +466,56 @@ impl CheckpointStore {
     }
 
     fn read_epoch(&self, current: &Current) -> Result<(Manifest, Snapshot)> {
-        if current.format != FORMAT || !component(&current.directory) {
+        let (manifest, snapshot, _) = self.read_epoch_mode(current, false)?;
+        Ok((manifest, snapshot))
+    }
+
+    fn read_source_lineage(&self) -> Result<Vec<(Current, Manifest, SourceSnapshot)>> {
+        let mut pointer = self.read_current()?;
+        let mut visited = HashSet::new();
+        let mut lineage = Vec::new();
+        while let Some(current) = pointer {
+            if !visited.insert(current.directory.clone()) {
+                return Err(invalid("source checkpoint history contains a cycle"));
+            }
+            let (manifest, snapshot, vector) = self.read_epoch_mode(&current, true)?;
+            let vector = vector.ok_or_else(|| invalid("source checkpoint lacks its vector"))?;
+            pointer = manifest.previous.clone();
+            lineage.push((current, manifest, SourceSnapshot { snapshot, vector }));
+        }
+        lineage.reverse();
+        if lineage
+            .first()
+            .is_some_and(|(_, _, state)| state.snapshot.epoch != 0)
+        {
+            return Err(invalid(
+                "source checkpoint history does not start at epoch zero",
+            ));
+        }
+        for adjacent in lineage.windows(2) {
+            let (_, _, before) = &adjacent[0];
+            let (_, manifest, after) = &adjacent[1];
+            if before.snapshot.epoch.checked_add(1) != Some(after.snapshot.epoch)
+                || manifest.previous_vector_digest.as_deref()
+                    != Some(before.vector.digest()?.as_str())
+            {
+                return Err(invalid(
+                    "source checkpoint history has an invalid predecessor",
+                ));
+            }
+            validate_definition(&before.snapshot, &after.snapshot)?;
+            after.vector.validate_successor(&before.vector)?;
+        }
+        Ok(lineage)
+    }
+
+    fn read_epoch_mode(
+        &self,
+        current: &Current,
+        source: bool,
+    ) -> Result<(Manifest, Snapshot, Option<PinnedSourceVector>)> {
+        let format = if source { SOURCE_FORMAT } else { FORMAT };
+        if current.format != format || !component(&current.directory) {
             return Err(invalid("invalid CURRENT version or directory"));
         }
         let directory = self.root.join(&current.directory);
@@ -289,7 +529,7 @@ impl CheckpointStore {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let manifest: Manifest = parse_json(&bytes)?;
-        if manifest.format != FORMAT
+        if manifest.format != format
             || manifest.sql.trim().is_empty()
             || manifest.tables.keys().any(|name| name.is_empty())
             || manifest
@@ -299,8 +539,28 @@ impl CheckpointStore {
             || (manifest.previous_epoch.is_none() && manifest.epoch != 0)
             || manifest.output.name != "output.arrow"
             || manifest.delta.name != "delta.arrow"
+            || manifest
+                .previous
+                .as_ref()
+                .is_some_and(|pointer| pointer.format != format)
         {
             return Err(invalid("invalid checkpoint manifest"));
+        }
+        if source {
+            if manifest.source_vector.as_ref().is_none_or(|entry| {
+                entry.name != "source-vector.json" || entry.bytes > MAX_JSON_BYTES
+            }) || manifest.previous_vector_digest.is_some() != manifest.previous_epoch.is_some()
+                || manifest
+                    .previous_vector_digest
+                    .as_ref()
+                    .is_some_and(|digest| !valid_digest(digest))
+            {
+                return Err(invalid("invalid source-vector manifest binding"));
+            }
+        } else if manifest.source_vector.is_some() || manifest.previous_vector_digest.is_some() {
+            return Err(invalid(
+                "format-1 checkpoints cannot contain source-vector metadata",
+            ));
         }
         let mut tables = BTreeMap::new();
         for (index, (name, entry)) in manifest.tables.iter().enumerate() {
@@ -316,8 +576,37 @@ impl CheckpointStore {
             output: read_batch(&directory, &manifest.output)?,
             delta: read_batch(&directory, &manifest.delta)?,
         };
-        Ok((manifest, snapshot))
+        let vector = if let Some(entry) = &manifest.source_vector {
+            let mut file = verified_file(&directory, entry)?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let vector: PinnedSourceVector = parse_json(&bytes)?;
+            if vector.canonical_bytes()? != bytes || vector.digest()? != entry.sha256 {
+                return Err(invalid(
+                    "source-vector JSON is not its canonical committed representation",
+                ));
+            }
+            vector.validate_for(&snapshot.tables)?;
+            Some(vector)
+        } else {
+            None
+        };
+        Ok((manifest, snapshot, vector))
     }
+}
+
+fn validate_epoch(expected: Option<u64>, snapshot: &Snapshot) -> Result<()> {
+    if let Some(previous) = expected {
+        if previous.checked_add(1) != Some(snapshot.epoch) {
+            return Err(invalid("checkpoint epoch must advance by exactly one"));
+        }
+    } else if snapshot.epoch != 0 {
+        return Err(invalid("checkpoint bootstrap must be epoch zero"));
+    }
+    if snapshot.sql.trim().is_empty() || snapshot.tables.keys().any(|name| name.is_empty()) {
+        return Err(invalid("SQL and registered table names must be nonempty"));
+    }
+    Ok(())
 }
 
 fn validate_definition(before: &Snapshot, after: &Snapshot) -> Result<()> {
@@ -696,5 +985,212 @@ mod directory_tests {
         let reopened = CheckpointStore::open(root)?;
         assert!(reopened.load()?.is_none());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use serde_json::json;
+
+    use super::*;
+    use crate::source_vector::{
+        arrow_layout_digest, canonical_arrow_layout, iceberg_schema_digest,
+        snapshot_descriptor_digest, CatalogBinding, PinnedSnapshot, PinnedSource,
+    };
+
+    fn state(epoch: u64) -> Result<SourceSnapshot> {
+        let value = i64::try_from(epoch).map_err(|_| invalid("fixture epoch overflow"))?;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
+            vec![Arc::new(Int64Array::from(vec![value]))],
+        )?;
+        let iceberg_schema = json!({"type":"struct","schema-id":0,"fields":[{"id":1,"name":"id","required":true,"type":"long"}]});
+        let layout = canonical_arrow_layout(batch.schema().as_ref())?;
+        let source = PinnedSource {
+            catalog: CatalogBinding {
+                kind: "local/1".into(),
+                canonical_root: "/fixture/catalog".into(),
+            },
+            namespace: vec!["test".into()],
+            name: "items".into(),
+            table_uuid: "00000000-0000-0000-0000-000000000001".into(),
+            reference: "main".into(),
+            snapshot: PinnedSnapshot::Snapshot {
+                id: value + 100,
+                sequence_number: value + 1,
+                descriptor_sha256: snapshot_descriptor_digest(
+                    &json!({"snapshot-id":value+100,"sequence-number":value+1}),
+                )?,
+            },
+            schema_id: 0,
+            iceberg_schema_sha256: iceberg_schema_digest(&iceberg_schema)?,
+            iceberg_schema,
+            arrow_layout_sha256: arrow_layout_digest(&layout)?,
+            arrow_layout: layout,
+            normalizer_version: 1,
+        };
+        Ok(SourceSnapshot {
+            snapshot: Snapshot {
+                sql: "SELECT id FROM items".into(),
+                epoch,
+                tables: BTreeMap::from([("items".into(), batch.clone())]),
+                output: batch,
+                delta: RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![
+                        Field::new("id", DataType::Int64, false),
+                        Field::new("weight", DataType::Int64, false),
+                    ])),
+                    vec![
+                        Arc::new(Int64Array::from(vec![value])),
+                        Arc::new(Int64Array::from(vec![1_i64])),
+                    ],
+                )?,
+            },
+            vector: PinnedSourceVector {
+                version: 1,
+                sources: BTreeMap::from([("items".into(), source)]),
+            },
+        })
+    }
+
+    fn commit(
+        store: &CheckpointStore,
+        source: bool,
+        expected: Option<&SourcePosition>,
+        candidate: &SourceSnapshot,
+        callback: &mut impl FnMut(PublishPoint) -> Result<()>,
+        synchronize: &mut impl FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
+        if source {
+            store.commit_source_with_sync(expected, candidate, callback, synchronize)
+        } else {
+            store.commit_with_sync(
+                expected.map(|position| position.epoch),
+                &candidate.snapshot,
+                callback,
+                synchronize,
+            )
+        }
+    }
+
+    fn failed_rename_sync_retry(source: bool) -> Result<()> {
+        for epoch in [0_u64, 1] {
+            let temp = tempfile::tempdir()?;
+            let store = CheckpointStore::open(temp.path())?;
+            if epoch == 1 {
+                commit(
+                    &store,
+                    source,
+                    None,
+                    &state(0)?,
+                    &mut |_| Ok(()),
+                    &mut sync_dir,
+                )?;
+            }
+            let candidate = state(epoch)?;
+            let expected = epoch
+                .checked_sub(1)
+                .map(|epoch| state(epoch)?.position())
+                .transpose()?;
+            let mut root_calls = 0;
+            let mut points = Vec::new();
+            let result = commit(
+                &store,
+                source,
+                expected.as_ref(),
+                &candidate,
+                &mut |point| {
+                    points.push(point);
+                    Ok(())
+                },
+                &mut |path| {
+                    if path == store.root {
+                        root_calls += 1;
+                        if root_calls == 2 {
+                            // This is the real parent-sync call after the production
+                            // rename, not an observer standing in for that window.
+                            let pointer = store
+                                .read_current()?
+                                .ok_or_else(|| invalid("rename did not publish CURRENT"))?;
+                            let (_, snapshot, _) = store.read_epoch_mode(&pointer, source)?;
+                            assert_eq!(snapshot.epoch, epoch);
+                            return Err(invalid("injected post-rename directory fsync failure"));
+                        }
+                    }
+                    sync_dir(path)
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(root_calls, 2);
+            assert_eq!(points, vec![PublishPoint::FilesDurable]);
+            let pointer = fs::read(store.root.join("CURRENT"))?;
+            let mut retries = Vec::new();
+            let result = commit(
+                &store,
+                source,
+                expected.as_ref(),
+                &candidate,
+                &mut |_| panic!("an identical retry must not publish"),
+                &mut |path| {
+                    retries.push(path.to_path_buf());
+                    Err(invalid("injected retry directory fsync failure"))
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(retries, vec![store.root.clone()]);
+            retries.clear();
+            commit(
+                &store,
+                source,
+                expected.as_ref(),
+                &candidate,
+                &mut |_| panic!("an identical retry must not publish"),
+                &mut |path| {
+                    retries.push(path.to_path_buf());
+                    sync_dir(path)
+                },
+            )?;
+            assert_eq!(retries, vec![store.root.clone()]);
+            assert_eq!(fs::read(store.root.join("CURRENT"))?, pointer);
+            drop(store);
+            let reopened = CheckpointStore::open(temp.path())?;
+            if source {
+                let history = reopened.history_source()?;
+                assert_eq!(
+                    history.len(),
+                    usize::try_from(epoch + 1).map_err(|_| invalid("fixture epoch overflow"))?
+                );
+                let current = history
+                    .last()
+                    .ok_or_else(|| invalid("missing source history"))?;
+                assert_eq!(current.vector, candidate.vector);
+                assert!(snapshots_equal(&current.snapshot, &candidate.snapshot));
+            } else {
+                let history = reopened.history()?;
+                assert_eq!(
+                    history.len(),
+                    usize::try_from(epoch + 1).map_err(|_| invalid("fixture epoch overflow"))?
+                );
+                assert!(snapshots_equal(
+                    history.last().ok_or_else(|| invalid("missing history"))?,
+                    &candidate.snapshot
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memory_retry_requires_successful_directory_sync_after_visible_rename() -> Result<()> {
+        failed_rename_sync_retry(false)
+    }
+
+    #[test]
+    fn source_retry_requires_successful_directory_sync_after_visible_rename() -> Result<()> {
+        failed_rename_sync_retry(true)
     }
 }

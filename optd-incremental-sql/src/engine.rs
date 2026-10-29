@@ -265,6 +265,68 @@ fn cache_scan(schema: &DFSchemaRef, batch: RecordBatch, id: usize) -> Result<Log
 }
 
 impl SqlView {
+    /// Rebuild exactly the committed sources and validate its result before
+    /// restoring the logical epoch. Source provenance is validated by its owner.
+    #[cfg(feature = "iceberg")]
+    pub(crate) async fn restore_checkpoint(snapshot: &Snapshot) -> Result<Self> {
+        let mut view = Self::new(&snapshot.sql, snapshot.tables.clone()).await?;
+        let rebuilt = view.contents()?;
+        let ordered = view.nodes.last().is_some_and(|node| node.ordered);
+        if (ordered && rebuilt != snapshot.output)
+            || Bag::from_batch(&rebuilt)? != Bag::from_batch(&snapshot.output)?
+        {
+            return Err(Error::Invalid(
+                "recovered SQL result differs from committed output".into(),
+            ));
+        }
+        view.epoch = snapshot.epoch;
+        Ok(view)
+    }
+
+    /// Bind a source-aware publication to this owner's exact prepared state.
+    #[cfg(feature = "iceberg")]
+    pub(crate) fn checkpoint_for(&self, candidate: &PreparedSqlRefresh) -> Result<Snapshot> {
+        if candidate.owner != self.owner
+            || candidate.before != self.epoch
+            || self.epoch.checked_add(1) != Some(candidate.epoch())
+        {
+            return Err(Error::Invalid(
+                "checkpoint candidate owner or predecessor differs".into(),
+            ));
+        }
+        Ok(Snapshot {
+            sql: self.sql.clone(),
+            epoch: candidate.epoch(),
+            tables: candidate
+                .tables
+                .iter()
+                .map(|(name, bag)| Ok((name.clone(), bag.to_batch()?)))
+                .collect::<Result<_>>()?,
+            output: candidate.contents().clone(),
+            delta: candidate.delta()?,
+        })
+    }
+
+    /// Encode the initial view without manufacturing a source transition.
+    #[cfg(feature = "iceberg")]
+    pub(crate) fn bootstrap_snapshot(&self) -> Result<Snapshot> {
+        if self.epoch != 0 {
+            return Err(Error::Invalid("bootstrap requires epoch zero".into()));
+        }
+        Ok(Snapshot {
+            sql: self.sql.clone(),
+            epoch: 0,
+            tables: self.tables()?,
+            output: self.contents()?,
+            delta: self
+                .states
+                .last()
+                .ok_or_else(|| Error::Invalid("empty SQL graph".into()))?
+                .bag
+                .weighted_batch()?,
+        })
+    }
+
     /// Analyze deterministic read-only SQL and initialize every operator once.
     pub async fn new(sql: &str, tables: BTreeMap<String, RecordBatch>) -> Result<Self> {
         let ctx = context();

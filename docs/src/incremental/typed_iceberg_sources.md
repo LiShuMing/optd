@@ -3,16 +3,17 @@
 **Status:** accepted after independent agent and integration review · 2026-10-29
 **Scope:** an optional typed SQL source adapter over explicitly selected, retained
 Iceberg v2/Parquet snapshots and the qualified local catalog; atomic publication
-of a complete source vector with the local SQL checkpoint. No implementation,
-CDC v1 extension, native changelog, remote output transaction or performance claim.
+of a complete source vector with the local SQL checkpoint. No CDC v1 extension,
+native changelog, remote output transaction or performance claim. Observed
+implementation acceptance is recorded in [qualification](./typed_iceberg_qualification.md).
 
 ## 1. Problem
 
-The typed SQL graph accepts atomic named-table changes and durably publishes
-complete typed sources, output and signed output deltas. It does not yet bind
-those tables to Iceberg identities or snapshot cursors. A caller can supply
-correct changes, but a restart cannot currently prove which Iceberg source
-snapshots those source caches represent.
+At the design baseline, the typed SQL graph accepted atomic named-table changes
+and durably published complete typed sources, output and signed output deltas,
+but did not bind those tables to Iceberg identities or snapshot cursors. A caller
+could supply correct changes, while restart could not prove which Iceberg source
+snapshots the source caches represented.
 
 The next increment should read exact typed before/after source endpoints, submit
 one change batch for all query tables, and publish the selected source vector in
@@ -21,7 +22,7 @@ would leave a crash window in which the cursor and SQL state disagree.
 
 ## 2. Constraints and current evidence
 
-**Verified from the current checkout and exact locked dependency source:**
+**Verified at the accepted design baseline and exact locked dependency source:**
 
 * Cargo.lock already locks DataFusion 55.0.0, Arrow 59.2.0 and Iceberg 0.10.1 at
   `5b82ab99aeaf50bf4f5b3b776ac9cd6380a5f3e3`. This proposal requires no version,
@@ -55,9 +56,10 @@ would leave a crash window in which the cursor and SQL state disagree.
   immutable before vector and one candidate after vector. Group indexes are
   derived state rebuilt on restart. The adapter should reuse this boundary.
 
-**Not verified:** a typed Iceberg adapter, its format-2 checkpoint, a multi-table
-source fixture or its recovery. Existing typed SQL and single-source CDC passes
-must not be presented as those future gates passing.
+**Initially unverified:** the typed Iceberg adapter, its format-2 checkpoint,
+multi-table fixtures and recovery. These subsequently received their own
+[implementation and query evidence](./typed_iceberg_qualification.md); earlier
+Arrow-input or single-source CDC passes do not establish those results.
 
 ## 3. Options considered
 
@@ -119,8 +121,10 @@ A versioned PinnedSourceVector contains a sorted map from SQL source name to:
 | schema identity | Iceberg schema ID and canonical complete schema digest, including field IDs, order, types, requiredness and defaults |
 | Arrow layout identity | Complete canonical Arrow source schema and a normalizer version |
 
-Canonical domain-separated serialization, sorted keys and an explicit vector
-version define the vector digest. A hash of currently observed table metadata is
+Canonical serialization with sorted keys and an explicit vector version defines
+the exact `source-vector.json` bytes; their SHA-256 is both the vector digest and
+the manifest file digest. Schema, Arrow layout and snapshot descriptor digests
+use separate domain prefixes. A hash of currently observed table metadata is
 not the cursor: ordinary head advancement changes metadata even when the
 selected snapshot is unchanged. Optional observation locations belong in audit
 information rather than logical cursor equality.
@@ -197,6 +201,12 @@ ability to read some delete files is not enough to mark this adapter qualified.
 A later accepted profile may enable position/equality deletes after independent
 whole-row oracle tests; it must use complete Iceberg scan semantics, never scan
 only newly added data files or ignore attached deletes.
+
+The initial implementation conservatively rejects any delete manifest, including
+one containing only deleted entries. It also bounds each manifest list to 16 MiB
+and each planned endpoint to 100,000 data tasks. Before adding every decoded batch
+to the cumulative bag, charge both Arrow bytes and estimated scalar/vector storage
+against the 256 MiB local budget; duplicate decoded rows still consume that budget.
 
 ### 4.4 Full endpoint difference and one graph prepare
 
@@ -291,6 +301,37 @@ No source vacuum, metadata expiration, orphan deletion or new retention worker
 is introduced here. Pinning a snapshot ID is not itself a physical file-retention
 lease; missing files fail the read without publication.
 
+### 4.7 Reproducible query qualification through real source snapshots
+
+The existing manifest runner keeps its default Arrow-input path. With the optional
+Iceberg feature, an explicit `OPTD_SQL_BENCH_ICEBERG_ROOT` selects a new qualification
+backend and a local generated-artifact root under `/tmp`. Each query gets a fresh
+catalog and checkpoint store; no query adopts an existing fixture directory. Keep
+the input manifest, original SQL and declared typed CSV values unchanged.
+
+DataFusion's VARCHAR fixture loader may choose Arrow Utf8View, while the
+qualified Iceberg schema maps strings to Utf8. The fixture writer explicitly
+normalizes that representation with a checked Arrow string cast, preserving
+all bytes and NULLs; a direct Unicode/empty/NULL regression tests the conversion.
+Record it as fixture representation normalization, with no numeric/date casts.
+
+Create real Iceberg v2/Parquet tables for only the SQL's referenced relations.
+Bootstrap with the first half of each relation, then publish three whole-file
+replacement snapshots for insertion of the remaining rows, deletion of the first
+row and restoration of that row. Empty replacements are real snapshots. Select
+and record every table's exact endpoint before maintenance; independently rescan
+those selected snapshots for the full-query oracle. Compare cached sources,
+typed SQL output and signed output differences, strictly reopen after each epoch,
+and independently fold the committed output history at the end.
+
+Reports distinguish `typed_arrow` and `typed_iceberg_endpoint_vector` backends and
+retain complete bootstrap/round source vectors, vector digests, table UUID/schema
+identities, endpoint work and SQL strategies. Existing Arrow reports cannot serve
+as evidence for this backend. Source scans, rewrites and local operator recomputation
+remain explicit costs; neither this harness nor its tiny witnesses prove O(delta),
+distributed snapshots or scale/performance gains. The existing hard-timeout suite
+runner can pin one feature-built executable SHA for independent per-query fixtures.
+
 ## 5. Failure modes and recovery
 
 * Source IO/type/schema/identity/lineage error, stale before vector, resource
@@ -355,12 +396,12 @@ lease; missing files fail the read without publication.
 
 ## 7. Rollout / migration
 
-This document is a proposal only. First review source bindings, the strict type
-profile and format-2 compatibility decisions. Then implement/verify in separate
-lanes: dependency scaffold, typed scan/endpoint adapter, source-aware store
-format, coordinator/restart, and independent process/query acceptance. Integrate
-only after each stage's observed results exist. Root owns shared manifests,
-engine/store changes and the design index; this design task edits none of them.
+The contract was independently reviewed and accepted before implementation.
+The optional dependency scaffold is a separate commit; the adapter, source-aware
+store, coordinator, process recovery and query qualification implement the
+accepted boundary. [Run the typed Iceberg loop](./typed_iceberg_loop.md) documents
+actual public APIs, and [qualification](./typed_iceberg_qualification.md) records
+observed gates separately from these design acceptance criteria.
 
 Existing stores remain format 1 and existing CDC outputs remain CDC v1. A new
 Iceberg-backed store starts at epoch zero with one explicit complete vector.
@@ -368,13 +409,13 @@ Any requested migration of an existing memory-input store needs its own explicit
 verification and review; this proposal does not infer external cursor identities
 from local Arrow files.
 
-## 8. Open questions for review
+## 8. Resolved initial review decisions
 
-* Confirm the initial strict profile: local/main/v2/Parquet, explicit snapshot
+* The accepted initial profile is local/main/v2/Parquet, explicit snapshot
   schema IDs, fixed schema, no live delete files, and the listed TPC scalar types.
-* Confirm strict online writer restart, including full exact-endpoint re-read,
+* Require strict online writer restart, including full exact-endpoint re-read,
   rather than a cache-only restart followed by best-effort source validation.
-* Confirm separate format-2 source-aware APIs and fail-closed format/mode
+* Require separate format-2 source-aware APIs and fail-closed format/mode
   admission, while retaining existing format-1 memory APIs unchanged.
-* Decide optional dependency wiring for LocalCatalog reuse before implementation;
-  no dependency or format change is authorized by this proposed document alone.
+* Reuse the already locked LocalCatalog/IO packages through three optional edges,
+  with no version/source/MSRV migration, in a separately verified dependency commit.

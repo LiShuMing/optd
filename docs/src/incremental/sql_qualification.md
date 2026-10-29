@@ -11,6 +11,10 @@ It records observed query correctness, not standard-scale performance,
 official TPC certification, or qualification of the newer typed Iceberg
 source-vector/coordinator path.
 
+The later [typed Iceberg qualification](./typed_iceberg_qualification.md) supplies
+its own complete 22/99 source-backed results, recovery checks and artifact hashes;
+those results are independent of the historical Arrow evidence below.
+
 ## 1. Verified result and executable identity
 
 Both qualifications below used the same observed executable SHA-256:

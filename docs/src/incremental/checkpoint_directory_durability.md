@@ -116,3 +116,51 @@ and `CARGO_TARGET_DIR=/tmp/optd-sql-msrv-20261029-target`.
 Full output is `/tmp/optd-directory-durability-sql-20261029.log`.
 This reused the integration owner's target directory and recompiled the changed
 crate; it is not an additional fresh-target build or power-failure experiment.
+
+## 10. Accepted extension: durability of an identical publication retry
+
+**Status:** accepted after independent review and integration-owner review · 2026-10-29
+
+An additional review found a separate publication gap in the earlier baseline:
+CURRENT can be renamed successfully and become visible, then the following
+warehouse-directory fsync can fail. Reading that pointer and finding an identical
+payload does not prove the renamed pointer is durable. The earlier fast retry
+path returned success without completing the failed synchronization.
+
+Both format-1 and source-aware format-2 identical retries must therefore fsync
+the warehouse directory before returning success. They retain the exact payload,
+predecessor and source-vector equality checks. A second fsync failure remains an
+error; a retry cannot acknowledge memory on visibility alone. No epoch directory
+or CURRENT rewrite is required for this exact retry. Files had already been
+synced before the attempted rename, so only the renamed pointer's parent needs
+the additional synchronization.
+
+Use private injected directory synchronization in the same production publish
+and retry helpers. Regression tests must observe the actual rename, inject a
+failure in its following root-directory fsync, fail an identical retry whose
+root fsync fails again, and return success only after a retry performs a real
+successful root fsync. Then reopen and verify the complete committed history.
+The observer's CurrentDurable callback is after fsync and cannot substitute for
+this injection. Cover both format versions. These are explicit IO-failure tests,
+not hardware power-loss certification.
+
+**Verified, 2026-10-29:** both private regression tests passed, each exercising
+bootstrap and successor publication. The revised complete SQL gate exited 0:
+
+```sh
+bash /tmp/optd-sql-env-20261029.sh scripts/agent-check.sh sql > /tmp/optd-source-v2-sql-gates-20261029.log 2>&1
+```
+
+Rust 1.95.0 formatting and warnings-denied all-target lint passed for the default
+and `iceberg` feature configurations. Default tests reported 72 passed, 0 failed,
+1 ignored; feature tests reported 84 passed, 0 failed, 2 ignored. The new nine
+source-store tests passed in both configurations, including real process death
+at bootstrap/successor and FilesDurable/CurrentDurable. The feature run separately
+passed the typed Iceberg adapter's ten active tests; its subprocess-only driver
+and complete-query qualification remain explicit ignored test entries.
+
+The environment wrapper uses the exact Rust tools, four build jobs, debug info
+disabled, incremental compilation disabled, offline mode and the reused
+`/tmp/optd-sql-msrv-20261029-target` recorded above. This is recompilation and
+actual test execution in that target, not another fresh-target build. Complete
+output is retained at the redirected log path. All owned gate processes exited.
