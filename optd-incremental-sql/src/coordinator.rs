@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use crate::iceberg::{same_tables, LocalIcebergSources, SourceWork};
+use crate::planner::IncrementalOptimizer;
 use crate::source_vector::PinnedSourceVector;
 use crate::store::{CheckpointStore, PublishPoint, SourceSnapshot};
 use crate::{Error, RefreshStats, Result, SqlView};
@@ -40,6 +41,20 @@ impl IcebergSqlView {
         sources: LocalIcebergSources,
         target: PinnedSourceVector,
     ) -> Result<Self> {
+        Self::bootstrap_with_optimizer(path, sql, sources, target, IncrementalOptimizer::default())
+            .await
+    }
+
+    /// Create epoch zero with caller-selected executable maintenance rules.
+    ///
+    /// Custom rules are not persisted; supply the registry again when reopening.
+    pub async fn bootstrap_with_optimizer(
+        path: impl AsRef<Path>,
+        sql: &str,
+        sources: LocalIcebergSources,
+        target: PinnedSourceVector,
+        optimizer: IncrementalOptimizer,
+    ) -> Result<Self> {
         let store = CheckpointStore::open(path)?;
         if store.load_source()?.is_some() {
             return Err(invalid(
@@ -48,7 +63,7 @@ impl IcebergSqlView {
         }
         let observed = sources.observe(&target, None).await?;
         let (tables, _) = sources.read_all(&observed, &target).await?;
-        let view = SqlView::new(sql, tables.clone()).await?;
+        let view = SqlView::new_with_optimizer(sql, tables.clone(), optimizer).await?;
         let snapshot = view.bootstrap_snapshot()?;
         target.validate_for(&snapshot.tables)?;
         if !same_tables(&tables, &snapshot.tables)? {
@@ -80,6 +95,18 @@ impl IcebergSqlView {
         sql: &str,
         sources: LocalIcebergSources,
     ) -> Result<Self> {
+        Self::reopen_with_optimizer(path, sql, sources, IncrementalOptimizer::default()).await
+    }
+
+    /// Strictly restore exact endpoints with caller-selected maintenance rules.
+    ///
+    /// The registry rebuilds the plan; the checkpoint does not bind rule identity.
+    pub async fn reopen_with_optimizer(
+        path: impl AsRef<Path>,
+        sql: &str,
+        sources: LocalIcebergSources,
+        optimizer: IncrementalOptimizer,
+    ) -> Result<Self> {
         let store = CheckpointStore::open(path)?;
         let committed = store
             .load_source()?
@@ -98,7 +125,8 @@ impl IcebergSqlView {
                 "retained Iceberg endpoints differ from committed source caches",
             ));
         }
-        let view = SqlView::restore_checkpoint(&committed.snapshot).await?;
+        let view =
+            SqlView::restore_checkpoint_with_optimizer(&committed.snapshot, optimizer).await?;
         Ok(Self {
             view,
             store,

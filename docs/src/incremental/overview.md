@@ -15,6 +15,9 @@ atomic named-table epochs, durable output deltas and recovery. Its optional
 Iceberg adapter binds explicit source snapshot tuples to the same checkpoint.
 See [SQL execution](./sql_execution.md), [typed Iceberg usage](./typed_iceberg_loop.md)
 and the [observed query qualification](./typed_iceberg_qualification.md).
+The SQL graph's maintenance implementations are compiled by independently
+registered [rewrite rules](./rule_rewrite.md), with a typed expression verifier
+and [public extension and explanation APIs](./rule_rewrite_usage.md).
 This implementation uses native delta propagation, changed-group recomputation
 and explicit nonlinear operator recomputation; the general operator designs
 below are not evidence that every operator has a native incremental algorithm.

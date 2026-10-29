@@ -70,6 +70,12 @@ expression. DDL, DML and non-immutable functions are rejected before changing
 state. Missing or unknown table changes are errors.
 
 Graph nodes have stable postorder ids; every node is updated once per epoch.
+Before graph bootstrap execution, [registered rewrite rules](./rule_rewrite.md)
+compile each node into a verified signed-expression maintenance plan. Rules
+select executable expressions, explicit changed-group maintenance or explicit
+local recomputation; the refresh driver interprets that compiled plan. Rule
+identity and the actual expression tree are exposed through
+`incremental_plan().explain()`. See [extension usage](./rule_rewrite_usage.md).
 All edges read the same immutable before state and candidate after state.
 Repeated/self-join scans share one updated source relation and never apply a
 source batch twice. Any shared logical subtree uses the same before/after pair.

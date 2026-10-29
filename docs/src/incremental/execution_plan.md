@@ -385,3 +385,57 @@ runtime claims. Dependency edges were isolated in separately verified commits;
 no existing package version/source/checksum or MSRV changed. Root owns final
 integration and publication; subsequent performance/deployment work needs its
 own acceptance evidence.
+
+## 13. Implementation loop 4 — 2026-10-29
+
+**Outcome:** typed SQL maintenance now has a public, deterministic rule registry
+that constructs executable signed-change expressions. The
+[accepted design](./rule_rewrite.md), [extension guide](./rule_rewrite_usage.md)
+and [observed qualification](./rule_rewrite_qualification.md) describe distinct
+design, usage and verification contracts. The interpreter follows the selected
+expression tree, replacing the previous executor-side strategy selector.
+
+Seventeen named built-in rules cover the existing supported operators. Rules
+can independently override the join identity or choose explicit recomputation
+without changing the refresh driver. Local ports, exact schemas, arity,
+ordering, group eligibility, topology and expression size/depth are checked
+before bootstrap. Missing rules and invalid rewrites fail with node/rule/phase
+identity; no universal recomputation fallback hides them. Custom rules are
+trusted algebraic extensions and need independent SQL oracle tests.
+
+**Verified:** an initially empty-target Iceberg feature-library check; default
+SQL **94 passed / 1 ignored**, feature SQL **107 passed / 2 ignored**; both
+all-target strict lint configurations; workspace strict lint and **373 passed /
+4 ignored / 1 explicitly filtered**; 28 Python tool tests and book generation.
+The separately filtered PostgreSQL fixture, reused regression targets and
+isolated book input are disclosed in the qualification. Both complete public
+usage examples compile as a separate consumer without dependency identity drift.
+Seventeen dedicated planner/execution tests include custom equivalent join
+formulas, a hand-checked deletion cross term, self joins, malformed plans,
+nested typed Empty execution, removal of necessary rules, explicit recomputation
+and durable reopen followed by another update. A real Iceberg custom-registry
+test checks multi-table updates, failed and successful reconstruction, source
+vectors and complete output-log replay.
+
+New-executable real-Iceberg query qualification passes TPC-H **22/22** and
+TPC-DS **99/99**: **121 selected bootstrap comparisons and 363 mutation rounds**,
+strict reopen and complete output-log replay. TPC-H retains two empty-only
+tiny profiles and supplies unchanged SQL on separately labelled generated
+data for Q11/Q21. An initial outer-timeout/orchestration failure remains in the
+evidence. Directed small datasets and bag comparisons establish the tested
+semantics; they do not establish per-query presentation ordering, standard
+scale performance, all-native execution or TPC certification.
+
+`SqlView`, `DurableSqlView` and the Iceberg coordinator carry caller-selected
+registries through construction and recovery. Checkpoint formats do not change.
+Rule code/identity is not persisted; equivalent implementations may be supplied
+after restart, and output reconstruction is checked. This is not proof that an
+arbitrary custom rule is correct for future inputs.
+
+The existing standing publication scope remains the task branch
+`optd-incremental-ivm` and ordinary fast-forward publication to the established
+`origin/main`, after fetch/integration and verification. Root owns final
+publication. Next work requiring its own design/evidence includes
+cost-based rule alternatives, persistent aggregate/join state and controlled
+scale/performance measurements; rule extensibility alone establishes none of
+those outcomes.

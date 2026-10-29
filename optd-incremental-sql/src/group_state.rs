@@ -201,7 +201,7 @@ impl GroupUpdate {
     }
 }
 
-fn supported_key(data_type: &DataType, policy: KeyPolicy) -> bool {
+pub(crate) fn supported_key(data_type: &DataType, policy: KeyPolicy) -> bool {
     match data_type {
         DataType::Null
         | DataType::Boolean

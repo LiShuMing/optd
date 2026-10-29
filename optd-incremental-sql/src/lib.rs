@@ -7,6 +7,7 @@
 mod bag;
 mod engine;
 mod group_state;
+pub mod planner;
 pub mod source_vector;
 pub mod store;
 
@@ -17,9 +18,9 @@ pub mod iceberg;
 
 pub use bag::MAX_MATERIALIZED_ROWS;
 pub use engine::{
-    DurableSqlView, GroupWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, Strategy,
-    TableChange,
+    DurableSqlView, GroupWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, TableChange,
 };
+pub use planner::Strategy;
 
 /// Failure before a candidate can become visible or a checkpoint is accepted.
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +28,22 @@ pub enum Error {
     /// Rejected SQL, input, state transition or resource requirement.
     #[error("{0}")]
     Invalid(String),
+    /// An invalid or conflicting rule registry definition.
+    #[error("incremental rule registry: {0}")]
+    RuleRegistry(String),
+    /// A rule failed while matching, rewriting, or verifying a logical node.
+    #[error("incremental node {node}, rule {rule}, {phase}: {source}")]
+    Rewrite {
+        /// Stable logical node identity.
+        node: usize,
+        /// Registered rule identity, or the unmatched-request description.
+        rule: String,
+        /// Planning phase in which the error occurred.
+        phase: &'static str,
+        /// Original failure, retained for diagnostics.
+        #[source]
+        source: Box<Error>,
+    },
     /// Signed row multiplicity cannot be represented.
     #[error("signed row multiplicity overflow")]
     Overflow,

@@ -1143,3 +1143,220 @@ fn typed_source_child() {
             .unwrap();
         });
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn custom_optimizer_survives_typed_source_refresh_reopen_and_replay() {
+    use datafusion::logical_expr::LogicalPlan;
+    use optd_incremental_sql::planner::{
+        IncrementalOptimizer, IncrementalRule, Maintenance, RuleContext, RuleRewrite,
+    };
+    use optd_incremental_sql::{RefreshStats, Strategy};
+
+    const QUERY: &str =
+        "SELECT o.id + 10 AS next_id, l.amount FROM orders o JOIN lineitems l ON o.id=l.id";
+    const RULE: &str = "test.typed_source.recompute_projection";
+
+    struct RecomputeProjection;
+    impl IncrementalRule for RecomputeProjection {
+        fn name(&self) -> &str {
+            RULE
+        }
+        fn version(&self) -> u32 {
+            7
+        }
+        fn priority(&self) -> i32 {
+            10_000
+        }
+        fn matches(&self, context: &RuleContext<'_>) -> optd_incremental_sql::Result<bool> {
+            Ok(matches!(context.logical_plan(), LogicalPlan::Projection(_)) && !context.ordered())
+        }
+        fn rewrite(&self, _: &RuleContext<'_>) -> optd_incremental_sql::Result<RuleRewrite> {
+            Ok(RuleRewrite {
+                maintenance: Maintenance::Recompute,
+                reason: "exercise caller-selected typed-source maintenance".into(),
+            })
+        }
+    }
+    fn optimizer() -> IncrementalOptimizer {
+        IncrementalOptimizer::default()
+            .with_rule(Arc::new(RecomputeProjection))
+            .unwrap()
+    }
+    fn selected_nodes(view: &IcebergSqlView) -> Vec<usize> {
+        let selected = view
+            .view()
+            .incremental_plan()
+            .nodes()
+            .iter()
+            .filter(|node| node.rule.name == RULE)
+            .map(|node| {
+                assert_eq!(node.rule.version, 7);
+                assert_eq!(node.rule.priority, 10_000);
+                assert_eq!(node.maintenance, Maintenance::Recompute);
+                node.id
+            })
+            .collect::<Vec<_>>();
+        assert!(!selected.is_empty());
+        assert!(view.view().incremental_plan().explain().contains(RULE));
+        selected
+    }
+    fn selected_stats(stats: &RefreshStats, selected: &[usize]) {
+        for id in selected {
+            let node = stats.nodes.iter().find(|node| node.id == *id).unwrap();
+            assert_eq!(node.rule.name, RULE);
+            assert_eq!(node.rule.version, 7);
+            assert_eq!(node.rule.priority, 10_000);
+            assert_eq!(node.strategy, Strategy::OperatorRecompute);
+            assert!(node.delta_rows > 0);
+        }
+    }
+    fn expected(values: &[(i64, Option<i128>, i64)]) -> Rows {
+        values
+            .iter()
+            .map(|(id, amount, weight)| {
+                (
+                    vec![
+                        ScalarValue::Int64(Some(*id)),
+                        ScalarValue::Decimal128(*amount, 18, 2),
+                    ],
+                    *weight,
+                )
+            })
+            .collect()
+    }
+
+    let _activity = PROCESS_ACTIVITY.enter();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("catalog");
+    let store = temp.path().join("store");
+    let catalog = fixture(&root).await;
+    append(&catalog, "orders", &[row(1, 100), row(2, 100)]).await;
+    append(
+        &catalog,
+        "lineitems",
+        &[
+            row(1, 100),
+            row(1, 100),
+            Row {
+                id: 2,
+                amount: None,
+                label: None,
+            },
+        ],
+    )
+    .await;
+    let initial = heads(&root).await;
+    let mut view = IcebergSqlView::bootstrap_with_optimizer(
+        &store,
+        QUERY,
+        inputs(&root),
+        initial.clone(),
+        optimizer(),
+    )
+    .await
+    .unwrap();
+    let selected = selected_nodes(&view);
+    assert_eq!(view.source_vector(), &initial);
+    assert_eq!(
+        rows(&view.view().contents().unwrap()),
+        expected(&[(11, Some(100), 2), (12, None, 1)])
+    );
+    equal(
+        &view.view().contents().unwrap(),
+        &oracle(&root, &initial, QUERY).await,
+    );
+
+    append(&catalog, "orders", &[row(3, 100)]).await;
+    append(&catalog, "lineitems", &[row(1, 150), row(3, 200)]).await;
+    let first = heads(&root).await;
+    let IcebergRefresh::Committed {
+        source_work,
+        sql_stats,
+    } = view.refresh(first.clone()).await.unwrap()
+    else {
+        panic!("custom optimizer did not publish the first source tuple")
+    };
+    assert_eq!(source_work.changed_sources, 2);
+    assert_eq!(sql_stats.epoch, 1);
+    selected_stats(&sql_stats, &selected);
+    assert_eq!(view.source_vector(), &first);
+    let first_output = view.view().contents().unwrap();
+    assert_eq!(
+        rows(&first_output),
+        expected(&[
+            (11, Some(100), 2),
+            (11, Some(150), 1),
+            (12, None, 1),
+            (13, Some(200), 1),
+        ])
+    );
+    equal(&first_output, &oracle(&root, &first, QUERY).await);
+    drop(view);
+
+    let pointer = fs::read(store.join("CURRENT")).unwrap();
+    let error = IcebergSqlView::reopen_with_optimizer(
+        &store,
+        QUERY,
+        inputs(&root),
+        IncrementalOptimizer::empty(),
+    )
+    .await
+    .err()
+    .expect("an empty registry must reject reconstruction");
+    assert!(error.to_string().contains("no incremental rule matched"));
+    assert_eq!(fs::read(store.join("CURRENT")).unwrap(), pointer);
+    {
+        let checkpoints = CheckpointStore::open(&store).unwrap();
+        let committed = checkpoints.load_source().unwrap().unwrap();
+        assert_eq!(committed.snapshot.epoch, 1);
+        assert_eq!(committed.vector, first);
+        equal(&committed.snapshot.output, &first_output);
+    }
+
+    let mut view = IcebergSqlView::reopen_with_optimizer(&store, QUERY, inputs(&root), optimizer())
+        .await
+        .unwrap();
+    assert_eq!(selected_nodes(&view), selected);
+    assert_eq!(view.view().epoch(), 1);
+    assert_eq!(view.source_vector(), &first);
+    equal(&view.view().contents().unwrap(), &first_output);
+    assert_eq!(fs::read(store.join("CURRENT")).unwrap(), pointer);
+
+    overwrite(&catalog, "orders", &[row(1, 100), row(3, 100), row(3, 100)]).await;
+    overwrite(
+        &catalog,
+        "lineitems",
+        &[row(1, 175), row(3, 200), row(3, 200)],
+    )
+    .await;
+    let next = heads(&root).await;
+    let IcebergRefresh::Committed {
+        source_work,
+        sql_stats,
+    } = view.refresh(next.clone()).await.unwrap()
+    else {
+        panic!("reopened custom optimizer did not publish the next source tuple")
+    };
+    assert_eq!(source_work.changed_sources, 2);
+    assert_eq!(sql_stats.epoch, 2);
+    selected_stats(&sql_stats, &selected);
+    assert_eq!(view.source_vector(), &next);
+    let final_output = view.view().contents().unwrap();
+    assert_eq!(
+        rows(&final_output),
+        expected(&[(11, Some(175), 1), (13, Some(200), 4)])
+    );
+    equal(&final_output, &oracle(&root, &next, QUERY).await);
+    drop(view);
+
+    {
+        let checkpoints = CheckpointStore::open(&store).unwrap();
+        let history = checkpoints.history_source().unwrap();
+        assert_eq!(history.len(), 3);
+        for (committed, vector) in history.iter().zip([&initial, &first, &next]) {
+            assert_eq!(&committed.vector, vector);
+        }
+        equal(&history[2].snapshot.output, &final_output);
+    }
+    folded_history(&store);
+}
