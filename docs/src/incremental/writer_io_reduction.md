@@ -182,11 +182,13 @@ read-back.
 
 Return the validated batches from the sink constructor (or add an internal constructor that
 accepts them) so `recover` derives the last checkpoint from `batches.last()` and folds the same
-vector for the digest comparison. `CdcLogReader::open` already validates the envelope chain
-without scanning data; use the same separation for the producer.
+vector for the digest comparison. This is `IcebergCdcSink::open_with_log`, which returns
+`(sink, batches)`; `open` delegates to it and drops the vector. `CdcLogReader::open` already
+validates the envelope chain without scanning data; use the same separation for the producer.
 
-`DeltaSink::last_checkpoint` also uses `latest_commit_index()` instead of walking every snapshot,
-since it only needs the current commit group. Recovery still performs its one full read for the
+`DeltaSink::last_checkpoint` also uses `commit_index()` instead of walking every snapshot, since
+it only needs the current commit group; it still loads and validates the table bindings, so a
+generation or property drift is still rejected. Recovery still performs its one full read for the
 digest comparison; the summary lookup does not replace that read.
 
 ## 5. Failure modes and recovery

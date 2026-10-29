@@ -232,6 +232,15 @@ impl IcebergCdcSink {
         ident: TableIdent,
         generation: Generation,
     ) -> Result<Self, CdcError> {
+        Ok(Self::open_with_log(catalog, ident, generation).await?.0)
+    }
+    /// Open and return the validated log that startup already read, so recovery can fold those
+    /// batches instead of scanning a second and third time.
+    pub async fn open_with_log(
+        catalog: Arc<LocalCatalog>,
+        ident: TableIdent,
+        generation: Generation,
+    ) -> Result<(Self, Vec<PreparedBatch>), CdcError> {
         let table = if catalog.table_exists(&ident).await.map_err(storage)? {
             catalog.load_table(&ident).await.map_err(storage)?
         } else {
@@ -268,8 +277,8 @@ impl IcebergCdcSink {
             full_reads: AtomicUsize::new(0),
         };
         sink.validate_table(&sink.load().await?)?;
-        sink.read_batches().await?;
-        Ok(sink)
+        let batches = sink.read_batches().await?;
+        Ok((sink, batches))
     }
     /// Immutable output definition.
     pub fn generation(&self) -> &Generation {
@@ -858,11 +867,12 @@ impl CdcLogReader {
 }
 impl DeltaSink for IcebergCdcSink {
     async fn last_checkpoint(&self) -> Result<Option<CommitEnvelope>, CdcError> {
+        // `load` still validates the generation bindings; the summary supplies the last
+        // envelope of the current commit group without scanning data.
+        let table = self.load().await?;
         Ok(self
-            .read_batches()
-            .await?
-            .last()
-            .map(|b| b.envelope().clone()))
+            .commit_index(&table)?
+            .and_then(|index| index.entries.last().cloned()))
     }
     async fn emit(&mut self, batch: &PreparedBatch) -> Result<CommitEnvelope, CdcError> {
         self.emit_with_observer(batch, &|_| Ok(())).await
@@ -905,8 +915,10 @@ impl CdcLoop {
             .keys()
             .next()
             .ok_or(CdcError::InvalidCheckpoint)?;
-        let sink = IcebergCdcSink::open(catalog.clone(), output_ident, generation.clone()).await?;
-        let previous = sink.last_checkpoint().await?;
+        let (sink, batches) =
+            IcebergCdcSink::open_with_log(catalog.clone(), output_ident, generation.clone())
+                .await?;
+        let previous = batches.last().map(|b| b.envelope().clone());
         let table = catalog.load_table(&source_ident).await.map_err(storage)?;
         if table.metadata().uuid().to_string() != generation.bindings()[&source_id].table_id {
             return Err(CdcError::InvalidCheckpoint);
@@ -938,8 +950,9 @@ impl CdcLoop {
                 None,
             ))
         } else {
+            // Fold the batches startup already read and validated; do not scan again here.
             let mut folded = Multiset::new();
-            for batch in sink.read_batches().await? {
+            for batch in &batches {
                 folded = folded
                     .try_union(&batch.delta()?)
                     .map_err(|_| CdcError::Overflow)?;

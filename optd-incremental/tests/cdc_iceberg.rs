@@ -564,6 +564,24 @@ async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back()
     assert_eq!(sink.read_batches().await.unwrap().len(), 7);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_folds_the_single_startup_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = fixture(temp.path()).await;
+    append(&catalog, &[1]).await;
+    let mut loop_ = recover(catalog.clone()).await;
+    loop_.step().await.unwrap();
+    append(&catalog, &[2]).await;
+    loop_.step().await.unwrap();
+    drop(loop_);
+
+    // Recovery validates the log once and folds those same batches for the digest check; it
+    // must not rescan for the checkpoint or for the fold.
+    let mut driver = recover(catalog.clone()).await;
+    assert_eq!(driver.sink().full_reads(), 1);
+    assert!(driver.step().await.unwrap().is_none());
+}
+
 // The parent launches this exact test in a new process. Normal test runs have no worker env.
 #[test]
 fn subprocess_worker() {
