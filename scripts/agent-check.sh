@@ -4,6 +4,7 @@
 # Modes:
 #   fast      - formatting, default-feature lint and tests
 #   iceberg   - fast plus the iceberg-feature lint and tests
+#   sql       - formatting, typed SQL lint, oracle and process-recovery tests
 #   full      - everything, except the Postgres-backed perfbench integration test
 #               (run the `perfbench` mode on a machine that has Postgres)
 #   perfbench - optd-perfbench tests; requires a running Postgres and the
@@ -23,11 +24,15 @@ run() {
   fi
 }
 case "$mode" in
-  fast|iceberg|full|perfbench) ;;
-  *) printf 'usage: %s [fast|iceberg|full|perfbench]\n' "$0" >&2; exit 2 ;;
+  fast|iceberg|sql|full|perfbench) ;;
+  *) printf 'usage: %s [fast|iceberg|sql|full|perfbench]\n' "$0" >&2; exit 2 ;;
 esac
 if [[ "$mode" == perfbench ]]; then
   run cargo "+$toolchain" test -p optd-perfbench --all-features --locked
+elif [[ "$mode" == sql ]]; then
+  run cargo "+$toolchain" fmt --all -- --check
+  run cargo "+$toolchain" clippy -p optd-incremental-sql --no-deps --all-targets --locked -- -D warnings
+  run cargo "+$toolchain" test -p optd-incremental-sql --locked
 else
   run cargo "+$toolchain" fmt --all -- --check
   run cargo "+$toolchain" clippy -p optd-incremental --no-deps --all-targets --no-default-features --locked -- -D warnings

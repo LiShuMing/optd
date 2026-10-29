@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'optd-incremental/**'
+      - 'optd-incremental-sql/**'
       - 'optd-core/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -12,6 +13,7 @@ on:
     branches: [main]
     paths:
       - 'optd-incremental/**'
+      - 'optd-incremental-sql/**'
       - 'optd-core/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -20,6 +22,19 @@ on:
 permissions:
   contents: read
 jobs:
+  sql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt, clippy
+      - name: Typed SQL, independent oracle and process recovery gates
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/optd-sql-target
+        run: scripts/agent-check.sh sql
   cdc:
     runs-on: ubuntu-latest
     timeout-minutes: 30
