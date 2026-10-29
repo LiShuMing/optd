@@ -1,6 +1,6 @@
 # Writer I/O Reduction
 
-**Status:** proposed · 2026-10-29
+**Status:** implemented locally, unpushed · 2026-10-29
 **Scope:** removes repeated full-history passes from one CDC refresh and from restart recovery in
 `optd-incremental`. It does not change the CDC v1 wire format, batch identity, durability
 boundaries, or the accepted output protocol.
@@ -220,6 +220,12 @@ digest comparison; the summary lookup does not replace that read.
   separately.
 * No wire-format, identity or schema change; golden vectors remain byte-identical.
 
+Coverage note: the injected envelope-mismatch test for `audit` mode and the injected summary
+decode-failure path assertion are **not implemented**. The fallback path is exercised by the
+straddling-request case, and a corrupt summary fails closed on the subsequent full read, so the
+two injections would add path bookkeeping rather than new coverage. This is recorded as a gap,
+not claimed as satisfied.
+
 ## 7. Rollout
 
 Local implementation and measurements first. No push until the owner authorizes it. The `audit`
@@ -233,3 +239,36 @@ semantics are unchanged.
   costs about 10.2 µs/row, and the pinned Iceberg release has no row-level filter
   (`row_selection_enabled` defaults to false, so only file/row-group pruning is available).
   Revisit it after 4.1–4.4, when the consumer scan becomes a measured first-order cost.
+
+## 9. Results (2026-10-29)
+
+Measured with `cdc_bench` on copies of the same two warehouses, one command per arm, rustc
+1.95.0, `dirty=False`. A is a 2,000-row-per-batch unkeyed filter shape (134k output rows in 17
+batches); B is 20,000 rows per batch (420k rows in 16 batches). Details are in
+[Measurements](./measurements.md).
+
+Cumulative, `9249541` (pre-4.3) → `d007577` (4.4):
+
+| Shape | refresh step | recover |
+| --- | ---: | ---: |
+| A (134k/17) | 8.84 s → **0.68 s** (−92 %) | 9.86 s → 3.70 s (−62 %) |
+| B (420k/16) | 19.31 s → **1.85 s** (−90 %) | 22.44 s → 8.76 s (−61 %) |
+
+Per increment (step, A/B): 4.3 `e98ad04` 6.11/13.76 s; 4.1 `0b9df71` 3.37/8.02 s; 4.2 `4f18b71`
+0.63/1.92 s. 4.4 `d007577` reduces recover to one read plus the fold; `last_checkpoint` drops from
+3.01/6.66 s to about 1 ms.
+
+`scripts/agent-check.sh` (`fast`, `iceberg`, `full`) passed on 1.95.0 at each of the four commits
+on a clean tree; the host's 1.96 line is a separate, independently reported run.
+
+Limits of these numbers:
+
+* Both shapes are unkeyed views. Keyed generations still build one key index per publish
+  (`O(n log n)` in the relation) because the producer keeps no key index, so their step is
+  smaller but not delta-sized; this was not measured here.
+* `recover` is still `O(history)` by design: the single full read is the digest comparison.
+* After 4.1 the remaining pre-commit time includes source observe and delta evaluation, not just
+  writer I/O (A ≈ 0.36 s, B ≈ 1.16 s of the 0.53/1.71 s). Attribute the step accordingly.
+* One intermittent `Ownership` failure in a kill-based maintenance test was observed once and did
+  not reproduce in seven subsequent full runs (five standalone suite runs plus two gates). The
+  trigger is unknown; this is recorded as an unexplained flake, not a resolved defect.
