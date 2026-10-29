@@ -54,6 +54,7 @@
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)
   - [Iteration and Execution Plan](./incremental/execution_plan.md)
   - [Run the Local CDC Loop](./incremental/cdc_loop.md)
+  - [Measured Costs (E10)](./incremental/measurements.md)
   - [Streams, Keyed Updates and Maintenance](./incremental/streams_and_maintenance.md)
   - [ΔScan — Table Scan](./incremental/scan.md)
   - [ΔProjection](./incremental/projection.md)
