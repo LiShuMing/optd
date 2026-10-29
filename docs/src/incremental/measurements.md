@@ -144,6 +144,44 @@ arithmetic. It does mean no performance claim should be made for the Δ path
 from this shape; a join or aggregate view is where Δ can win and has not been
 measured here.
 
+## Writer increment 4.3: before and after
+
+[Writer I/O Reduction](./writer_io_reduction.md) §4.3 replaces the full `apply_to`
+replay with delta-sized validation against the caller's predecessor relation. The
+two arms below run from fresh copies of the same frozen warehouse, with the same
+command and the same toolchain (rustc 1.95.0); both report `dirty=False`. The
+before arm is a worktree at `9249541`, the after arm is `e98ad04`.
+
+```
+scripts/e10.py --dir <copy> --reuse --steps 3 --batch 2000    # shape A
+scripts/e10.py --dir <copy> --reuse --steps 3 --batch 20000   # shape B
+```
+
+| shape | metric | before | after | change |
+|-------|--------|-------:|------:|-------:|
+| A, 134k rows / 17 batches | step | 8.84 s | 6.11 s | −31 % |
+| | pre-commit | 5.63 s | 3.04 s | −46 % |
+| | commit | 0.063 s | 0.11 s | — |
+| | recover | 9.86 s | 9.78 s | — |
+| B, 420k rows / 16 batches | step | 19.31 s | 13.76 s | −29 % |
+| | pre-commit | 12.43 s | 7.01 s | −44 % |
+| | commit | 0.10 s | 0.059 s | — |
+| | recover | 22.44 s | 22.09 s | — |
+
+Recovery is unchanged because the single-read change is a separate increment.
+
+At shape A the remaining step decomposes as 3.04 s pre-commit + 0.11 s commit +
+≈2.96 s post-commit read-back, and the pre-commit part is itself about one full
+scan (3.04 s). The full replay is gone from the step; what remains is exactly the
+pre-write scan (increment 4.1) and the post-commit read-back (4.2). Those two
+numbers are the baseline the next increments are argued against, not a promise:
+the projected step after 4.1 and 4.2 is roughly the delta-sized write plus the
+commit, and the A/B for each increment will report it rather than assume it.
+
+The measured shape is unkeyed, so it exercises the delta-sized path. Keyed
+generations still build a key index per call (`O(n log n)`); that path is not
+measured here and no claim is made for it.
+
 ## What this implies, and what it does not
 
 The measured ceiling on any throughput claim today: a refresh is
