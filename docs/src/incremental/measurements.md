@@ -248,15 +248,56 @@ observation and Δ evaluation (0.36 s / 1.16 s), which follow the *source*
 table. A refresh step is therefore no longer the right place to look for a
 history-dependent regression; recovery still is, until 4.4.
 
+## Writer increment 4.4: one read during recovery
+
+§4.4 merges the three startup scans into one: the constructor returns the
+validated batches, `recover` derives the checkpoint from the last one and folds
+the same vector for the digest comparison, and `last_checkpoint` decodes the
+commit index from the summary instead of walking every snapshot. The before arm
+is the 4.2 measurement (`4f18b71`), the after arm is `d007577`.
+
+| shape | metric | before (4.2) | after (4.4) | change |
+|-------|--------|-------:|------:|-------:|
+| A, 134k rows / 17 batches | recover | 9.65 s | 3.70 s | −62 % |
+| | sink open | 3.01 s | 3.01 s | — |
+| | last checkpoint | 3.01 s | 0.001 s | — |
+| | fold | 0.37 s | 0.38 s | — |
+| B, 420k rows / 16 batches | recover | 21.94 s | 8.76 s | −60 % |
+| | sink open | 6.70 s | 6.64 s | — |
+| | last checkpoint | 6.66 s | 0.001 s | — |
+| | fold | 1.09 s | 1.05 s | — |
+
+Recovery now decomposes as one read (3.01 s / 6.64 s) + fold (0.38 s / 1.05 s)
++ source observation and view load (≈ 0.3 s / 0.9 s), which sums to the measured
+recover. **Recovery is still `O(history)`** — it reads the log once for the
+digest comparison, by design — but 62 % of the old cost is gone.
+
+## Cumulative: pre-4.3 to 4.4
+
+Same two shapes, same fresh copies, pre arm is the worktree at `9249541` (before
+any of the four increments), after arm is `d007577`.
+
+| shape | metric | before | after | change |
+|-------|--------|-------:|------:|-------:|
+| A, 134k rows / 17 batches | refresh step | 8.84 s | 0.68 s | **−92 %** |
+| | recover | 9.86 s | 3.70 s | −62 % |
+| B, 420k rows / 16 batches | refresh step | 19.31 s | 1.85 s | **−90 %** |
+| | recover | 22.44 s | 8.76 s | −61 % |
+
+Both report `dirty=False` on rustc 1.95.0, and all three `agent-check.sh` modes
+pass at `d007577`.
+
 ## What this implies, and what it does not
 
-After increments 4.1–4.3 the writer no longer follows the output history: a
-2,000-row batch costs 0.63 s and a 20,000-row batch 1.92 s at 134k and 420k rows
-respectively, with the writer's share at 0.21 s and 0.72 s. What remains
-history-dependent is recovery: it still reads the log three times, which
-increment 4.4 addresses. A producer-side state checkpoint (the structural fix
-that makes restart independent of history) stays after that reduction, and only
-if the numbers still justify it.
+After increments 4.1–4.4 the writer no longer follows the output history: a
+2,000-row batch costs 0.68 s and a 20,000-row batch 1.85 s at 134k and 420k rows
+respectively, with the writer's share at about 0.2 s and 0.7 s. Recovery reads
+the log once instead of three times and costs 3.70 s / 8.76 s, but it is still
+`O(history)` because that read is the digest comparison. A producer-side state
+checkpoint — the structural change that would make restart independent of
+history — is therefore still the remaining option, and the numbers leave it a
+much smaller prize (3.7 s / 8.8 s rather than 9.9 s / 22.4 s). It stays
+undesigned until someone needs bounded recovery.
 
 The figures below this section describe the state before 4.1–4.3 and are kept
 as the baseline the increments are argued against.
