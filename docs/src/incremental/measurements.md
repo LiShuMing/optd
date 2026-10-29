@@ -3,38 +3,55 @@
 This page records what the implementation actually costs, so that the next
 performance change is argued from numbers rather than from the storage format.
 It is a measurement log, not a design: the protocol and the semantics are
-unchanged by anything here.
+unchanged by anything here. The design that follows from it is
+[Writer I/O Reduction](./writer_io_reduction.md).
 
 Two shapes are measured, both with the same trivial view (`id > 0` over a
 single `Long` column):
 
-| name | source base | refresh | output history |
-|------|------------:|---------|---------------:|
-| A | 100,000 rows | 11 × 2,000 rows | 122,000 rows in 12 batches |
-| B | 100,000 rows | 10 × 20,000 rows | 300,000 rows in 11 batches |
+| name | source base | refresh | output at the measurement point |
+|------|------------:|---------|--------------------------------:|
+| A | 100,000 rows | 11 × 2,000 rows | 124,000 rows in 13 batches |
+| B | 100,000 rows | 10 × 20,000 rows | 320,000 rows in 12 batches |
 
-B has ten times the rows of A's incremental part at almost the same batch
-count, which is what separates a per-row cost from a per-batch one.
+B has about ten times the rows of A's incremental part at almost the same batch
+count, which is what separates a per-row cost from a per-batch one. The batch
+counts include the bootstrap batch and the one that `phases` appends.
 
 ## How it was taken
 
-`optd-incremental/examples/cdc_bench.rs`, release build, rustc 1.96, on dev1
-(96 CPUs). Warehouses live outside the repository under `/home/admin/tmp/e10*`.
-Page cache is **warm** for every number below: dev1 does not give an
-unprivileged process `drop_caches`, so these are not powered-on cold-start
-figures, only fresh-process figures. Every command prints one JSON object; the
-driver is a shell loop.
+`optd-incremental/examples/cdc_bench.rs` is the measuring binary;
+`scripts/e10.py` sequences it and appends one JSON record per configuration:
 
 ```
-cargo build --release --example cdc_bench -p optd-incremental --features iceberg
-B=target/release/examples/cdc_bench
-$B DIR init --rows 100000
-$B DIR refresh --steps 11 --batch 2000
-$B DIR phases
-$B DIR parts
-$B DIR read-since --fraction 0.9
-$B DIR recover
-$B DIR observe-vs-recompute --batch 2000
+export PATH=$HOME/.rustup-new/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH
+python3 scripts/e10.py --dir /home/admin/tmp/e10A --label "A: 100k base, 11 x 2k" \
+  --record /home/admin/tmp/e10.jsonl
+python3 scripts/e10.py --dir /home/admin/tmp/e10B --base-rows 100000 --batch 20000 \
+  --steps 10 --label "B: 100k base, 10 x 20k" --record /home/admin/tmp/e10.jsonl
+```
+
+Release build, rustc 1.96.0, on dev1 (96 CPUs). Warehouses live outside the
+repository. Each record carries the commit, a `dirty` flag, the rustc version,
+host, configuration, every per-step refresh measurement, and the summary
+objects below.
+
+Page cache is **warm** for every number here: dev1 does not give an
+unprivileged process `drop_caches`, so these are fresh-process figures, not
+powered-on cold-start ones.
+
+The binary on its own:
+
+```
+cdc_bench <warehouse> init [--rows N]
+cdc_bench <warehouse> append [--rows N]
+cdc_bench <warehouse> info
+cdc_bench <warehouse> refresh [--steps K] [--batch N]
+cdc_bench <warehouse> phases [--batch N]
+cdc_bench <warehouse> recover
+cdc_bench <warehouse> parts
+cdc_bench <warehouse> read-since [--fraction F]
+cdc_bench <warehouse> observe-vs-recompute [--batch N]
 ```
 
 ## Refresh latency
@@ -44,113 +61,99 @@ One `CdcLoop::step`, split at the two durability boundaries
 
 | history | delta | pre-commit | commit | total |
 |--------:|------:|-----------:|-------:|------:|
-| 102k rows (2 batches) | 2,000 | 1.14 s | 0.046 s | 1.80 s |
-| 120k rows (11 batches) | 2,000 | 3.78 s | 0.068 s | 5.88 s |
-| 122k rows | 2,000 | 4.16 s | 0.069 s | 6.47 s |
-| 300k rows (11 batches) | 20,000 | 5.66–7.26 s | 0.10 s | 8.78–11.25 s |
+| 102k rows (2 batches) | 2,000 | 1.16 s | 0.067 s | 1.83 s |
+| 124k rows (12 batches) | 2,000 | 4.04 s | 0.10 s | 6.36 s |
 | 124k rows | **200** | 4.44–5.62 s | 0.08 s | 6.94–8.79 s |
+| 320k rows (12 batches) | 20,000 | 7.29 s | 0.07 s | 11.35 s |
 
 The two things to read off this table:
 
 * **Refresh cost follows history, not the delta.** A 200-row delta costs the
   same as a 2,000-row delta at the same history size, and ten times the delta
-  rows at 300k history costs about twice, not ten times.
+  rows at 320k history costs roughly twice, not ten times.
 * **Commit is not the cost** (tens of milliseconds). Almost everything before
   `FilesWritten` is the writer re-reading and re-validating the log it already
   wrote.
 
-The writer does three full-history passes per step (`iceberg_sink.rs`,
-`emit_many_with_observer`):
+The writer does three full-history passes per step
+(`iceberg_sink.rs:495-608`, `emit_many_with_observer`):
 
 1. `read_batches()` before writing — the "is this batch already committed?"
-   idempotency check. Scans and validates every batch.
+   idempotency check.
 2. `apply_to` replay of `existing.chain(remaining)` into a `Multiset` whose
-   value is **never read** afterwards — a validation pass only.
+   value is never read afterwards. The call is not dead code: it checks
+   `endpoint_records(before, after) == rows` (`cdc.rs:1037-1050`), i.e. that the
+   batch really is the difference between its predecessor and successor
+   relations.
 3. `read_batches()` after the commit — lost-ack read-back, run on the normal
    `Ok` path as well as the error path.
 
-Measured on the same warehouse, taking B's 300k rows: `scan_s` 3.71 s (pass 1),
-`apply_to_s` 3.09 s (pass 2), and the post-commit pass is the remainder of the
-11.25 s total. On A: 2.06 s, 1.74 s, and 2.1 s respectively.
+At B's 320k rows the same three passes measure 4.21 s (`scan_s`), 3.48 s
+(`apply_to_s`), and the remainder of the 11.35 s step. At A they are 2.29 s,
+2.03 s, and 2.3 s.
 
 ## The cost of one full pass
 
-Taking `read_batches()` at both shapes and fitting `cost = a·batches + b·rows`:
-
-* A (12 batches, 122k rows): 2.06 s
-* B (11 batches, 300k rows): 3.71 s
-
-gives **≈ 9.7 µs per output row + ≈ 73 ms per batch**. The per-batch term is
-metadata and envelope-chain work over the batch's snapshot; the per-row term is
-the row digest check and canonical-JSON payload handling.
+Fitting `cost = a·batches + b·rows` to `read_batches()` at both shapes
+(A: 2.29 s, 13 batches, 124k rows; B: 4.21 s, 12 batches, 320k rows) gives
+**≈ 10.2 µs per output row + ≈ 79 ms per batch**. The per-row term is the row
+digest check and canonical-JSON payload handling; the per-batch term is
+metadata and envelope-chain work.
 
 `read_since` still physically scans the whole table, but it does not rebuild or
 validate the batches the cursor has already consumed:
 
 | history | `read_batches` | `read_since` (90 %) | suffix |
 |--------:|---------------:|--------------------:|-------:|
-| 122k rows, 12 batches | 2.10 s | 0.38 s | 2 batches / 4k rows |
-| 300k rows, 11 batches | 3.77 s | 1.01 s | 2 batches / 40k rows |
+| 124k rows, 13 batches | 2.29 s | 0.38 s | 2 batches / 4k rows |
+| 320k rows, 12 batches | 4.21 s | 1.07 s | 2 batches / 40k rows |
 
 Fitting those two points gives **≈ 3.5 µs per row** and no measurable per-batch
-term. So the physical scan is cheap and inexpensive to prune; the expensive part
-is validation, which `read_since` already skips for consumed batches. A
-`with_filter` on `__meta_batch_seq` would attack the 3.5 µs/row term, not the
-9.7 µs/row one.
+term. The physical scan is therefore cheap; the expensive part is validation,
+which `read_since` already skips for consumed batches. A `with_filter` on
+`__meta_batch_seq` would attack the 3.5 µs/row term, not the 10.2 µs/row one.
 
 ## Cold start (`CdcLoop::recover`, non-bootstrap)
 
 | history | recover | sink open | last_checkpoint | read_batches | fold | model: one read |
 |--------:|--------:|----------:|----------------:|-------------:|-----:|----------------:|
-| 122k rows | 6.96 s | 2.09 s | 2.06 s | 2.06 s | 0.27 s | 2.33 s |
-| 300k rows | 12.56 s | 3.75 s | 3.70 s | 3.71 s | 0.59 s | 4.31 s |
+| 124k rows | 7.42 s | 2.34 s | 2.39 s | 2.29 s | 0.33 s | 2.62 s |
+| 320k rows | 14.10 s | 4.26 s | 4.21 s | 4.21 s | 0.70 s | 4.92 s |
 
 `IcebergCdcSink::open` ends with `read_batches()`, `last_checkpoint()` runs a
 second one, and the non-bootstrap branch runs a third to fold and compare
-against the view. The three passes are identical work; `single_read_model_s` is
-the first scan plus folding, i.e. what a recovery that read the log once would
-pay — **about one third of today's cost**, matching the two-thirds saving
-expected before measuring.
+against the view. The three passes are identical work; `model: one read` is the
+first scan plus folding, i.e. what a recovery that read the log once would pay
+— **37–39 % of today's cost**.
 
 The remaining terms are not part of the three scans: source observation
-0.15 s / 0.38 s and `View::load_at` 0.10 s / 0.24 s for A / B.
+0.16 s / 0.41 s and `View::load_at` 0.09 s / 0.26 s for A / B.
 
 ## Observe, Δ evaluate, recompute
 
-At 124k rows, one 2,000-row source append:
-
-| step | time |
-|------|-----:|
-| `IcebergSource::observe` (materialises both endpoint snapshots) | 0.147 s |
-| `View::prepare_refresh` (Δ plan over the snapshot diff) | 0.188 s |
-| `View::recompute` (full evaluation of the view plan) | 0.093 s |
+| shape | `IcebergSource::observe` | `View::prepare_refresh` | `View::recompute` |
+|-------|-------------------------:|------------------------:|------------------:|
+| A, 126k rows, +2,000 | 0.146 s | 0.191 s | 0.095 s |
+| B, 340k rows, +20,000 | 0.359 s | 0.518 s | 0.278 s |
 
 For this shape the incremental delta is **slower** than recomputing the view.
 That is not an argument against the engine: the view is a filter over one
-column, the delta path pays row-identity hashing and multiset algebra that a
-filter does not need, and the value being sold is the durable change log, not
-the arithmetic. It does mean no performance claim should be made for the Δ
-path from this shape; a join or aggregate view is the case where Δ wins and
-has not been measured here.
+column, the delta path pays row-identity hashing and multiset algebra a filter
+does not need, and the value being sold is the durable change log, not the
+arithmetic. It does mean no performance claim should be made for the Δ path
+from this shape; a join or aggregate view is where Δ can win and has not been
+measured here.
 
 ## What this implies, and what it does not
 
 The measured ceiling on any throughput claim today: a refresh is
 `O(total history)` because it re-validates the history three times, and a
 restart is `O(total history)` because it reads it three times. Both fixes are
-local and protocol-preserving:
-
-* **Refresh:** the pre-write check needs the last envelope, not the whole log
-  (`optd.commit` is already in the snapshot summary); the unused `apply_to`
-  replay can be dropped; the post-commit read-back is only needed when the
-  commit outcome is unknown.
-* **Restart:** read the log once, take `last()` as the checkpoint, fold the same
-  vector.
-
-Neither is implemented as part of this measurement. A producer-side state
-checkpoint (the structural fix that makes restart independent of history) stays
-where the design puts it: after these local fixes, and only if the numbers still
-justify it.
+local and protocol-preserving; they are specified in
+[Writer I/O Reduction](./writer_io_reduction.md) and are not implemented here.
+A producer-side state checkpoint (the structural fix that makes restart
+independent of history) stays after those reductions, and only if the numbers
+still justify it.
 
 None of these figures is a regression gate yet. They are one run per shape on a
-busy shared machine; repeated runs are needed before any threshold.
+shared machine; repeated runs are needed before any threshold is set.
