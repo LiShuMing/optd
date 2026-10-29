@@ -642,9 +642,13 @@ impl IcebergCdcSink {
             }
         }
         let table = self.load().await?;
-        // The summary is advisory: an undecodable or foreign summary falls back to the full
-        // read below, which fails closed on the same corruption.
-        let summary = self.commit_index(&table).ok().flatten();
+        // The summary is advisory, but it cannot vouch for a durable sequence it cannot decode.
+        // "No snapshot yet" means the log is empty and a new request may simply continue; a
+        // snapshot with an unreadable index must take the full read below, which resolves a
+        // retry against the log instead of appending it a second time.
+        let index = self.commit_index(&table);
+        let summary_unreadable = index.is_err() && table.metadata().current_snapshot_id().is_some();
+        let summary = index.ok().flatten();
         let summary_last = summary.as_ref().and_then(|s| s.entries.last());
         let last_requested = batches.last().ok_or(CdcError::InvalidEnvelope)?.envelope();
         if let Some(last_committed) = summary_last {
@@ -684,9 +688,10 @@ impl IcebergCdcSink {
                 // The summary does not carry every requested envelope (e.g. after compaction).
             }
         }
-        // A request whose first sequence is after the durable one continues the log.
-        let continues =
-            summary_last.is_none_or(|last| batches[0].envelope().batch_seq > last.batch_seq);
+        // A request whose first sequence is after the durable one continues the log. Without a
+        // readable index neither condition can be established, so the full read decides.
+        let continues = !summary_unreadable
+            && summary_last.is_none_or(|last| batches[0].envelope().batch_seq > last.batch_seq);
         let remaining: &[PreparedBatch] = if continues && trusted_before.is_some() {
             let trusted = trusted_before.ok_or(CdcError::InvalidEnvelope)?;
             batches[0].envelope().follows(summary_last)?;

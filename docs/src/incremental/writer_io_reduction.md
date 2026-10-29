@@ -119,6 +119,12 @@ compaction takes just the single `optd.commit` envelope rather than decoding the
 undecodable or foreign summary is treated as "no index" and falls back to the full read, which
 fails closed on the same corruption.
 
+The fallback distinguishes "no snapshot yet" from "snapshot present, index unreadable". Only the
+first may continue the log on the trusted path; the second must read, because the summary is also
+the only source of committed envelopes. That read fails closed on the same damage, and a retry can
+never be appended a second time — without the distinction a bootstrap retry with an unreadable
+summary would pass `follows(None)` and duplicate the batch.
+
 ### 4.2 Post-commit read-back only for an unknown outcome
 
 The fast return requires **both** a definitive `commit` success **and** a successful
@@ -204,6 +210,7 @@ digest comparison; the summary lookup does not replace that read.
 | Trusted relation does not match the batch semantics | `TrustedRelation` fails before writing with `InvalidRow`; durable state and checkpoint unchanged |
 | Log corrupted between startup and the next step | Not detected on the fast path by design; `audit` mode re-reads and startup validation re-validates (no injection test yet, see §6) |
 | Summary has no `optd.commit` (older table or foreign snapshot) | Full read; no append unless the full read validates |
+| Current snapshot's index cannot be decoded | Full read; the read fails closed on the same damage; no append and the durable pointer is unchanged |
 | Compaction happens between startup and the next step | The next step sees the archive snapshot's `optd.commit`; a one-batch request can use it, a multi-batch retry falls back |
 | Observer fails after a durable commit | Read-back resolves the outcome, as today; the fast path is not taken |
 
@@ -220,14 +227,16 @@ digest comparison; the summary lookup does not replace that read.
   separately.
 * No wire-format, identity or schema change; golden vectors remain byte-identical.
 
-Coverage note: the injected envelope-mismatch test for `audit` mode and the injected summary
-decode-failure assertion are **not implemented**, and are recorded as gaps rather than as
-satisfied. The fallback path itself is exercised by the straddling-request case, but "a corrupt
-summary fails closed on the subsequent full read" is **expected behavior, not a test result** — no
-injection verifies it. Both gaps are cheap to close when wanted: a forged summary passed to
-`commit_index` (or a `Table` whose summary disagrees with an actual commit) can assert the
-fallback without fabricating a whole table, and an `audit`-on run can assert one extra full read
-plus detection of an injected mismatch.
+Coverage note: the summary-decode-failure fallback is now tested by
+`bootstrap_retry_with_unreadable_summary_does_not_double_append` and
+`delta_retry_with_unreadable_summary_fails_closed_without_appending`, which poison the current
+snapshot's index on disk. Both fail before the fallback distinction was added (the bootstrap retry
+appended a duplicate; the delta retry reported `Conflict` without reading).
+
+Still open: the injected envelope-mismatch test for `audit` mode. `audit` currently re-reads after
+a commit, but the summary-idempotent path returns before reading, so "audit detects a log that
+disagrees with the summary" is new semantics rather than existing behavior. It should be designed
+before it is asserted; recorded as a gap, not as satisfied.
 
 ## 7. Rollout
 
@@ -263,6 +272,11 @@ Per increment (step, A/B): 4.3 `e98ad04` 6.11/13.76 s; 4.1 `0b9df71` 3.37/8.02 s
 
 `scripts/agent-check.sh` (`fast`, `iceberg`, `full`) passed on 1.95.0 at each of the four commits
 on a clean tree; the host's 1.96 line is a separate, independently reported run.
+
+The unreadable-summary fallback landed after the four increments as a safety fix. It costs
+nothing on the normal path — `Ok(None)` from a table with no snapshot still continues on the
+trusted path, and the existing path assertions (zero full reads on a continuing commit, one on a
+fallback) are unchanged.
 
 Limits of these numbers:
 

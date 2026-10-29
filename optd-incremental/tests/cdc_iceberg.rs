@@ -120,6 +120,56 @@ fn expected(values: &[i64]) -> Multiset {
             .map(|n| vec![Value::Int(*n)]),
     )
 }
+/// Replace the current snapshot's commit index with a structurally valid but empty one, so the
+/// index cannot be decoded while the metadata file still parses. Returns the metadata path and
+/// the original bytes so a test can restore the log and keep reading it.
+fn poison_current_summary(root: &Path, table: &str) -> (std::path::PathBuf, Vec<u8>) {
+    let current = root.join("test").join(table).join("current");
+    let pointer = std::fs::read_to_string(&current).unwrap();
+    let path = pointer
+        .strip_prefix("file://")
+        .unwrap_or(pointer.as_str())
+        .to_string();
+    let original = std::fs::read(&path).unwrap();
+    let mut metadata: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    // Snapshots are not stored in commit order, so pick the one the pointer names.
+    let current_id = metadata["current-snapshot-id"]
+        .as_i64()
+        .expect("current snapshot id");
+    let snapshot = metadata["snapshots"]
+        .as_array_mut()
+        .and_then(|snapshots| {
+            snapshots
+                .iter_mut()
+                .find(|s| s["snapshot-id"].as_i64() == Some(current_id))
+        })
+        .expect("current snapshot");
+    fn poison(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("optd.commits") {
+                    map.insert(
+                        "optd.commits".into(),
+                        serde_json::Value::String(r#"{"envelopes":[],"checksum":"x"}"#.into()),
+                    );
+                    return true;
+                }
+                map.values_mut().any(poison)
+            }
+            serde_json::Value::Array(items) => items.iter_mut().any(poison),
+            _ => false,
+        }
+    }
+    assert!(poison(snapshot), "current snapshot has no commit index");
+    std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    (path.into(), original)
+}
+fn snapshot_files(root: &Path, table: &str) -> (String, usize) {
+    let dir = root.join("test").join(table);
+    let pointer = std::fs::read_to_string(dir.join("current")).unwrap();
+    let metadata = std::fs::read_dir(dir.join("metadata")).unwrap().count();
+    (pointer, metadata)
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_parquet_bootstrap_duplicates_empty_commits_and_changed_source() {
@@ -562,6 +612,110 @@ async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back()
     .unwrap();
     assert_eq!(sink.full_reads(), reads);
     assert_eq!(sink.read_batches().await.unwrap().len(), 7);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrap_retry_with_unreadable_summary_does_not_double_append() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let catalog = fixture(root).await;
+    append(&catalog, &[1]).await;
+    let gen = generation(&catalog).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let first =
+        PreparedBatch::new(&gen, None, vec![point], &expected(&[1]), 1, "w".into()).unwrap();
+    let mut sink = IcebergCdcSink::open(catalog.clone(), ident("changes"), gen.clone())
+        .await
+        .unwrap();
+    sink.emit(&first).await.unwrap();
+    assert_eq!(sink.read_batches().await.unwrap().len(), 1);
+
+    let (path, original) = poison_current_summary(root, "changes");
+    let before = snapshot_files(root, "changes");
+    // The summary can no longer vouch for what is durable. A retry must not treat the batch as
+    // new: before the fallback fix it took the trusted path, `follows(None)` accepted the
+    // bootstrap sequence, and the batch was appended a second time.
+    let reads = sink.full_reads();
+    let error = sink
+        .emit_many_against(&Multiset::new(), std::slice::from_ref(&first), &|_| Ok(()))
+        .await;
+    assert!(
+        matches!(error, Err(CdcError::InvalidEnvelope)),
+        "unexpected outcome: {error:?}"
+    );
+    assert_eq!(sink.full_reads(), reads + 1);
+    assert_eq!(snapshot_files(root, "changes"), before);
+
+    // Restoring the summary shows the log still holds one batch, not two.
+    std::fs::write(&path, original).unwrap();
+    let batches = sink.read_batches().await.unwrap();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(folded(&batches), expected(&[1]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delta_retry_with_unreadable_summary_fails_closed_without_appending() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let catalog = fixture(root).await;
+    append(&catalog, &[1]).await;
+    let gen = generation(&catalog).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let first =
+        PreparedBatch::new(&gen, None, vec![point], &expected(&[1]), 1, "w".into()).unwrap();
+    let mut sink = IcebergCdcSink::open(catalog.clone(), ident("changes"), gen.clone())
+        .await
+        .unwrap();
+    sink.emit(&first).await.unwrap();
+    append(&catalog, &[2]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let second = PreparedBatch::new(
+        &gen,
+        Some(first.envelope()),
+        vec![point],
+        &expected(&[2]),
+        2,
+        "w".into(),
+    )
+    .unwrap();
+    sink.emit(&second).await.unwrap();
+    assert_eq!(sink.read_batches().await.unwrap().len(), 2);
+
+    let (path, original) = poison_current_summary(root, "changes");
+    let before = snapshot_files(root, "changes");
+    // Without a readable index the step cannot decide that the request continues the log, so it
+    // must read. Before the fallback fix it short-circuited at `follows(None)` with `Conflict`
+    // without inspecting the damage; the read is what reports the corruption.
+    let reads = sink.full_reads();
+    let error = sink
+        .emit_many_against(&expected(&[1]), std::slice::from_ref(&second), &|_| Ok(()))
+        .await;
+    assert!(
+        matches!(error, Err(CdcError::InvalidEnvelope)),
+        "unexpected outcome: {error:?}"
+    );
+    assert_eq!(sink.full_reads(), reads + 1);
+    assert_eq!(snapshot_files(root, "changes"), before);
+
+    std::fs::write(&path, original).unwrap();
+    let batches = sink.read_batches().await.unwrap();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(folded(&batches), expected(&[1, 2]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
