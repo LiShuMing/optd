@@ -4,6 +4,7 @@
 //! Single-host Iceberg CDC output with durable envelopes and read-back validation.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -194,6 +195,24 @@ pub enum CommitStage {
     CatalogCommitted,
 }
 
+/// Validation path taken by the last publish. Instrumentation only, not protocol state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishPath {
+    /// The summary already held every requested envelope; nothing was read or written.
+    SummaryIdempotent,
+    /// The request continued the log and was validated against the trusted relation only.
+    TrustedDelta,
+    /// The committed log was scanned; the caller supplied no trusted relation.
+    FullReplay,
+    /// The committed log was scanned because the summary could not answer the request.
+    SummaryFallback,
+}
+
+/// Envelopes carried by the current snapshot's summary, oldest first.
+struct CommitIndex {
+    entries: Vec<CommitEnvelope>,
+}
+
 /// Iceberg sink restricted to the qualified local catalog and one OS-held writer.
 pub struct IcebergCdcSink {
     catalog: Arc<LocalCatalog>,
@@ -202,6 +221,8 @@ pub struct IcebergCdcSink {
     table_uuid: String,
     _owner: Option<WriterLock>,
     pending: Option<Vec<(String, String)>>,
+    path: PublishPath,
+    full_reads: AtomicUsize,
 }
 impl IcebergCdcSink {
     /// Open or initialize a generation, then acquire lifetime exclusive writer ownership.
@@ -241,6 +262,8 @@ impl IcebergCdcSink {
             table_uuid,
             _owner: Some(owner),
             pending: None,
+            path: PublishPath::FullReplay,
+            full_reads: AtomicUsize::new(0),
         };
         sink.validate_table(&sink.load().await?)?;
         sink.read_batches().await?;
@@ -253,6 +276,14 @@ impl IcebergCdcSink {
     /// Stable Iceberg output table identity.
     pub fn table_uuid(&self) -> &str {
         &self.table_uuid
+    }
+    /// Validation path taken by the last publish. Instrumentation, not protocol state.
+    pub fn last_publish_path(&self) -> PublishPath {
+        self.path
+    }
+    /// Full log scans performed by this sink, including the post-commit read-back.
+    pub fn full_reads(&self) -> usize {
+        self.full_reads.load(Ordering::Relaxed)
     }
     async fn load(&self) -> Result<Table, CdcError> {
         let table = self
@@ -329,6 +360,47 @@ impl IcebergCdcSink {
         }
         Ok(envelopes)
     }
+    /// Decode the current snapshot's commit summary without scanning data.
+    ///
+    /// `None` means the table has no snapshot. A compaction archive contributes only its single
+    /// `optd.commit` envelope: the archive grows with history and is decoded only when a full
+    /// read already needs it.
+    fn commit_index(&self, table: &Table) -> Result<Option<CommitIndex>, CdcError> {
+        let Some(snapshot_id) = table.metadata().current_snapshot_id() else {
+            return Ok(None);
+        };
+        let snapshot = table
+            .metadata()
+            .snapshot_by_id(snapshot_id)
+            .ok_or(CdcError::InvalidCheckpoint)?;
+        let props = &snapshot.summary().additional_properties;
+        if props.get("optd.protocol").map(String::as_str) != Some(PROTOCOL) {
+            return Err(CdcError::InvalidEnvelope);
+        }
+        let last =
+            CommitEnvelope::from_json(props.get("optd.commit").ok_or(CdcError::InvalidEnvelope)?)?;
+        if props.contains_key("optd.envelopes") {
+            if snapshot.summary().operation != Operation::Replace {
+                return Err(CdcError::InvalidEnvelope);
+            }
+            return Ok(Some(CommitIndex {
+                entries: vec![last],
+            }));
+        }
+        if snapshot.summary().operation != Operation::Append {
+            return Err(CdcError::Conflict);
+        }
+        let entries = if let Some(index) = props.get("optd.commits") {
+            let entries = decode_index("optd-commit-index/1", index)?;
+            if entries.last() != Some(&last) {
+                return Err(CdcError::InvalidEnvelope);
+            }
+            entries
+        } else {
+            vec![last]
+        };
+        Ok(Some(CommitIndex { entries }))
+    }
     /// Independently scan actual Parquet data and validate every committed batch/envelope.
     /// Full audit, including endpoint invariants. Consumer reads can use a trusted checkpoint.
     pub async fn read_batches(&self) -> Result<Vec<PreparedBatch>, CdcError> {
@@ -338,6 +410,7 @@ impl IcebergCdcSink {
         self.read_batches_unlocked().await
     }
     async fn read_batches_unlocked(&self) -> Result<Vec<PreparedBatch>, CdcError> {
+        self.full_reads.fetch_add(1, Ordering::Relaxed);
         self.read_since_unlocked(&crate::consumer::Cursor::default(), &Multiset::new())
             .await
     }
@@ -549,54 +622,116 @@ impl IcebergCdcSink {
                 batch.envelope().follows(Some(batches[i - 1].envelope()))?;
             }
         }
-        let existing = self.read_batches().await?;
-        let mut skip = 0;
-        for batch in batches {
-            if let Some(found) = existing
-                .iter()
-                .find(|b| b.envelope().batch_seq == batch.envelope().batch_seq)
-            {
-                if !same_logical_batch(found, batch) {
-                    return Err(CdcError::DigestMismatch);
-                }
-                skip += 1;
-            } else {
-                break;
-            }
-        }
-        if skip == batches.len() {
-            self.pending = None;
-            return batches
-                .iter()
-                .map(|batch| {
-                    existing
-                        .iter()
-                        .find(|b| same_logical_batch(b, batch))
-                        .map(|b| b.envelope().clone())
-                        .ok_or(CdcError::UnknownCommit)
-                })
-                .collect();
-        }
-        let remaining = &batches[skip..];
-        remaining[0]
-            .envelope()
-            .follows(existing.last().map(|b| b.envelope()))?;
-        match (skip, trusted_before) {
-            (0, Some(trusted)) => {
-                let mut validation = TrustedRelation::new(&self.generation, trusted)?;
-                for batch in remaining {
-                    validation.apply(batch)?;
-                }
-            }
-            _ => {
-                let mut relation = Multiset::new();
-                for batch in existing.iter().chain(remaining.iter()) {
-                    relation = batch.apply_to(&self.generation, &relation)?;
-                }
-            }
-        }
-        self.pending = Some(identity);
         let table = self.load().await?;
+        // The summary is advisory: an undecodable or foreign summary falls back to the full
+        // read below, which fails closed on the same corruption.
+        let summary = self.commit_index(&table).ok().flatten();
+        let summary_last = summary.as_ref().and_then(|s| s.entries.last());
+        let last_requested = batches.last().ok_or(CdcError::InvalidEnvelope)?.envelope();
+        if let Some(last_committed) = summary_last {
+            if last_requested.batch_seq == last_committed.batch_seq {
+                let summary = summary.as_ref().ok_or(CdcError::InvalidEnvelope)?;
+                if summary.entries.len() >= batches.len() {
+                    let tail = &summary.entries[summary.entries.len() - batches.len()..];
+                    let matched = tail.iter().zip(batches).all(|(stored, wanted)| {
+                        let wanted = wanted.envelope();
+                        stored.batch_seq == wanted.batch_seq
+                            && stored.batch_id == wanted.batch_id
+                            && stored.delta_hash == wanted.delta_hash
+                    });
+                    if !matched {
+                        // The durable sequence belongs to another batch; never append over it.
+                        return Err(CdcError::DigestMismatch);
+                    }
+                    let predecessor = summary
+                        .entries
+                        .len()
+                        .checked_sub(batches.len() + 1)
+                        .and_then(|i| summary.entries.get(i));
+                    for (i, envelope) in tail.iter().enumerate() {
+                        envelope.validate_generation(&self.generation)?;
+                        if i > 0 {
+                            envelope.follows(Some(&tail[i - 1]))?;
+                        } else if predecessor.is_some() || envelope.batch_seq == 1 {
+                            // A group's first entry may point at a batch in an older snapshot,
+                            // which this summary does not carry; only bootstrap must be checked.
+                            envelope.follows(predecessor)?;
+                        }
+                    }
+                    self.path = PublishPath::SummaryIdempotent;
+                    self.pending = None;
+                    return Ok(tail.to_vec());
+                }
+                // The summary does not carry every requested envelope (e.g. after compaction).
+            }
+        }
+        // A request whose first sequence is after the durable one continues the log.
+        let continues =
+            summary_last.is_none_or(|last| batches[0].envelope().batch_seq > last.batch_seq);
+        let remaining: &[PreparedBatch] = if continues && trusted_before.is_some() {
+            let trusted = trusted_before.ok_or(CdcError::InvalidEnvelope)?;
+            batches[0].envelope().follows(summary_last)?;
+            let mut validation = TrustedRelation::new(&self.generation, trusted)?;
+            for batch in batches {
+                validation.apply(batch)?;
+            }
+            self.path = PublishPath::TrustedDelta;
+            batches
+        } else {
+            let existing = self.read_batches().await?;
+            self.path = if trusted_before.is_some() {
+                PublishPath::SummaryFallback
+            } else {
+                PublishPath::FullReplay
+            };
+            let mut skip = 0;
+            for batch in batches {
+                if let Some(found) = existing
+                    .iter()
+                    .find(|b| b.envelope().batch_seq == batch.envelope().batch_seq)
+                {
+                    if !same_logical_batch(found, batch) {
+                        return Err(CdcError::DigestMismatch);
+                    }
+                    skip += 1;
+                } else {
+                    break;
+                }
+            }
+            if skip == batches.len() {
+                self.pending = None;
+                return batches
+                    .iter()
+                    .map(|batch| {
+                        existing
+                            .iter()
+                            .find(|b| same_logical_batch(b, batch))
+                            .map(|b| b.envelope().clone())
+                            .ok_or(CdcError::UnknownCommit)
+                    })
+                    .collect();
+            }
+            let remaining = &batches[skip..];
+            remaining[0]
+                .envelope()
+                .follows(existing.last().map(|b| b.envelope()))?;
+            match (skip, trusted_before) {
+                (0, Some(trusted)) => {
+                    let mut validation = TrustedRelation::new(&self.generation, trusted)?;
+                    for batch in remaining {
+                        validation.apply(batch)?;
+                    }
+                }
+                _ => {
+                    let mut relation = Multiset::new();
+                    for batch in existing.iter().chain(remaining.iter()) {
+                        relation = batch.apply_to(&self.generation, &relation)?;
+                    }
+                }
+            }
+            remaining
+        };
+        self.pending = Some(identity);
         let mut files = Vec::new();
         for batch in remaining {
             files.extend(write_batch_files(&table, record_batch(&self.generation, batch)?).await?);
@@ -664,6 +799,8 @@ impl CdcLogReader {
             table_uuid: table.metadata().uuid().to_string(),
             _owner: None,
             pending: None,
+            path: PublishPath::FullReplay,
+            full_reads: AtomicUsize::new(0),
         };
         inner.validate_table(&table)?;
         inner.envelopes(&table)?;

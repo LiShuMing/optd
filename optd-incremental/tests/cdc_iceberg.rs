@@ -11,7 +11,9 @@ use iceberg::spec::{FormatVersion, NestedField, PrimitiveType, Schema, Type};
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 use optd_incremental::cdc::*;
-use optd_incremental::iceberg_sink::{write_batch_files, CdcLoop, CommitStage, IcebergCdcSink};
+use optd_incremental::iceberg_sink::{
+    write_batch_files, CdcLoop, CommitStage, IcebergCdcSink, PublishPath,
+};
 use optd_incremental::local_catalog::LocalCatalog;
 use optd_incremental::{filter, scan, Expr, Multiset, Value};
 
@@ -357,6 +359,152 @@ async fn trusted_predecessor_rejects_a_stale_relation_and_partial_overlap_falls_
     let batches = sink.read_batches().await.unwrap();
     assert_eq!(batches.len(), 5);
     assert_eq!(folded(&batches), expected(&[1, 4, 5]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn summary_answers_retries_without_a_scan_and_partial_overlap_falls_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let catalog = fixture(temp.path()).await;
+    append(&catalog, &[1]).await;
+    let gen = generation(&catalog).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let first =
+        PreparedBatch::new(&gen, None, vec![point], &expected(&[1]), 1, "w".into()).unwrap();
+    let mut sink = IcebergCdcSink::open(catalog.clone(), ident("changes"), gen.clone())
+        .await
+        .unwrap();
+    sink.emit(&first).await.unwrap();
+
+    append(&catalog, &[2]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let second = PreparedBatch::new(
+        &gen,
+        Some(first.envelope()),
+        vec![point],
+        &expected(&[2]),
+        2,
+        "w".into(),
+    )
+    .unwrap();
+
+    // The request continues the durable log, so validation uses the trusted relation and the
+    // only remaining scan is the post-commit read-back.
+    let reads = sink.full_reads();
+    let committed = sink
+        .emit_many_against(&expected(&[1]), std::slice::from_ref(&second), &|_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(sink.last_publish_path(), PublishPath::TrustedDelta);
+    assert_eq!(sink.full_reads(), reads + 1);
+    assert_eq!(committed[0].batch_id, second.envelope().batch_id);
+
+    // The same request again is answered by the snapshot summary: no scan and no append.
+    let reads = sink.full_reads();
+    let retried = sink
+        .emit_many_against(&expected(&[1]), std::slice::from_ref(&second), &|_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(sink.last_publish_path(), PublishPath::SummaryIdempotent);
+    assert_eq!(sink.full_reads(), reads);
+    assert_eq!(retried, committed);
+    assert_eq!(sink.read_batches().await.unwrap().len(), 2);
+
+    // A multi-batch group is stored under `optd.commits` and answers a group retry.
+    append(&catalog, &[3]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let third = PreparedBatch::new(
+        &gen,
+        Some(second.envelope()),
+        vec![point],
+        &expected(&[3]),
+        3,
+        "w".into(),
+    )
+    .unwrap();
+    append(&catalog, &[4]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let fourth = PreparedBatch::new(
+        &gen,
+        Some(third.envelope()),
+        vec![point],
+        &expected(&[4]),
+        4,
+        "w".into(),
+    )
+    .unwrap();
+    sink.emit_many_against(
+        &expected(&[1, 2]),
+        &[third.clone(), fourth.clone()],
+        &|_| Ok(()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sink.last_publish_path(), PublishPath::TrustedDelta);
+    let reads = sink.full_reads();
+    let retried = sink
+        .emit_many_against(
+            &expected(&[1, 2]),
+            &[third.clone(), fourth.clone()],
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sink.last_publish_path(), PublishPath::SummaryIdempotent);
+    assert_eq!(sink.full_reads(), reads);
+    assert_eq!(retried.len(), 2);
+
+    // Retrying a request that straddles commit groups cannot be answered by one summary, so
+    // it falls back to exactly one full read.
+    append(&catalog, &[5]).await;
+    let source = catalog.load_table(&ident("source")).await.unwrap();
+    let point = optd_incremental::iceberg_source::checkpoint(
+        &source,
+        source.metadata().current_snapshot_id(),
+    )
+    .unwrap();
+    let fifth = PreparedBatch::new(
+        &gen,
+        Some(fourth.envelope()),
+        vec![point],
+        &expected(&[5]),
+        5,
+        "w".into(),
+    )
+    .unwrap();
+    sink.emit(&fifth).await.unwrap();
+    let reads = sink.full_reads();
+    let retried = sink
+        .emit_many_against(
+            &expected(&[1, 2, 3, 4]),
+            &[fourth.clone(), fifth.clone()],
+            &|_| Ok(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sink.last_publish_path(), PublishPath::SummaryFallback);
+    assert_eq!(sink.full_reads(), reads + 1);
+    assert_eq!(retried.len(), 2);
+    assert_eq!(sink.read_batches().await.unwrap().len(), 5);
 }
 
 // The parent launches this exact test in a new process. Normal test runs have no worker env.

@@ -108,9 +108,16 @@ once at startup. `optd.envelopes` is deliberately not decoded on the normal path
 grows with history; after compaction, a multi-batch retry therefore falls back unless the
 compaction snapshot's single `optd.commit` already answers a one-batch request.
 
-Emit reports which validation path ran (a `CommitStage` variant, or an equivalent test counter) so
-tests and measurements can prove the fast path is actually taken rather than silently falling
-back on every step.
+`IcebergCdcSink::last_publish_path()` reports which path the last publish took
+(`SummaryIdempotent`, `TrustedDelta`, `FullReplay`, `SummaryFallback`), and `full_reads()` counts
+data scans, so tests and measurements can prove the fast path is actually taken rather than
+silently falling back on every step.
+
+The decoder is `IcebergCdcSink::commit_index(&Table)`: it reads the current snapshot only, uses
+`optd.commits` when present (checking that its last entry equals `optd.commit`), and after a
+compaction takes just the single `optd.commit` envelope rather than decoding the archive. An
+undecodable or foreign summary is treated as "no index" and falls back to the full read, which
+fails closed on the same corruption.
 
 ### 4.2 Post-commit read-back only for an unknown outcome
 
