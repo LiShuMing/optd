@@ -202,7 +202,7 @@ digest comparison; the summary lookup does not replace that read.
 | Commit outcome unknown | Unchanged: read-back resolves success or reports `UnknownCommit` |
 | Predecessor relation passed by the caller is stale | `apply_to` endpoint comparison fails before writing |
 | Trusted relation does not match the batch semantics | `TrustedRelation` fails before writing with `InvalidRow`; durable state and checkpoint unchanged |
-| Log corrupted between startup and the next step | Not detected on the fast path by design; `audit` mode and startup validation cover tests and operational checks |
+| Log corrupted between startup and the next step | Not detected on the fast path by design; `audit` mode re-reads and startup validation re-validates (no injection test yet, see §6) |
 | Summary has no `optd.commit` (older table or foreign snapshot) | Full read; no append unless the full read validates |
 | Compaction happens between startup and the next step | The next step sees the archive snapshot's `optd.commit`; a one-batch request can use it, a multi-batch retry falls back |
 | Observer fails after a durable commit | Read-back resolves the outcome, as today; the fast path is not taken |
@@ -221,10 +221,13 @@ digest comparison; the summary lookup does not replace that read.
 * No wire-format, identity or schema change; golden vectors remain byte-identical.
 
 Coverage note: the injected envelope-mismatch test for `audit` mode and the injected summary
-decode-failure path assertion are **not implemented**. The fallback path is exercised by the
-straddling-request case, and a corrupt summary fails closed on the subsequent full read, so the
-two injections would add path bookkeeping rather than new coverage. This is recorded as a gap,
-not claimed as satisfied.
+decode-failure assertion are **not implemented**, and are recorded as gaps rather than as
+satisfied. The fallback path itself is exercised by the straddling-request case, but "a corrupt
+summary fails closed on the subsequent full read" is **expected behavior, not a test result** — no
+injection verifies it. Both gaps are cheap to close when wanted: a forged summary passed to
+`commit_index` (or a `Table` whose summary disagrees with an actual commit) can assert the
+fallback without fabricating a whole table, and an `audit`-on run can assert one extra full read
+plus detection of an injected mismatch.
 
 ## 7. Rollout
 
