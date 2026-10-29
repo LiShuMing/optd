@@ -66,8 +66,15 @@ figures.
 
 ## 4. Decision
 
-Four independent increments. Each lands as its own commit and is measured with the existing
-`cdc_bench` harness against the same warehouse configuration. Commit messages link this page.
+Four increments, each its own commit and each measured with the existing `cdc_bench` harness
+against the same warehouse configuration. Commit messages link this page.
+
+**Landing order: 4.3 → 4.1 → 4.2 → 4.4.** The numbering names the features, not the sequence.
+4.1 cannot remove the normal path's pre-write read on its own: that read also supplies the
+predecessor relation for the `apply_to` replay, so removing it first would delete the endpoint
+check. 4.3 lands first and keeps the read; 4.1 then removes it, replacing the replay with the
+trusted relation. A/B therefore reports two points: after 4.3 (one replay removed) and after 4.1
+(the scan removed as well).
 
 ### 4.1 Pre-write idempotency from the snapshot summary
 
@@ -78,14 +85,18 @@ append.
 
 The fast path covers **the latest commit group only**; older groups are not in the summary.
 
-* If `requested.last.batch_seq` is greater than the summary's commit sequence, nothing is
-  committed: append all requested batches (the normal path).
-* If it equals the summary commit sequence and the batch ids match, **and** the summary supplies
-  an envelope for every requested batch (`optd.commits` covers the slice, or the request has one
-  batch and `optd.commit` matches it), return those committed envelopes without reading data.
-* If the requested sequence is older than the summary commit, or the summary cannot supply every
-  requested envelope, fall back to the full `read_batches()`; never reconstruct envelopes from
-  partial data and never append on a mismatch.
+* If `requested.first.batch_seq` is greater than the summary's commit sequence, no requested
+  batch can be committed: append all of them (the normal path). The condition is on the **first**
+  batch: when the request starts at or before the summary sequence but ends after it, an already
+  committed prefix is possible.
+* If `requested.last.batch_seq` equals the summary commit sequence, the batch ids and
+  `delta_hash` values match, **and** the summary supplies an envelope for every requested batch
+  (`optd.commits` covers the slice, or the request has one batch and `optd.commit` matches it),
+  return those committed envelopes without reading data.
+* If the request straddles the summary sequence (`first <= summary < last`), or the requested
+  sequence is older than the summary commit, or the summary cannot supply every requested
+  envelope, fall back to the full `read_batches()`; never reconstruct envelopes from partial data
+  and never append on a mismatch.
 
 Checks before returning: `optd.protocol`, generation identity, `follows()` continuity within the
 slice, and `delta_hash` equality per batch. Row equality is not available on this path, so the
