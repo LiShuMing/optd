@@ -108,13 +108,13 @@ async fn inner_join_preserves_local_ports_and_before_after_cross_term_formula() 
             Maintenance::Delta(DeltaExpr::Sum(vec![
                 DeltaExpr::Join {
                     left: Box::new(DeltaExpr::InputDelta(0)),
-                    right: Box::new(DeltaExpr::InputSnapshot {
+                    right: Box::new(DeltaExpr::IndexedInputSnapshot {
                         input: 1,
                         version: SnapshotVersion::Before
                     }),
                 },
                 DeltaExpr::Join {
-                    left: Box::new(DeltaExpr::InputSnapshot {
+                    left: Box::new(DeltaExpr::IndexedInputSnapshot {
                         input: 0,
                         version: SnapshotVersion::After
                     }),
@@ -122,8 +122,8 @@ async fn inner_join_preserves_local_ports_and_before_after_cross_term_formula() 
                 },
             ]))
         );
-        assert_eq!(join.maintenance.key_scope(), None);
-        assert_eq!(join.maintenance.strategy(), Strategy::NativeDelta);
+        assert_eq!(join.maintenance.key_scope(), Some(KeyScope::JoinKeys));
+        assert_eq!(join.maintenance.strategy(), Strategy::IndexedDelta);
     }
 }
 
@@ -214,11 +214,28 @@ async fn distinct_and_grouped_having_use_group_state_with_linear_consumers() {
         let view = compile(sql, strict()).await;
         let plan = view.incremental_plan();
         assert_graph(plan);
-        for group in selected(plan, "builtin.grouped_aggregate") {
-            assert_eq!(group.maintenance, Maintenance::ChangedGroups);
+        let accumulator = sql.contains("SUM(v)");
+        let rule = if accumulator {
+            "builtin.aggregate.accumulator"
+        } else {
+            "builtin.grouped_aggregate"
+        };
+        for group in selected(plan, rule) {
+            assert_eq!(
+                group.maintenance,
+                if accumulator {
+                    Maintenance::Accumulate
+                } else {
+                    Maintenance::ChangedGroups
+                }
+            );
             assert_eq!(
                 group.maintenance.strategy(),
-                Strategy::ChangedGroupRecompute
+                if accumulator {
+                    Strategy::AccumulatorDelta
+                } else {
+                    Strategy::ChangedGroupRecompute
+                }
             );
             assert_eq!(group.maintenance.key_scope(), None);
             assert_eq!(group.inputs.len(), 1);
@@ -418,7 +435,7 @@ async fn strict_policy_checks_selected_custom_rule_without_falling_back_to_built
 #[tokio::test]
 async fn compatibility_recompute_is_explicit_and_strict_reports_the_same_first_node() {
     for (sql, expected_rule) in [
-        ("SELECT SUM(v) FROM a", "builtin.aggregate_recompute"),
+        ("SELECT MIN(v) FROM a", "builtin.aggregate_recompute"),
         (
             "SELECT ROW_NUMBER() OVER (ORDER BY v) FROM a",
             "builtin.window_recompute",

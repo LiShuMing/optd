@@ -119,6 +119,15 @@ pub struct IndexSpec {
 /// State declarations are separate from execution operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateSpec {
+    /// Retractable builtin aggregates with typed key/argument expressions.
+    Accumulator {
+        /// Stable state slot.
+        id: usize,
+        /// Upstream relation.
+        input: usize,
+        /// Original aggregate expressions and output schema.
+        operator: RelationOperator,
+    },
     /// Complete affected-key input buckets and optional window output buckets.
     Keyed(IndexSpec),
     /// Group input/output index with its typed key projection.
@@ -146,6 +155,13 @@ pub enum ApplyMode {
 /// Logical operations and their physical implementation vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Operation {
+    /// Apply signed changes to a qualified aggregate state and emit output changes.
+    UpdateAccumulator {
+        /// Declared accumulator state slot.
+        state: usize,
+        /// Exact output schema.
+        schema: SchemaRef,
+    },
     /// Signed changes of an explicitly bound upstream relation.
     DeltaRead { input: usize, schema: SchemaRef },
     /// An immutable committed/candidate upstream relation.
@@ -237,6 +253,7 @@ impl Operation {
     /// Stable operator name for plan explanation and diagnostics.
     pub fn name(&self) -> &'static str {
         match self {
+            Self::UpdateAccumulator { .. } => "UpdateAccumulator",
             Self::DeltaRead { .. } => "DeltaRead",
             Self::SnapshotRead { .. } => "SnapshotRead",
             Self::SourceRead { .. } => "SourceRead",
@@ -291,6 +308,14 @@ impl CompiledProgram {
             super::Strategy::OperatorRecompute
         } else {
             match self.state {
+                Some(StateSpec::Accumulator { .. }) => super::Strategy::AccumulatorDelta,
+                Some(StateSpec::Keyed(_))
+                    if !self.steps.iter().any(|step| {
+                        matches!(step.operation, Operation::EvaluateSnapshot { .. })
+                    }) =>
+                {
+                    super::Strategy::IndexedDelta
+                }
                 Some(StateSpec::Keyed(_)) => super::Strategy::KeyedRecompute,
                 Some(StateSpec::Group { .. }) => super::Strategy::ChangedGroupRecompute,
                 None => super::Strategy::NativeDelta,

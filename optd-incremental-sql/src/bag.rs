@@ -29,7 +29,7 @@ type Entry<'a> = (&'a Vec<ScalarValue>, i64);
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Bag {
     schema: SchemaRef,
-    rows: HashMap<Vec<ScalarValue>, i64>,
+    rows: Arc<HashMap<Vec<ScalarValue>, i64>>,
 }
 
 impl Bag {
@@ -37,7 +37,7 @@ impl Bag {
     pub(crate) fn empty(schema: SchemaRef) -> Self {
         Self {
             schema,
-            rows: HashMap::new(),
+            rows: Arc::new(HashMap::new()),
         }
     }
 
@@ -66,7 +66,7 @@ impl Bag {
             )));
         }
         let mut bag = Self::empty(batch.schema());
-        bag.rows
+        Arc::make_mut(&mut bag.rows)
             .try_reserve(batch.num_rows())
             .map_err(allocation_error)?;
         let mut stored_bytes = 0_usize;
@@ -89,7 +89,7 @@ impl Bag {
                         .checked_sub(scalar_bytes(stored_row)?)
                         .ok_or(Error::Overflow)?;
                 }
-                bag.rows.remove(&row);
+                Arc::make_mut(&mut bag.rows).remove(&row);
             } else {
                 if previous == 0 {
                     stored_bytes = stored_bytes
@@ -97,7 +97,7 @@ impl Bag {
                         .ok_or(Error::Overflow)?;
                     check_byte_limit(stored_bytes)?;
                 }
-                bag.rows.insert(row, next);
+                Arc::make_mut(&mut bag.rows).insert(row, next);
             }
         }
         Ok(bag)
@@ -130,11 +130,22 @@ impl Bag {
 
     /// Add two same-schema signed bags without modifying either operand.
     pub(crate) fn add(&self, other: &Self) -> Result<Self> {
+        if self.schema == other.schema && other.is_empty() {
+            return Ok(self.clone());
+        }
         self.combine(other, i64::checked_add)
     }
 
     /// Subtract directly with checked arithmetic, including `MIN - MIN == 0`.
     pub(crate) fn difference(&self, other: &Self) -> Result<Self> {
+        if self.schema == other.schema {
+            if Arc::ptr_eq(&self.rows, &other.rows) {
+                return Ok(Self::empty(self.schema()));
+            }
+            if other.is_empty() {
+                return Ok(self.clone());
+            }
+        }
         self.combine(other, i64::checked_sub)
     }
 
@@ -149,10 +160,10 @@ impl Bag {
             .ok_or(Error::Overflow)?;
         let mut rows = HashMap::new();
         rows.try_reserve(capacity).map_err(allocation_error)?;
-        for (row, weight) in &self.rows {
+        for (row, weight) in self.rows.iter() {
             rows.insert(clone_row(row)?, *weight);
         }
-        for (row, weight) in &other.rows {
+        for (row, weight) in other.rows.iter() {
             let previous = rows.get(row).copied().unwrap_or_default();
             let next = operation(previous, *weight).ok_or(Error::Overflow)?;
             if next == 0 {
@@ -163,7 +174,7 @@ impl Bag {
         }
         Ok(Self {
             schema: self.schema(),
-            rows,
+            rows: Arc::new(rows),
         })
     }
 
@@ -172,7 +183,7 @@ impl Bag {
     pub(crate) fn negate(&self) -> Result<Self> {
         let mut rows = HashMap::new();
         rows.try_reserve(self.len()).map_err(allocation_error)?;
-        for (row, weight) in &self.rows {
+        for (row, weight) in self.rows.iter() {
             rows.insert(
                 clone_row(row)?,
                 weight.checked_neg().ok_or(Error::Overflow)?,
@@ -180,7 +191,7 @@ impl Bag {
         }
         Ok(Self {
             schema: self.schema(),
-            rows,
+            rows: Arc::new(rows),
         })
     }
 
@@ -204,7 +215,7 @@ impl Bag {
         let mut bytes = 0usize;
         for bag in bags {
             bag.validate_relation()?;
-            for (row, weight) in &bag.rows {
+            for (row, weight) in bag.rows.iter() {
                 let repeats = usize::try_from(*weight).map_err(|_| Error::Overflow)?;
                 rows = rows.checked_add(repeats).ok_or(Error::Overflow)?;
                 check_row_limit(rows)?;
@@ -424,6 +435,19 @@ mod tests {
     fn ints(values: Vec<Option<i64>>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
+    }
+
+    #[test]
+    fn immutable_clones_share_row_storage_and_changes_leave_before_intact() -> Result<()> {
+        let before = Bag::from_batch(&ints(vec![Some(1), Some(2)]))?;
+        let candidate = before.clone();
+        assert!(Arc::ptr_eq(&before.rows, &candidate.rows));
+        let delta = Bag::from_weighted(&ints(vec![Some(1), Some(3)]), &[-1, 1])?;
+        let after = candidate.add(&delta)?;
+        assert_eq!(before, Bag::from_batch(&ints(vec![Some(1), Some(2)]))?);
+        assert_eq!(after, Bag::from_batch(&ints(vec![Some(2), Some(3)]))?);
+        assert!(!Arc::ptr_eq(&before.rows, &after.rows));
+        Ok(())
     }
 
     #[test]

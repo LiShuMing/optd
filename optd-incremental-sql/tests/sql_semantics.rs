@@ -231,7 +231,7 @@ async fn native_inner_join_handles_nulls_duplicates_and_two_sided_changes() {
         .nodes
         .iter()
         .any(|node| node.operator.to_lowercase().contains("join")
-            && node.strategy == Strategy::NativeDelta));
+            && node.strategy == Strategy::IndexedDelta));
     assert_eq!(view.contents().unwrap().num_rows(), 4);
     refresh(
         &mut view,
@@ -401,8 +401,11 @@ async fn nested_aggregates_having_and_distinct_refresh_operator_local_state() {
             .nodes
             .iter()
             .filter(|node| node.operator.to_lowercase().contains("aggregate")
-                && node.strategy == Strategy::ChangedGroupRecompute
-                && node.group_work.is_some())
+                && node.strategy == Strategy::AccumulatorDelta
+                && node
+                    .accumulator_work
+                    .as_ref()
+                    .is_some_and(|w| w.historical_input_rows == 0))
             .count()
             >= 2
     );

@@ -22,6 +22,24 @@ pub struct NodeStats {
     /// Actual affected-bucket snapshot work, excluding full cache/source I/O.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyed_work: Option<KeyedWork>,
+    /// Delta-only retractable aggregate work, excluding full relation caches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accumulator_work: Option<AccumulatorWork>,
+}
+
+/// Actual aggregate-state work; historical group rows are never read on this path.
+#[derive(Clone, Debug, Serialize)]
+pub struct AccumulatorWork {
+    /// Distinct groups changed by this batch.
+    pub touched_groups: usize,
+    /// Insertions plus retractions supplied to accumulators.
+    pub delta_input_rows: usize,
+    /// Historical input rows revisited by aggregate evaluation.
+    pub historical_input_rows: usize,
+    /// Installed aggregate groups before the batch.
+    pub groups_before: usize,
+    /// Candidate aggregate groups after the batch.
+    pub groups_after: usize,
 }
 
 /// Actual input work at an indexed aggregate, independent of elapsed time.

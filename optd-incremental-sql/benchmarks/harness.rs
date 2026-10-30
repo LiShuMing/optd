@@ -30,6 +30,24 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 type Tables = BTreeMap<String, RecordBatch>;
 type Bag = BTreeMap<Vec<u8>, i64>;
 
+#[path = "query_mode.rs"]
+mod query_mode;
+
+fn plan_qualification(view: &SqlView) -> Value {
+    use optd_incremental_sql::Strategy;
+    let strategies = view.strategies();
+    let blockers = strategies
+        .iter()
+        .filter(|node| node.strategy == Strategy::OperatorRecompute)
+        .map(|node| {
+            json!({"id":node.id,"operator":node.operator,"rule":node.rule,
+            "reason":view.incremental_plan().nodes()[node.id].reason})
+        })
+        .collect::<Vec<_>>();
+    json!({"strict_plan_eligible":blockers.is_empty(),"complete_recompute_blockers":blockers,
+        "planned_nodes":strategies,"work_scope":"operator_local_excludes_full_cache_source_and_checkpoint_costs"})
+}
+
 struct OracleOutput {
     rows: RecordBatch,
     schema: Value,
@@ -282,6 +300,7 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
     let mut view = SqlView::new(sql, current.clone())
         .await
         .map_err(|error| format!("view_new: {error}"))?;
+    let qualification = plan_qualification(&view);
     let bootstrap = oracle(sql, &current)
         .await
         .map_err(|error| format!("oracle_bootstrap: {error}"))?;
@@ -320,11 +339,12 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
             let candidate = view.prepare(&changes).await?;
             let delta = candidate.delta()?;
             let strategy = format!("{:?}", candidate.stats());
+            let sql_stats = candidate.stats().clone();
             let expected = oracle(sql, &current).await.map_err(|error| format!("oracle_{stage}: {error}"))?;
             verify_delta(&previous, &expected.rows, &delta).map_err(|error| format!("compare_delta_{stage}: {error}"))?;
             view.acknowledge(candidate)?;
             equal(&view.contents()?, &expected.rows).map_err(|error| format!("compare_result_{stage}: {error}"))?;
-            Ok((expected.rows.clone(), json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),"oracle_schema":expected.schema,"signed_delta_rows":delta.num_rows(),"stats":strategy})))
+            Ok((expected.rows.clone(), json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),"oracle_schema":expected.schema,"signed_delta_rows":delta.num_rows(),"stats":strategy,"sql_stats":sql_stats})))
         }
         .await;
         match result {
@@ -366,12 +386,15 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
         "pass"
     };
     Ok(
-        json!({"status":status,"reason":failure,"registered_tables":registered_tables,"initial_rows":initial_rows,"bootstrap_oracle_schema":bootstrap_schema,"last_verified_rows":previous.num_rows(),"final_rows":if completed_rounds==3 {Some(previous.num_rows())} else {None},"completed_rounds":completed_rounds,"nonempty_result_seen":nonempty_result_seen,"output_delta_seen":output_delta_seen,"all_rounds_empty":all_rounds_empty,"rounds":rounds,"oracle":"independent_DataFusion_full_SQL","comparison":"typed_bag_and_signed_endpoint_delta","ordered_presentation_checked":false}),
+        json!({"status":status,"reason":failure,"plan_qualification":qualification,"registered_tables":registered_tables,"initial_rows":initial_rows,"bootstrap_oracle_schema":bootstrap_schema,"last_verified_rows":previous.num_rows(),"final_rows":if completed_rounds==3 {Some(previous.num_rows())} else {None},"completed_rounds":completed_rounds,"nonempty_result_seen":nonempty_result_seen,"output_delta_seen":output_delta_seen,"all_rounds_empty":all_rounds_empty,"rounds":rounds,"oracle":"independent_DataFusion_full_SQL","comparison":"typed_bag_and_signed_endpoint_delta","ordered_presentation_checked":false}),
     )
 }
 
 /// Execute every selected manifest entry and retain failures in structured output.
 pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
+    let query_mode =
+        std::env::var("OPTD_SQL_BENCH_QUERY_MODE").unwrap_or_else(|_| "original".into());
+    query_mode::prepare("SELECT 1", &query_mode)?;
     let iceberg_root = std::env::var_os("OPTD_SQL_BENCH_ICEBERG_ROOT").map(PathBuf::from);
     if let Some(root) = &iceberg_root {
         #[cfg(not(feature = "iceberg"))]
@@ -424,7 +447,11 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
                 let complete = loaded.as_ref().map_err(|error| error.to_string())?;
                 let file = directory.join(required_string(variant, "sql")?);
                 check_digest(&file, required_string(variant, "sha256")?)?;
-                run_query(&fs::read_to_string(file)?, complete, source_root.as_deref()).await
+                let original = fs::read_to_string(file)?;
+                let (sql, transformation) = query_mode::prepare(&original, &query_mode)?;
+                let mut result = run_query(&sql, complete, source_root.as_deref()).await?;
+                result["query_transformation"] = transformation;
+                Ok::<_, Box<dyn Error + Send + Sync>>(result)
             })
             .await;
             let mut record = match result {
@@ -490,6 +517,7 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
         "typed_arrow"
     });
     report["iceberg_artifact_root"] = json!(iceberg_root);
+    report["query_mode"] = json!(query_mode);
     Ok(report)
 }
 

@@ -55,6 +55,13 @@ pub enum DeltaExpr {
         /// Whether to read its committed or candidate relation.
         version: SnapshotVersion,
     },
+    /// Positive input restricted to the shared affected equijoin-key closure.
+    IndexedInputSnapshot {
+        /// Original logical input port.
+        input: usize,
+        /// Committed or candidate input buckets.
+        version: SnapshotVersion,
+    },
     /// Raw named-source changes; legal only at a non-fetch TableScan.
     SourceDelta,
     /// Jointly linear signed lifting, with one expression per logical input.
@@ -78,6 +85,8 @@ pub enum DeltaExpr {
 /// Compatibility frontend for one logical operator; never interpreted at refresh.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum Maintenance {
+    /// Update qualified retractable aggregate states from signed changes only.
+    Accumulate,
     /// Compile this verified shorthand into Optd logical and physical plans.
     Delta(DeltaExpr),
     /// Update the derived group index and recompute surviving touched groups.
@@ -100,6 +109,10 @@ impl Maintenance {
     /// Derive the public strategy from the executable program, never independently.
     pub fn strategy(&self) -> Strategy {
         match self {
+            Self::Accumulate => Strategy::AccumulatorDelta,
+            Self::Delta(expr) if self.key_scope().is_some() && !expr.has_scoped_output() => {
+                Strategy::IndexedDelta
+            }
             Self::Delta(_) if self.key_scope().is_some() => Strategy::KeyedRecompute,
             Self::Delta(_) | Self::Constant => Strategy::NativeDelta,
             Self::ChangedGroups => Strategy::ChangedGroupRecompute,
@@ -109,12 +122,22 @@ impl Maintenance {
 }
 
 impl DeltaExpr {
+    fn has_scoped_output(&self) -> bool {
+        match self {
+            Self::ScopedSnapshot { .. } => true,
+            Self::Linear(xs) | Self::Sum(xs) => xs.iter().any(Self::has_scoped_output),
+            Self::Negate(x) => x.has_scoped_output(),
+            Self::Join { left, right } => left.has_scoped_output() || right.has_scoped_output(),
+            _ => false,
+        }
+    }
     pub(crate) fn key_scope(&self) -> Option<KeyScope> {
         let mut pending = vec![self];
         for _ in 0..MAX_EXPR_NODES {
             let expression = pending.pop()?;
             match expression {
                 Self::ScopedSnapshot { scope, .. } => return Some(*scope),
+                Self::IndexedInputSnapshot { .. } => return Some(KeyScope::JoinKeys),
                 Self::Sum(xs) | Self::Linear(xs) => pending.extend(xs.iter().rev()),
                 Self::Negate(x) => pending.push(x),
                 Self::Join { left, right } => {
@@ -129,7 +152,8 @@ impl DeltaExpr {
 
     pub(crate) fn reads_scoped(&self, version: SnapshotVersion) -> bool {
         match self {
-            Self::ScopedSnapshot { version: v, .. } => *v == version,
+            Self::ScopedSnapshot { version: v, .. }
+            | Self::IndexedInputSnapshot { version: v, .. } => *v == version,
             Self::Sum(xs) | Self::Linear(xs) => xs.iter().any(|x| x.reads_scoped(version)),
             Self::Negate(x) => x.reads_scoped(version),
             Self::Join { left, right } => left.reads_scoped(version) || right.reads_scoped(version),
@@ -198,6 +222,8 @@ pub(super) fn verify(context: &RuleContext<'_>, maintenance: &Maintenance) -> Re
         ));
     }
     match maintenance {
+        Maintenance::Accumulate if context.accumulator_eligible() => Ok(()),
+        Maintenance::Accumulate => Err(Error::Invalid("unqualified accumulator state".into())),
         Maintenance::Delta(expression) => {
             if !linear_operator(context.logical_plan())
                 && !matches!(context.logical_plan(), LogicalPlan::Join(join) if join.join_type == JoinType::Inner)
@@ -273,7 +299,14 @@ fn verify_expr(
                 "scoped output",
             )
         }
-        DeltaExpr::InputDelta(input) | DeltaExpr::InputSnapshot { input, .. } => {
+        DeltaExpr::InputDelta(input)
+        | DeltaExpr::InputSnapshot { input, .. }
+        | DeltaExpr::IndexedInputSnapshot { input, .. } => {
+            if matches!(expression, DeltaExpr::IndexedInputSnapshot { .. })
+                && !context.supports_key_scope(KeyScope::JoinKeys)?
+            {
+                return Err(Error::Invalid("unqualified indexed input snapshot".into()));
+            }
             let plans = context.logical_plan().inputs();
             let plan = plans
                 .get(*input)

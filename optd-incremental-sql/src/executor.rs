@@ -12,10 +12,11 @@ use datafusion::prelude::SessionContext;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::accumulator_state::AccumulatorState;
 use crate::bag::Bag;
 use crate::group_state::{GroupState, GroupUpdate};
 use crate::keyed_state::{KeyedState, KeyedUpdate};
-use crate::metrics::{GroupWork, KeyedWork};
+use crate::metrics::{AccumulatorWork, GroupWork, KeyedWork};
 use crate::planner::plan::{ApplyMode, Operation, PhysicalStep, RelationOperator};
 use crate::planner::SnapshotVersion;
 use crate::{Error, Result};
@@ -80,10 +81,11 @@ pub(crate) struct Bindings<'a> {
     pub(crate) deltas: &'a [Bag],
     pub(crate) before: &'a [Relation],
     pub(crate) after: &'a [Relation],
-    pub(crate) source_before: &'a BTreeMap<String, Bag>,
+    pub(crate) source_deltas: &'a BTreeMap<String, Bag>,
     pub(crate) source_after: &'a BTreeMap<String, Bag>,
     pub(crate) keyed: &'a [Option<KeyedState>],
     pub(crate) groups: &'a [Option<GroupState>],
+    pub(crate) accumulators: &'a [Option<AccumulatorState>],
 }
 
 pub(crate) struct ExecutionResult {
@@ -93,6 +95,8 @@ pub(crate) struct ExecutionResult {
     pub(crate) groups: Option<GroupState>,
     pub(crate) keyed_work: Option<KeyedWork>,
     pub(crate) group_work: Option<GroupWork>,
+    pub(crate) accumulator: Option<AccumulatorState>,
+    pub(crate) accumulator_work: Option<AccumulatorWork>,
 }
 struct ProjectedChange {
     positive: RecordBatch,
@@ -239,10 +243,22 @@ pub(crate) async fn run(
     let mut group_work: Option<GroupWork> = None;
     let mut next_keyed = None;
     let mut next_groups = None;
+    let mut next_accumulator = None;
+    let mut accumulator_work = None;
     let mut replacement = None;
     for step in steps {
         let inputs = step.inputs.iter().map(|i| &values[*i]).collect::<Vec<_>>();
         let value = match &step.operation {
+            Operation::UpdateAccumulator { state, .. } => {
+                let index = bindings.accumulators[*state]
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing aggregate accumulator state".into()))?;
+                let (positive, negative) = inputs[0].relation()?.bag.signed_parts()?;
+                let (next, delta, work) = index.update(&positive, &negative)?;
+                next_accumulator = Some(next);
+                accumulator_work = Some(work);
+                Value::Relation(RelationValue::from_signed(delta)?)
+            }
             Operation::DeltaRead { input, .. } => {
                 Value::Relation(RelationValue::from_signed(bindings.deltas[*input].clone())?)
             }
@@ -255,7 +271,7 @@ pub(crate) async fn run(
             Operation::SourceRead { name, delta, .. } => {
                 let after = source(bindings.source_after, name)?;
                 Value::Relation(RelationValue::from_signed(if *delta {
-                    after.difference(source(bindings.source_before, name)?)?
+                    source(bindings.source_deltas, name)?.clone()
                 } else {
                     after.clone()
                 })?)
@@ -352,7 +368,17 @@ pub(crate) async fn run(
                 let update = indexes
                     .get(state)
                     .ok_or_else(|| Error::Invalid("missing prepared index".into()))?;
-                Value::Relation(RelationValue::new(update.lookup_input(*port, *version)?)?)
+                let batch = update.lookup_input(*port, *version)?;
+                if let Some(work) = &mut keyed_work {
+                    let rows = match version {
+                        SnapshotVersion::Before => &mut work.snapshot_input_rows_before,
+                        SnapshotVersion::After => &mut work.snapshot_input_rows_after,
+                    };
+                    rows[*port] = rows[*port]
+                        .checked_add(batch.num_rows())
+                        .ok_or(Error::Overflow)?;
+                }
+                Value::Relation(RelationValue::new(batch)?)
             }
             Operation::CachedOutput { state, schema } => {
                 let update = indexes
@@ -384,17 +410,11 @@ pub(crate) async fn run(
                         .map(|v| v.relation())
                         .collect::<Result<Vec<_>>>()?;
                     if let Some(work) = &mut keyed_work {
-                        let rows = relations
-                            .iter()
-                            .map(|r| r.batch().map(|b| b.num_rows()))
-                            .collect::<Result<Vec<_>>>()?;
                         match version {
                             SnapshotVersion::Before => {
-                                work.snapshot_input_rows_before = rows;
                                 work.snapshot_evaluations_before += 1;
                             }
                             SnapshotVersion::After => {
-                                work.snapshot_input_rows_after = rows;
                                 work.snapshot_evaluations_after += 1;
                             }
                         }
@@ -489,6 +509,8 @@ pub(crate) async fn run(
         groups: next_groups,
         keyed_work,
         group_work,
+        accumulator: next_accumulator,
+        accumulator_work,
     })
 }
 

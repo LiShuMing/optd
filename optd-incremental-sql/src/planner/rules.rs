@@ -20,6 +20,7 @@ enum Builtin {
     Union,
     Repartition,
     InnerJoin,
+    Accumulator,
     GroupedAggregate,
     OrderedRecompute,
     AggregateRecompute,
@@ -43,6 +44,7 @@ pub(super) fn builtins() -> Vec<Arc<dyn IncrementalRule>> {
         Builtin::Union,
         Builtin::Repartition,
         Builtin::InnerJoin,
+        Builtin::Accumulator,
         Builtin::GroupedAggregate,
         Builtin::OrderedRecompute,
         Builtin::AggregateRecompute,
@@ -71,6 +73,7 @@ impl IncrementalRule for Builtin {
             Self::Union => "builtin.union",
             Self::Repartition => "builtin.repartition",
             Self::InnerJoin => "builtin.inner_join",
+            Self::Accumulator => "builtin.aggregate.accumulator",
             Self::GroupedAggregate => "builtin.grouped_aggregate",
             Self::OrderedRecompute => "builtin.ordered_recompute",
             Self::AggregateRecompute => "builtin.aggregate_recompute",
@@ -87,6 +90,8 @@ impl IncrementalRule for Builtin {
     fn priority(&self) -> i32 {
         if matches!(self, Self::OrderedRecompute) {
             100
+        } else if matches!(self, Self::Accumulator) {
+            10
         } else {
             0
         }
@@ -127,6 +132,7 @@ impl IncrementalRule for Builtin {
             Self::GroupedAggregate => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && context.group_eligible()
             }
+            Self::Accumulator => context.accumulator_eligible(),
             Self::OrderedRecompute => false,
             Self::AggregateRecompute => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && !context.group_eligible()
@@ -152,6 +158,7 @@ impl IncrementalRule for Builtin {
 
     fn rewrite(&self, context: &RuleContext<'_>) -> Result<RuleRewrite> {
         let (maintenance, reason) = match self {
+            Self::Accumulator => (Maintenance::Accumulate, "update qualified builtin aggregate state from insertions/retractions without reading historical group inputs"),
             Self::Constant => (
                 Maintenance::Constant,
                 "source-independent constant relation",
@@ -168,25 +175,27 @@ impl IncrementalRule for Builtin {
                 )),
                 "jointly linear lifting over signed input changes",
             ),
-            Self::InnerJoin => (
+            Self::InnerJoin => {
+                let snapshot = |input, version| -> Result<DeltaExpr> {
+                    if context.supports_key_scope(KeyScope::JoinKeys)? {
+                        Ok(DeltaExpr::IndexedInputSnapshot { input, version })
+                    } else {
+                        Ok(DeltaExpr::InputSnapshot { input, version })
+                    }
+                };
+                (
                 Maintenance::Delta(DeltaExpr::Sum(vec![
                     DeltaExpr::Join {
                         left: Box::new(DeltaExpr::InputDelta(0)),
-                        right: Box::new(DeltaExpr::InputSnapshot {
-                            input: 1,
-                            version: SnapshotVersion::Before,
-                        }),
+                        right: Box::new(snapshot(1, SnapshotVersion::Before)?),
                     },
                     DeltaExpr::Join {
-                        left: Box::new(DeltaExpr::InputSnapshot {
-                            input: 0,
-                            version: SnapshotVersion::After,
-                        }),
+                        left: Box::new(snapshot(0, SnapshotVersion::After)?),
                         right: Box::new(DeltaExpr::InputDelta(1)),
                     },
                 ])),
                 "delta-left join before-right plus after-left join delta-right counts the cross term once",
-            ),
+            )},
             Self::GroupedAggregate => (
                 Maintenance::ChangedGroups,
                 "qualified group keys and aggregate functions permit recomputing only changed groups",

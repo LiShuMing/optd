@@ -205,11 +205,13 @@ def check_record(record, backend=ARROW_BACKEND):
     return completed, complete
 
 
-def load_profile(label, report_path, expected_hash, repository, expected_backend=ARROW_BACKEND):
+def load_profile(label, report_path, expected_hash, repository, expected_backend=ARROW_BACKEND, expected_query_mode="original"):
     report_path = report_path.resolve()
     report = checked_json(report_path, expected_hash)
     if report.get("format_version") != 1 or report.get("suite") not in {"tpch", "tpcds"}:
         raise ValueError("unsupported qualification report format or suite")
+    if report.get("query_mode", "original") != expected_query_mode:
+        raise ValueError("report query mode differs from explicit expected query mode")
     backend = check_backend(report, expected_backend, "report")
     manifest_path = Path(report["manifest"])
     if not manifest_path.is_absolute():
@@ -253,6 +255,18 @@ def load_profile(label, report_path, expected_hash, repository, expected_backend
         key = (record["query_id"], record["variant_id"])
         if key not in identities or key in records:
             raise ValueError("report contains an unknown or duplicate query variant")
+        transformation = record.get("query_transformation")
+        if transformation is not None:
+            if (transformation.get("mode") != expected_query_mode or
+                    transformation.get("original_sql_sha256") != identities[key]["sql_sha256"] or
+                    digest(transformation.get("executed_sql", "").encode("utf-8")) != transformation.get("executed_sql_sha256")):
+                raise ValueError("query transformation identity or executed SQL digest mismatch")
+            if expected_query_mode == "original" and (
+                    transformation.get("removed_clauses") or
+                    transformation.get("executed_sql_sha256") != identities[key]["sql_sha256"]):
+                raise ValueError("original query mode cannot contain transformed SQL")
+        elif expected_query_mode != "original" and record["status"] != "fail":
+            raise ValueError("relational-core result lacks query transformation evidence")
         completed, complete = check_record(record, backend)
         records[key] = {**record, "source_backend": backend,
                         "actual_completed_rounds": completed, "three_rounds_verified": complete}
@@ -273,7 +287,7 @@ def load_profile(label, report_path, expected_hash, repository, expected_backend
         "profile": label, "report": str(report_path), "report_sha256": expected_hash,
         "manifest": str(manifest_path), "manifest_sha256": report["manifest_sha256"],
         "suite": report["suite"], "schema_sha256": manifest["schema_sha256"],
-        "source_backend": backend,
+        "source_backend": backend, "query_mode":expected_query_mode,
         "iceberg_artifact_root": report.get("iceberg_artifact_root"),
         "source": manifest.get("source"), "source_ref": manifest.get("source_ref"),
         "data_source": manifest.get("data_source"), "data_source_ref": manifest.get("data_source_ref"),
@@ -286,7 +300,9 @@ def load_profile(label, report_path, expected_hash, repository, expected_backend
     return metadata, identities, records
 
 
-def summarize(specifications, repository, expected_backend=ARROW_BACKEND):
+def summarize(specifications, repository, expected_backend=ARROW_BACKEND, expected_query_mode="original"):
+    if expected_query_mode not in ("original", "relational_core"):
+        raise ValueError("unsupported expected query mode")
     if expected_backend not in BACKENDS:
         raise ValueError(f"unsupported expected backend: {expected_backend!r}")
     loaded = []
@@ -295,7 +311,7 @@ def summarize(specifications, repository, expected_backend=ARROW_BACKEND):
         if label in labels:
             raise ValueError(f"duplicate profile label: {label}")
         labels.add(label)
-        loaded.append(load_profile(label, Path(path), expected_hash, repository, expected_backend))
+        loaded.append(load_profile(label, Path(path), expected_hash, repository, expected_backend, expected_query_mode))
     suites = {metadata["suite"] for metadata, _, _ in loaded}
     if len(suites) != 1:
         raise ValueError("all reports must belong to one suite")
@@ -325,7 +341,7 @@ def summarize(specifications, repository, expected_backend=ARROW_BACKEND):
     passed = sum(query["with_pass"] for query in queries)
     return {"format_version": 1, "kind": "incremental_query_coverage_aggregate", "suite": next(iter(suites)),
             "source_backend": expected_backend,
-            "selection_policy": "first_single_profile_with_bootstrap_three_rounds_nonempty_result_and_output_delta",
+            "query_mode":expected_query_mode, "selection_policy": "first_single_profile_with_bootstrap_three_rounds_nonempty_result_and_output_delta",
             "cross_profile_round_combination": False, "scale_or_performance_qualification": False,
             "profiles": [metadata for metadata, _, _ in loaded],
             "aggregate": {"total": len(keys), "with_pass": passed, "remaining": len(keys) - passed,
@@ -340,8 +356,9 @@ def main():
                         metavar=("PROFILE", "REPORT_JSON", "EXPECTED_SHA256"))
     parser.add_argument("--repository-root", type=Path, default=Path(__file__).resolve().parents[3])
     parser.add_argument("--expected-backend", choices=BACKENDS, default=ARROW_BACKEND)
+    parser.add_argument("--expected-query-mode", choices=("original", "relational_core"), default="original")
     args = parser.parse_args()
-    report = summarize(args.report, args.repository_root.resolve(), args.expected_backend)
+    report = summarize(args.report, args.repository_root.resolve(), args.expected_backend, args.expected_query_mode)
     output = args.output.resolve()
     if output in {Path(path).resolve() for _, path, _ in args.report}:
         raise ValueError("aggregate output cannot overwrite an input report")

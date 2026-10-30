@@ -28,6 +28,10 @@ pub use expr::{DeltaExpr, KeyScope, Maintenance, SnapshotVersion, MAX_EXPR_DEPTH
 pub enum Strategy {
     /// Execute a checked signed-expression program.
     NativeDelta,
+    /// Propagate signed changes using indexed affected-key peer snapshots.
+    IndexedDelta,
+    /// Update retractable aggregate state using only inserted/deleted rows.
+    AccumulatorDelta,
     /// Re-evaluate only groups whose indexed input multiset changed.
     ChangedGroupRecompute,
     /// Evaluate only indexed affected keys/partitions, subtracting their snapshots.
@@ -44,6 +48,7 @@ pub struct RuleContext<'a> {
     inputs: &'a [usize],
     ordered: bool,
     group_eligible: bool,
+    accumulator_eligible: bool,
 }
 
 impl<'a> RuleContext<'a> {
@@ -60,6 +65,7 @@ impl<'a> RuleContext<'a> {
             inputs,
             ordered,
             group_eligible,
+            accumulator_eligible: false,
         }
     }
 
@@ -86,6 +92,16 @@ impl<'a> RuleContext<'a> {
     /// Whether the fixed SQL context has qualified this aggregate's group index.
     pub fn group_eligible(&self) -> bool {
         self.group_eligible
+    }
+
+    pub(crate) fn with_accumulator_eligible(mut self, eligible: bool) -> Self {
+        self.accumulator_eligible = eligible;
+        self
+    }
+
+    /// Whether exact builtin retractable aggregate states are qualified.
+    pub fn accumulator_eligible(&self) -> bool {
+        self.accumulator_eligible
     }
 
     /// Whether this operator has a proven, typed dependency closure for a scope.

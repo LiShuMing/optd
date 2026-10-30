@@ -15,6 +15,7 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::{SessionConfig, SessionContext};
 
+use crate::accumulator_state::AccumulatorState;
 use crate::bag::Bag;
 use crate::executor::{self, cache_scan, Bindings, Relation};
 use crate::group_state::{supported_key, GroupState, KeyPolicy};
@@ -91,6 +92,7 @@ pub struct PreparedSqlRefresh {
     states: Vec<Relation>,
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
+    accumulators: Vec<Option<AccumulatorState>>,
     delta: Bag,
     stats: RefreshStats,
 }
@@ -123,6 +125,7 @@ pub struct SqlView {
     states: Vec<Relation>,
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
+    accumulators: Vec<Option<AccumulatorState>>,
     tables: BTreeMap<String, Bag>,
     ctx: SessionContext,
 }
@@ -328,13 +331,12 @@ impl SqlView {
             .enumerate()
             .map(|(id, node)| {
                 let group_eligible = Self::admits_group_index(&ctx, &node.plan)?;
-                optimizer.rewrite_node(&RuleContext::new(
-                    id,
-                    &node.plan,
-                    &node.inputs,
-                    node.ordered,
-                    group_eligible,
-                ))
+                optimizer.rewrite_node(
+                    &RuleContext::new(id, &node.plan, &node.inputs, node.ordered, group_eligible)
+                        .with_accumulator_eligible(crate::accumulator_state::eligible(
+                            &ctx, &node.plan,
+                        )?),
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         let mut incremental_plan = IncrementalPlan::new(compiled)?;
@@ -352,7 +354,8 @@ impl SqlView {
                 &node.inputs,
                 node.ordered,
                 Self::admits_group_index(&ctx, &node.plan)?,
-            );
+            )
+            .with_accumulator_eligible(crate::accumulator_state::eligible(&ctx, &node.plan)?);
             let program = crate::planner::lower::compile(
                 &context,
                 &incremental_plan.nodes()[id].maintenance,
@@ -383,6 +386,7 @@ impl SqlView {
             incremental_plan,
             states: vec![],
             keyed: vec![None; group_slots.len()],
+            accumulators: vec![None; group_slots.len()],
             groups: group_slots,
             tables: source,
             ctx,
@@ -396,6 +400,15 @@ impl SqlView {
             };
             out.states.push(Relation::new(batch)?);
             match &out.incremental_plan.programs()[id].state {
+                Some(StateSpec::Accumulator {
+                    input, operator, ..
+                }) => {
+                    out.accumulators[id] = Some(AccumulatorState::new(
+                        &out.ctx,
+                        operator,
+                        &out.states[*input].batch,
+                    )?);
+                }
                 Some(StateSpec::Group {
                     input, projection, ..
                 }) => {
@@ -490,6 +503,7 @@ impl SqlView {
                 delta_rows: 0,
                 group_work: None,
                 keyed_work: None,
+                accumulator_work: None,
             })
             .collect()
     }
@@ -522,6 +536,10 @@ impl SqlView {
         }
         let session = ctx.state();
         for expr in &aggregate.aggr_expr {
+            let mut expr = expr;
+            while let Expr::Alias(alias) = expr {
+                expr = &alias.expr;
+            }
             let Expr::AggregateFunction(function) = expr else {
                 return Ok(false);
             };
@@ -637,20 +655,27 @@ impl SqlView {
     pub async fn prepare(&self, changes: &[TableChange]) -> Result<PreparedSqlRefresh> {
         let epoch = self.epoch.checked_add(1).ok_or(Error::Overflow)?;
         let mut tables = self.tables.clone();
+        let mut source_deltas = BTreeMap::<String, Bag>::new();
         for change in changes {
             let old = tables
                 .get(&change.table)
                 .ok_or_else(|| Error::Invalid(format!("unknown changed table {}", change.table)))?;
             let delta = Bag::from_weighted(&change.rows, &change.weights)?;
             let next = old.add(&delta)?;
+            let combined = match source_deltas.get(&change.table) {
+                Some(previous) => previous.add(&delta)?,
+                None => delta,
+            };
+            source_deltas.insert(change.table.clone(), combined);
             tables.insert(change.table.clone(), next);
         }
-        for table in tables.values() {
-            table.validate_relation()?;
+        for name in source_deltas.keys() {
+            tables[name].validate_relation()?;
         }
         let mut states = self.states.clone();
         let mut groups = self.groups.clone();
         let mut keyed = self.keyed.clone();
+        let mut accumulators = self.accumulators.clone();
         let mut deltas: Vec<Bag> = Vec::with_capacity(self.nodes.len());
         // A sorted relation can reorder without changing its bag (for example,
         // projecting away a modified sort key). LIMIT must still be refreshed.
@@ -664,13 +689,17 @@ impl SqlView {
             let selected_strategy = self.incremental_plan.programs()[id].strategy();
             let mut group_work = None;
             let mut keyed_work = None;
+            let mut accumulator_work = None;
             let schema = self.states[id].bag.schema();
             // Scans own a raw-source dependency even though they have no graph
             // children. This binding is independent of the selected rule.
             let source_delta = if let LogicalPlan::TableScan(scan) = &node.plan {
                 Some(
-                    self.source_for(scan, &tables)?
-                        .difference(self.source_for(scan, &self.tables)?)?,
+                    source_deltas
+                        .get(&scan.table_name.to_string())
+                        .or_else(|| source_deltas.get(scan.table_name.table()))
+                        .cloned()
+                        .unwrap_or_else(|| Bag::empty(scan.source.schema())),
                 )
             } else {
                 None
@@ -693,10 +722,11 @@ impl SqlView {
                         deltas: &deltas,
                         before: &self.states,
                         after: &states,
-                        source_before: &self.tables,
+                        source_deltas: &source_deltas,
                         source_after: &tables,
                         keyed: &self.keyed,
                         groups: &self.groups,
+                        accumulators: &self.accumulators,
                     },
                 )
                 .await
@@ -711,6 +741,10 @@ impl SqlView {
                 if let Some(index) = result.groups {
                     groups[id] = Some(index);
                 }
+                if let Some(index) = result.accumulator {
+                    accumulators[id] = Some(index);
+                }
+                accumulator_work = result.accumulator_work;
                 keyed_work = result.keyed_work;
                 group_work = result.group_work;
                 (
@@ -721,6 +755,7 @@ impl SqlView {
             if dirty {
                 states[id] = match next {
                     Some(next) => next,
+                    None if delta.is_empty() => self.states[id].clone(),
                     None => Relation::from_bag(self.states[id].bag.add(&delta)?)?,
                 };
                 stats.nodes.push(NodeStats {
@@ -731,6 +766,7 @@ impl SqlView {
                     delta_rows: delta.len(),
                     group_work,
                     keyed_work,
+                    accumulator_work,
                 });
             }
             sequence_changed.push(node.ordered && states[id].batch != self.states[id].batch);
@@ -746,6 +782,7 @@ impl SqlView {
             states,
             groups,
             keyed,
+            accumulators,
             delta,
             stats,
         })
@@ -761,6 +798,7 @@ impl SqlView {
         self.states = candidate.states;
         self.groups = candidate.groups;
         self.keyed = candidate.keyed;
+        self.accumulators = candidate.accumulators;
         Ok(())
     }
 }

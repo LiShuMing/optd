@@ -108,6 +108,38 @@ pub(super) fn verify(
                 })
                 .collect::<Result<Vec<_>>>()?;
             let output = match operation {
+                Operation::UpdateAccumulator { state, schema } => {
+                    arity(&types, 1)?;
+                    let Some(StateSpec::Accumulator {
+                        id,
+                        input,
+                        operator,
+                    }) = self.state
+                    else {
+                        return Err(invalid("missing accumulator declaration"));
+                    };
+                    if depth != 0
+                        || state != id
+                        || !self.context.accumulator_eligible()
+                        || schema != &operator.schema()
+                        || types[0]
+                            != Type::Relation(std::sync::Arc::new(
+                                operator.inputs[0].as_arrow().clone(),
+                            ))
+                    {
+                        return Err(invalid("accumulator state/schema differs"));
+                    }
+                    let PlanNodeOrGroup::PlanNode(child) = &node.children[0] else {
+                        return Err(invalid("unbound accumulator delta"));
+                    };
+                    if !matches!(&child.typ, IncrementalNode::Logical(Operation::DeltaRead {input:i,..}) | IncrementalNode::Physical(Operation::DeltaRead {input:i,..}) if i == input)
+                    {
+                        return Err(invalid("accumulator must read its declared input delta"));
+                    }
+                    self.preparations.insert(node.clone());
+                    self.completions += 1;
+                    Type::Relation(schema.clone())
+                }
                 Operation::Empty(schema) => {
                     arity(&types, 0)?;
                     Type::Relation(schema.clone())

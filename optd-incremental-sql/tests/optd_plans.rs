@@ -161,6 +161,13 @@ async fn window_and_group_plans_expose_different_state_contracts() {
             walk(&program.logical, false);
             walk(&program.physical, true);
             match &program.state {
+                Some(StateSpec::Accumulator { .. }) => {
+                    assert_eq!(program.strategy(), Strategy::AccumulatorDelta);
+                    assert!(program
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step.operation, Operation::UpdateAccumulator { .. })));
+                }
                 Some(StateSpec::Keyed(spec)) => {
                     found = true;
                     assert!(spec.output_projection.is_some());
@@ -255,19 +262,31 @@ impl Rule<IncrementalNode, HeuristicsOptimizer<IncrementalNode>> for ThreeTerms 
         }
         let after_left = second.child_rel(0);
         let delta_right = second.child_rel(1);
-        let IncrementalNode::Logical(Operation::SnapshotRead { input, schema, .. }) =
-            &after_left.typ
-        else {
-            return vec![];
+        let before_left = match &after_left.typ {
+            IncrementalNode::Logical(Operation::SnapshotRead { input, schema, .. }) => logical(
+                Operation::SnapshotRead {
+                    input: *input,
+                    schema: schema.clone(),
+                    version: optd_incremental_sql::planner::SnapshotVersion::Before,
+                },
+                vec![],
+            ),
+            IncrementalNode::Logical(Operation::IndexLookup {
+                state,
+                port,
+                schema,
+                ..
+            }) => logical(
+                Operation::IndexLookup {
+                    state: *state,
+                    port: *port,
+                    schema: schema.clone(),
+                    version: optd_incremental_sql::planner::SnapshotVersion::Before,
+                },
+                vec![after_left.child_rel(0)],
+            ),
+            _ => return vec![],
         };
-        let before_left = logical(
-            Operation::SnapshotRead {
-                input: *input,
-                schema: schema.clone(),
-                version: optd_incremental_sql::planner::SnapshotVersion::Before,
-            },
-            vec![],
-        );
         let apply = |left, right| {
             logical(
                 Operation::Apply {

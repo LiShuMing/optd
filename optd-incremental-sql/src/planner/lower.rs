@@ -63,6 +63,18 @@ impl Compiler<'_> {
             }),
             DeltaExpr::InputDelta(port) => self.input(*port, None),
             DeltaExpr::InputSnapshot { input, version } => self.input(*input, Some(*version)),
+            DeltaExpr::IndexedInputSnapshot { input, version } => logical(
+                Operation::IndexLookup {
+                    state: self.context.node_id(),
+                    port: *input,
+                    version: *version,
+                    schema: expected,
+                },
+                vec![self
+                    .token
+                    .clone()
+                    .ok_or_else(|| Error::Invalid("missing indexed input preparation".into()))?],
+            ),
             DeltaExpr::SourceDelta => {
                 let LogicalPlan::TableScan(scan) = self.context.logical_plan() else {
                     return Err(Error::Invalid("source delta without source".into()));
@@ -179,6 +191,20 @@ pub(crate) fn compile(
         }
     }
     let root = match maintenance {
+        Maintenance::Accumulate => {
+            state = Some(StateSpec::Accumulator {
+                id: context.node_id(),
+                input: context.inputs()[0],
+                operator: operator.clone(),
+            });
+            logical(
+                Operation::UpdateAccumulator {
+                    state: context.node_id(),
+                    schema: operator.schema(),
+                },
+                vec![compiler.input(0, None)],
+            )
+        }
         Maintenance::Delta(expr) => {
             let delta = compiler.expression(expr, operator.schema())?;
             if let Some(StateSpec::Keyed(spec)) = &state {

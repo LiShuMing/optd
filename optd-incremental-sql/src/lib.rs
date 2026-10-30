@@ -4,6 +4,7 @@
 //! operators explicitly report local recomputation. No whole-query fallback is
 //! hidden behind the incremental API. See `docs/src/incremental/sql_execution.md`.
 
+mod accumulator_state;
 mod bag;
 mod engine;
 mod executor;
@@ -24,6 +25,7 @@ pub use engine::{
     DurableSqlView, GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView,
     TableChange,
 };
+pub use metrics::AccumulatorWork;
 pub use planner::Strategy;
 
 /// Failure before a candidate can become visible or a checkpoint is accepted.

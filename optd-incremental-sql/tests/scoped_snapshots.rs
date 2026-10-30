@@ -515,7 +515,7 @@ async fn selected_custom_snapshot_controls_execution_and_invalid_scope_fails() {
 #[tokio::test]
 async fn strict_rejects_remaining_complete_operator_recompute() {
     for sql in [
-        "SELECT SUM(v) FROM a",
+        "SELECT MIN(v) FROM a",
         "SELECT * FROM a ORDER BY k",
         "SELECT ROW_NUMBER() OVER (ORDER BY v) FROM a",
         "SELECT * FROM a FULL JOIN b ON a.v < b.v",
@@ -670,4 +670,150 @@ async fn constant_partition_optimized_to_global_is_rejected_by_strict_mode() {
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn indexed_inner_delta_reads_only_peer_buckets_and_counts_cross_term_once() {
+    for condition in [
+        "a.k=b.k",
+        "a.k IS NOT DISTINCT FROM b.k",
+        "a.k=b.k AND a.v<b.v",
+    ] {
+        let sql = format!("SELECT a.k,a.v,b.v AS bv FROM a INNER JOIN b ON {condition}");
+        let mut data = sources();
+        let mut view = SqlView::new_with_optimizer(&sql, tables(&data), strict())
+            .await
+            .unwrap();
+        let changes = vec![
+            change(
+                "a",
+                &[
+                    (Some(1), Some(10)),
+                    (Some(1), Some(12)),
+                    (None, Some(7)),
+                    (None, Some(9)),
+                ],
+                &[-1, 1, -1, 1],
+            ),
+            change(
+                "b",
+                &[
+                    (Some(1), Some(100)),
+                    (Some(1), Some(120)),
+                    (None, Some(8)),
+                    (None, Some(11)),
+                ],
+                &[-1, 1, -1, 1],
+            ),
+        ];
+        apply_sources(&mut data, &changes);
+        let stats = refresh_checked(&mut view, &changes, &data).await;
+        let node = stats
+            .nodes
+            .iter()
+            .find(|n| n.strategy == Strategy::IndexedDelta)
+            .unwrap();
+        let work = node.keyed_work.as_ref().unwrap();
+        assert_eq!(work.touched_keys, 2);
+        assert_eq!(work.full_input_scans, 0);
+        assert_eq!(work.snapshot_evaluations_before, 0);
+        assert_eq!(work.snapshot_evaluations_after, 0);
+        assert!(work.snapshot_input_rows_before.iter().sum::<usize>() <= 3);
+        assert!(work.snapshot_input_rows_after.iter().sum::<usize>() <= 4);
+    }
+}
+
+#[tokio::test]
+async fn grouped_and_global_accumulators_retract_without_historical_group_reads() {
+    for sql in [
+        "SELECT k,COUNT(*) AS n,SUM(v) AS s FROM a GROUP BY k",
+        "SELECT COUNT(*) AS n,COUNT(v) AS nonnull,SUM(v) AS s FROM a",
+        "SELECT k,SUM(CAST(v AS DECIMAL(18,2))) AS s,AVG(CAST(v AS DECIMAL(18,2))) AS av FROM a GROUP BY k",
+        "SELECT SUM(CAST(v AS DECIMAL(18,2))) AS s,AVG(CAST(v AS DECIMAL(18,2))) AS av FROM a",
+    ] {
+        let mut data=Sources::from([("a".into(),vec![])]);
+        let mut view=SqlView::new_with_optimizer(sql,tables(&data),strict()).await.unwrap();
+        assert!(view.strategies().iter().any(|n|n.strategy==Strategy::AccumulatorDelta));
+        for _ in 0..4 {
+            let inserted=[(Some(1),Some(10)),(Some(1),Some(10)),(Some(2),None),(None,Some(-3))];
+            for weight in [1,-1] {
+                let changes=vec![change("a",&inserted,&[weight;4])];
+                apply_sources(&mut data,&changes);
+                let stats=refresh_checked(&mut view,&changes,&data).await;
+                let work=stats.nodes.iter().find_map(|n|n.accumulator_work.as_ref()).unwrap();
+                assert_eq!(work.delta_input_rows,4);
+                assert_eq!(work.historical_input_rows,0);
+                assert_eq!(work.touched_groups,if sql.contains("GROUP BY"){3}else{1});
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn one_changed_row_in_a_large_group_uses_only_delta_accumulator_arguments() {
+    let input = (0..2000).map(|v| (Some(1), Some(v))).collect();
+    let mut data = Sources::from([("a".into(), input)]);
+    let sql = "SELECT k,COUNT(*) AS n,SUM(v) AS s FROM a GROUP BY k";
+    let mut view = SqlView::new_with_optimizer(sql, tables(&data), strict())
+        .await
+        .unwrap();
+    let changes = vec![change(
+        "a",
+        &[(Some(1), Some(100)), (Some(1), Some(3000))],
+        &[-1, 1],
+    )];
+    apply_sources(&mut data, &changes);
+    let stats = refresh_checked(&mut view, &changes, &data).await;
+    let work = stats
+        .nodes
+        .iter()
+        .find_map(|n| n.accumulator_work.as_ref())
+        .unwrap();
+    assert_eq!(work.touched_groups, 1);
+    assert_eq!(work.delta_input_rows, 2);
+    assert_eq!(work.historical_input_rows, 0);
+}
+
+#[tokio::test]
+async fn durable_accumulator_rebuild_and_failed_candidate_preserve_empty_global_semantics() {
+    let root = tempfile::tempdir().unwrap();
+    let sql = "SELECT COUNT(*) AS n,SUM(v) AS s FROM a";
+    let mut data = Sources::from([("a".into(), vec![])]);
+    let mut view = DurableSqlView::open_with_optimizer(root.path(), sql, tables(&data), strict())
+        .await
+        .unwrap();
+    let insert = vec![change("a", &[(Some(1), Some(10)), (None, None)], &[1, 1])];
+    apply_sources(&mut data, &insert);
+    view.refresh(&insert).await.unwrap();
+    drop(view);
+    let mut recovered = DurableSqlView::open_with_optimizer(
+        root.path(),
+        sql,
+        tables(&Sources::from([("a".into(), vec![])])),
+        strict(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bag(&recovered.view().contents().unwrap()),
+        bag(&oracle(sql, &data).await)
+    );
+    let before = recovered.view().contents().unwrap();
+    assert!(recovered
+        .view()
+        .prepare(&[change("a", &[(Some(9), Some(9))], &[-1])])
+        .await
+        .is_err());
+    assert_eq!(recovered.view().contents().unwrap(), before);
+    let delete = vec![change("a", &[(Some(1), Some(10)), (None, None)], &[-1, -1])];
+    apply_sources(&mut data, &delete);
+    let stats = recovered.refresh(&delete).await.unwrap();
+    assert_eq!(
+        bag(&recovered.view().contents().unwrap()),
+        bag(&oracle(sql, &data).await)
+    );
+    assert!(stats.nodes.iter().any(|n| n
+        .accumulator_work
+        .as_ref()
+        .is_some_and(|w| w.historical_input_rows == 0)));
 }

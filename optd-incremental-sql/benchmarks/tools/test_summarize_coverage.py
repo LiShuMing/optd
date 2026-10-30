@@ -86,6 +86,28 @@ class CoverageIntegrity(unittest.TestCase):
         self.assertEqual(query["selected_complete_profile"]["profile"], "good")
         self.assertEqual(query["profiles"][0]["verification"]["reason"], "planner failure")
 
+    def test_relational_core_cannot_be_reported_as_original_sql(self):
+        record = copy.deepcopy(self.record)
+        sql = "SELECT id FROM t"
+        record["query_transformation"] = {
+            "mode":"relational_core", "removed_clauses":["outer_order_by"],
+            "original_sql_sha256":digest((self.directory / "query.sql").read_bytes()),
+            "executed_sql":sql, "executed_sql_sha256":digest(sql.encode()),
+        }
+        spec = self.write_report("core", record)
+        path = Path(spec[1]); report = json.loads(path.read_text())
+        report["query_mode"] = "relational_core"; path.write_text(json.dumps(report))
+        spec = (spec[0], str(path), digest(path.read_bytes()))
+        with self.assertRaisesRegex(ValueError,"query mode"):
+            summarize([spec],self.directory)
+        result = summarize([spec],self.directory,expected_query_mode="relational_core")
+        self.assertEqual(result["query_mode"],"relational_core")
+        self.assertEqual(result["aggregate"]["with_pass"],1)
+        record["query_transformation"]["executed_sql_sha256"] = "0" * 64
+        spec = self.write_report("false-original",record)
+        with self.assertRaisesRegex(ValueError,"transformation"):
+            summarize([spec],self.directory)
+
     def test_incomplete_profiles_never_combine_rounds(self):
         partial = copy.deepcopy(self.record)
         partial.update(status="fail", completed_rounds=2, rounds=partial["rounds"][:2])

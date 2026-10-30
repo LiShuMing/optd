@@ -360,6 +360,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     )
     .await?;
     equal(&view.view().contents()?, &previous)?;
+    let qualification = super::plan_qualification(view.view());
     drop(view);
     let initial_checkpoint = load_checkpoint(&store)?;
     if initial_checkpoint.vector != initial_vector || initial_checkpoint.snapshot.epoch != 0 {
@@ -427,7 +428,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         equal(&view.view().contents()?, &expected.rows)?;
         rounds.push(json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),
             "oracle_schema":expected.schema,"signed_delta_rows":checkpoint.snapshot.delta.num_rows(),
-            "stats":format!("{sql_stats:?}"),"source_work":work_json(&source_work),"committed_epoch":epoch,
+            "stats":format!("{sql_stats:?}"),"sql_stats":sql_stats,"source_work":work_json(&source_work),"committed_epoch":epoch,
             "source_vector":target,"source_vector_sha256":checkpoint.vector.digest()?,"strict_reopen_verified":true}));
         previous = expected.rows;
     }
@@ -442,7 +443,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         .any(|r| r["signed_delta_rows"].as_u64().unwrap_or(0) > 0);
     Ok(
         json!({"status":if !nonempty {"verified_empty_only"} else if !changed {"verified_unchanged_output"} else {"pass"},
-        "reason":null,"registered_tables":complete.keys().collect::<Vec<_>>(),"initial_rows":initial_rows,
+        "reason":null,"plan_qualification":qualification,"registered_tables":complete.keys().collect::<Vec<_>>(),"initial_rows":initial_rows,
         "bootstrap_oracle_schema":initial.schema,"bootstrap_source_vector":initial_vector,
         "bootstrap_source_vector_sha256":initial_checkpoint.vector.digest()?,"last_verified_rows":previous.num_rows(),
         "final_rows":previous.num_rows(),"completed_rounds":3,"nonempty_result_seen":nonempty,"output_delta_seen":changed,

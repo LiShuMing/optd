@@ -92,7 +92,7 @@ def source_environment(expected_backend, iceberg_root, output):
 
 
 def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=180, *,
-              expected_backend=ARROW_BACKEND, iceberg_root=None):
+              expected_backend=ARROW_BACKEND, iceberg_root=None, query_mode="original"):
     """Execute selected queries and return the recorded suite progress object."""
     queries = selected_queries(query_ids)
     if not math.isfinite(timeout_seconds) or not 0.01 <= timeout_seconds <= 3600:
@@ -111,6 +111,13 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
     if output.exists():
         raise ValueError("suite output already exists; choose a new /tmp directory")
     environment, source_identity = source_environment(expected_backend, iceberg_root, output)
+    if query_mode not in ("original", "relational_core"):
+        raise ValueError("unknown query mode")
+    inherited_mode = environment.get("OPTD_SQL_BENCH_QUERY_MODE")
+    if inherited_mode is not None and inherited_mode != query_mode:
+        raise ValueError("inherited query mode conflicts with explicit selection")
+    environment["OPTD_SQL_BENCH_QUERY_MODE"] = query_mode
+    source_identity["query_mode"] = query_mode
     source = Path(__file__).resolve().parents[1] / "tpcds/manifest.json"
     checked_source(source)
     output.mkdir(parents=True)
@@ -198,7 +205,7 @@ def run_suite(binary, expected_sha256, output, query_ids=None, timeout_seconds=1
         progress["error"] = "benchmark binary final SHA-256/identity mismatch"
     if specifications:
         try:
-            aggregate = summarize(specifications, Path(__file__).resolve().parents[3], expected_backend)
+            aggregate = summarize(specifications, Path(__file__).resolve().parents[3], expected_backend, query_mode)
             aggregate["observed_executable_sha256"] = expected_sha256
             aggregate["executable_evidence"] = str(progress_path)
             aggregate_path = output / "aggregate.json"
@@ -230,10 +237,11 @@ def main():
     parser.add_argument("--timeout-seconds", type=float, default=180)
     parser.add_argument("--expected-backend", choices=BACKENDS, default=ARROW_BACKEND)
     parser.add_argument("--iceberg-root", type=Path)
+    parser.add_argument("--query-mode", choices=("original", "relational_core"), default="original")
     args = parser.parse_args()
     try:
         progress = run_suite(args.binary, args.expected_sha256, args.output, args.query, args.timeout_seconds,
-                             expected_backend=args.expected_backend, iceberg_root=args.iceberg_root)
+                             expected_backend=args.expected_backend, iceberg_root=args.iceberg_root, query_mode=args.query_mode)
     except (ValueError, OSError) as error:
         parser.exit(2, f"witness suite: {error}\n")
     print(json.dumps({"output": str(args.output.resolve()), "status": progress["status"],
