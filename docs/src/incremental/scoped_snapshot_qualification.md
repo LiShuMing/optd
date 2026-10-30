@@ -159,3 +159,40 @@ Global operations, unsupported key equality and unqualified windows reject in
 strict mode and remain explicitly classified in compatibility mode. TPC query
 success in compatibility mode is not full strict-incremental TPC coverage or a
 performance result.
+
+## Plan-structure test extension — 2026-10-30
+
+Test-only extension of the accepted design's plan-verification criteria: 11
+integration tests in `tests/incremental_plans.rs` and three direct verifier tests
+in `src/planner/tests.rs`. No production algorithm, dependency, expected result
+or golden file changes. Assertions inspect typed maintenance expressions, rule
+identity, scope, local ports, graph reachability, sharing, serialization and
+explanation, rather than infer a plan from query-result equality.
+
+Coverage includes the inner-join cross-term formula; all seven outer/semi/anti
+variants with ordinary, composite, NULL-safe and residual keys (28 SQL cases);
+rank/frame partition windows; separate nodes for different window partitions;
+DISTINCT/grouped HAVING; repeated UNION ports; shared versus independently
+projected self-join scans; missing scoped rules; explicit compatibility
+recomputation and strict/custom policy errors at the exact rejected node. Direct
+logical-operator tests cover mismatched/unsupported join key types, output/input
+schema confusion, ordered bypass and mixed/empty partition lists without SQL
+optimization hiding those boundaries.
+
+The initial self-join test expected one scan despite unequal pushed projections.
+The observed plan correctly retained two different scans. The final test checks
+both equal projections (shared scan) and unequal projections (separate scans),
+including each port's source ancestry. Initial failure is retained in
+`/tmp/optd-plan-tests-first-20261030.log`; no production code was changed to
+satisfy that incorrect assumption.
+
+Verification: `bash /tmp/optd-sql-env-20261029.sh scripts/agent-check.sh sql`
+returned exit 0; default tests 120 passed / 1 ignored, feature tests 134 passed /
+2 ignored, workspace formatting and both all-target warnings-denied lint
+configurations passed. Log: `/tmp/optd-plan-tests-sql-20261030.log`.
+The same Rust 1.95/offline/locked environment and reused target were used.
+Final documentation is built from isolated inputs at
+`/tmp/optd-scoped-book-source-20261030`, with output at
+`/tmp/optd-plan-tests-book-20261030`. No new fresh-target, workspace-wide or
+TPC benchmark rerun is claimed for this test-only extension; the earlier
+implementation evidence above retains its original scope and executable.
