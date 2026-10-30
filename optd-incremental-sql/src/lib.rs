@@ -7,6 +7,7 @@
 mod bag;
 mod engine;
 mod group_state;
+mod keyed_state;
 pub mod planner;
 pub mod source_vector;
 pub mod store;
@@ -18,7 +19,8 @@ pub mod iceberg;
 
 pub use bag::MAX_MATERIALIZED_ROWS;
 pub use engine::{
-    DurableSqlView, GroupWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, TableChange,
+    DurableSqlView, GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView,
+    TableChange,
 };
 pub use planner::Strategy;
 

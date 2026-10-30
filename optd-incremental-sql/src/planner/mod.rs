@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::{Error, Result};
 
-pub use expr::{DeltaExpr, Maintenance, SnapshotVersion, MAX_EXPR_DEPTH, MAX_EXPR_NODES};
+pub use expr::{DeltaExpr, KeyScope, Maintenance, SnapshotVersion, MAX_EXPR_DEPTH, MAX_EXPR_NODES};
 
 /// How an operator produces its output change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -25,6 +25,8 @@ pub enum Strategy {
     NativeDelta,
     /// Re-evaluate only groups whose indexed input multiset changed.
     ChangedGroupRecompute,
+    /// Evaluate only indexed affected keys/partitions, subtracting their snapshots.
+    KeyedRecompute,
     /// Re-evaluate this operator over maintained child relations, then diff.
     OperatorRecompute,
 }
@@ -79,6 +81,11 @@ impl<'a> RuleContext<'a> {
     /// Whether the fixed SQL context has qualified this aggregate's group index.
     pub fn group_eligible(&self) -> bool {
         self.group_eligible
+    }
+
+    /// Whether this operator has a proven, typed dependency closure for a scope.
+    pub fn supports_key_scope(&self, scope: KeyScope) -> Result<bool> {
+        Ok(!self.ordered && crate::keyed_state::key_expressions(self.plan, scope)?.is_some())
     }
 }
 
@@ -150,11 +157,13 @@ impl RegisteredRule {
 #[derive(Clone)]
 pub struct IncrementalOptimizer {
     rules: Vec<RegisteredRule>,
+    require_incremental: bool,
 }
 
 impl std::fmt::Debug for IncrementalOptimizer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IncrementalOptimizer")
+            .field("require_incremental", &self.require_incremental)
             .field(
                 "rules",
                 &self
@@ -170,6 +179,7 @@ impl std::fmt::Debug for IncrementalOptimizer {
 impl Default for IncrementalOptimizer {
     fn default() -> Self {
         let mut optimizer = Self {
+            require_incremental: false,
             rules: rules::builtins()
                 .into_iter()
                 .map(RegisteredRule::new)
@@ -183,7 +193,17 @@ impl Default for IncrementalOptimizer {
 impl IncrementalOptimizer {
     /// Start without any implementation, so unmatched nodes are explicit errors.
     pub fn empty() -> Self {
-        Self { rules: vec![] }
+        Self {
+            rules: vec![],
+            require_incremental: false,
+        }
+    }
+
+    /// Reject complete-operator recomputation before bootstrap.
+    /// This does not certify delta-sized source IO, caches or checkpoint writes.
+    pub fn require_incremental(mut self) -> Self {
+        self.require_incremental = true;
+        self
     }
 
     /// Return a registry containing this additional uniquely named transformer.
@@ -244,6 +264,18 @@ impl IncrementalOptimizer {
             expr::verify(context, &replacement.maintenance).map_err(|source| {
                 rewrite_error(context.node_id, &rule.identity, "verify", source)
             })?;
+            if self.require_incremental && matches!(replacement.maintenance, Maintenance::Recompute)
+            {
+                return Err(rewrite_error(
+                    context.node_id,
+                    &rule.identity,
+                    "policy",
+                    Error::Invalid(
+                        "strict incremental planning forbids complete-operator recomputation"
+                            .into(),
+                    ),
+                ));
+            }
             return Ok(MaintenanceNode {
                 id: context.node_id,
                 inputs: context.inputs.to_vec(),

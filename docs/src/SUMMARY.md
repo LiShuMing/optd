@@ -61,6 +61,8 @@
   - [Rule-based Incremental Plan Rewriting](./incremental/rule_rewrite.md)
   - [Use and Extend Incremental Rewrite Rules](./incremental/rule_rewrite_usage.md)
   - [Rule Rewrite Qualification](./incremental/rule_rewrite_qualification.md)
+  - [Key-scoped Snapshot/Delta Rules](./incremental/scoped_snapshots.md)
+  - [Scoped Snapshot Qualification](./incremental/scoped_snapshot_qualification.md)
   - [Run the Typed SQL Loop](./incremental/sql_cli.md)
   - [Changed-group Aggregate Maintenance](./incremental/group_maintenance.md)
   - [Test Process Creation and Local File Locks](./incremental/test_process_isolation.md)

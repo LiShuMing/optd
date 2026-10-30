@@ -234,7 +234,7 @@ fn check_pair(input: &RecordBatch, keys: &RecordBatch) -> Result<()> {
     Ok(())
 }
 
-fn encode_keys(keys: &RecordBatch) -> Result<Vec<GroupKey>> {
+pub(crate) fn encode_keys(keys: &RecordBatch) -> Result<Vec<GroupKey>> {
     let converter = RowConverter::new(
         keys.schema()
             .fields()
@@ -248,7 +248,10 @@ fn encode_keys(keys: &RecordBatch) -> Result<Vec<GroupKey>> {
         .collect())
 }
 
-fn partition(input: &RecordBatch, keys: &RecordBatch) -> Result<BTreeMap<GroupKey, Bag>> {
+pub(crate) fn partition(
+    input: &RecordBatch,
+    keys: &RecordBatch,
+) -> Result<BTreeMap<GroupKey, Bag>> {
     let mut indices: BTreeMap<GroupKey, Vec<u32>> = BTreeMap::new();
     for (index, key) in encode_keys(keys)?.into_iter().enumerate() {
         indices

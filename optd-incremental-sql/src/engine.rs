@@ -10,11 +10,11 @@ use std::sync::Arc;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DFSchemaRef};
 use datafusion::datasource::{provider_as_source, MemTable};
 use datafusion::logical_expr::{
-    Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan, Volatility,
+    Distinct, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan, Volatility,
 };
 use datafusion::physical_plan::collect;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
@@ -23,9 +23,10 @@ use serde::Serialize;
 
 use crate::bag::Bag;
 use crate::group_state::{supported_key, GroupState, KeyPolicy};
+use crate::keyed_state::{key_expressions, KeyedState};
 use crate::planner::{
-    DeltaExpr, IncrementalOptimizer, IncrementalPlan, Maintenance, RuleContext, RuleIdentity,
-    SnapshotVersion, Strategy,
+    DeltaExpr, IncrementalOptimizer, IncrementalPlan, KeyScope, Maintenance, RuleContext,
+    RuleIdentity, SnapshotVersion, Strategy,
 };
 use crate::store::{CheckpointStore, PublishPoint, Snapshot};
 use crate::{Error, Result};
@@ -59,6 +60,9 @@ pub struct NodeStats {
     /// Indexed aggregate work, present only for changed-group maintenance.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_work: Option<GroupWork>,
+    /// Actual affected-bucket snapshot work, excluding full cache/source I/O.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyed_work: Option<KeyedWork>,
 }
 
 /// Actual input work at an indexed aggregate, independent of elapsed time.
@@ -76,6 +80,34 @@ pub struct GroupWork {
     pub aggregate_input_rows: usize,
     /// Rows produced by recomputing affected groups.
     pub aggregate_output_rows: usize,
+}
+
+/// Observed operator-local indexed work; not an end-to-end complexity claim.
+#[derive(Clone, Debug, Serialize)]
+pub struct KeyedWork {
+    /// Closure declared by the selected expression.
+    pub scope: KeyScope,
+    /// Installed input bucket counts before this refresh, one per port.
+    pub total_keys_before: Vec<usize>,
+    /// Candidate input bucket counts, one per port.
+    pub total_keys_after: Vec<usize>,
+    /// Union of changed keys across the input ports.
+    pub touched_keys: usize,
+    /// Expanded insertions and retractions received from children.
+    pub changed_input_rows: usize,
+    /// Rows supplied per port to a before operator evaluation.
+    pub snapshot_input_rows_before: Vec<usize>,
+    /// Rows supplied per port to an after operator evaluation.
+    pub snapshot_input_rows_after: Vec<usize>,
+    /// Actual before operator calls; windows use cached output instead.
+    pub snapshot_evaluations_before: usize,
+    /// Actual after operator calls.
+    pub snapshot_evaluations_after: usize,
+    /// Committed window output rows read for the before snapshot.
+    pub cached_before_output_rows: usize,
+    /// Complete child scans used to find affected buckets (zero on this path).
+    /// All buckets may still be affected; source and result I/O are excluded.
+    pub full_input_scans: usize,
 }
 
 /// Actual dirty nodes and source epoch for a prepared refresh.
@@ -120,6 +152,49 @@ struct DeltaBindings<'a> {
     deltas: &'a [Bag],
     after: &'a [Relation],
     source: Option<&'a Bag>,
+    scoped: Option<&'a ScopedSnapshots>,
+}
+
+struct ScopedSnapshots {
+    before: Option<Bag>,
+    after: Option<Bag>,
+}
+
+// DISTINCT is set membership, represented by the existing indexed group state.
+fn normalize_distinct(plan: LogicalPlan) -> Result<LogicalPlan> {
+    Ok(plan
+        .transform_up(|plan| {
+            if let LogicalPlan::Distinct(Distinct::All(input)) = &plan {
+                if !input.schema().fields().is_empty() {
+                    let mut grouped = LogicalPlanBuilder::from(input.as_ref().clone())
+                        .aggregate(
+                            input
+                                .schema()
+                                .columns()
+                                .into_iter()
+                                .map(Expr::Column)
+                                .collect::<Vec<_>>(),
+                            Vec::<Expr>::new(),
+                        )?
+                        .build()?;
+                    if grouped.schema().as_arrow() != plan.schema().as_arrow()
+                        || grouped.schema().iter().ne(plan.schema().iter())
+                    {
+                        return Err(datafusion::common::DataFusionError::Plan(
+                            "DISTINCT normalization changed fields or qualifiers".into(),
+                        ));
+                    }
+                    // Grouping strengthens uniqueness dependencies. Retaining the original
+                    // weaker dependencies preserves the exact parent schema contract.
+                    if let LogicalPlan::Aggregate(aggregate) = &mut grouped {
+                        aggregate.schema = plan.schema().clone();
+                    }
+                    return Ok(Transformed::yes(grouped));
+                }
+            }
+            Ok(Transformed::no(plan))
+        })?
+        .data)
 }
 
 /// Immutable candidate; only acknowledgement changes the owning view.
@@ -129,6 +204,7 @@ pub struct PreparedSqlRefresh {
     tables: BTreeMap<String, Bag>,
     states: Vec<Relation>,
     groups: Vec<Option<GroupState>>,
+    keyed: Vec<Option<KeyedState>>,
     delta: Bag,
     stats: RefreshStats,
 }
@@ -160,6 +236,7 @@ pub struct SqlView {
     incremental_plan: IncrementalPlan,
     states: Vec<Relation>,
     groups: Vec<Option<GroupState>>,
+    keyed: Vec<Option<KeyedState>>,
     tables: BTreeMap<String, Bag>,
     ctx: SessionContext,
 }
@@ -370,7 +447,7 @@ impl SqlView {
             }
             Ok(TreeNodeRecursion::Continue)
         })?;
-        let plan = ctx.state().optimize(&analyzed)?;
+        let plan = normalize_distinct(ctx.state().optimize(&analyzed)?)?;
         let mut nodes = Vec::new();
         let root = add_node(&plan, &mut nodes, &mut HashMap::new())?;
         if root + 1 != nodes.len() {
@@ -401,6 +478,7 @@ impl SqlView {
             nodes,
             incremental_plan,
             states: vec![],
+            keyed: vec![None; group_slots.len()],
             groups: group_slots,
             tables: source,
             ctx,
@@ -437,6 +515,30 @@ impl SqlView {
                     )),
                 })?;
                 out.groups[id] = Some(index);
+            }
+            if let Some(scope) = out.incremental_plan.nodes()[id].maintenance.key_scope() {
+                let keys = key_expressions(&out.nodes[id].plan, scope)?
+                    .ok_or_else(|| Error::Invalid("missing qualified scope keys".into()))?;
+                let mut inputs = vec![];
+                let mut projected = vec![];
+                for (port, expressions) in keys.iter().enumerate() {
+                    let child = out.nodes[id].inputs[port];
+                    let batch = out.states[child].batch.clone();
+                    projected.push(out.project_keys(child, batch.clone(), expressions).await?);
+                    inputs.push(batch);
+                }
+                let output_keys = if scope == KeyScope::WindowPartitions {
+                    Some(
+                        out.project_keys(id, out.states[id].batch.clone(), &keys[0])
+                            .await?,
+                    )
+                } else {
+                    None
+                };
+                let output = output_keys
+                    .as_ref()
+                    .map(|keys| (&out.states[id].batch, keys));
+                out.keyed[id] = Some(KeyedState::new(&inputs, &projected, output)?);
             }
         }
         Ok(out)
@@ -480,6 +582,7 @@ impl SqlView {
                 rule: self.incremental_plan.nodes()[id].rule.clone(),
                 delta_rows: 0,
                 group_work: None,
+                keyed_work: None,
             })
             .collect()
     }
@@ -661,6 +764,140 @@ impl SqlView {
             })
     }
 
+    async fn project_keys(
+        &self,
+        id: usize,
+        batch: RecordBatch,
+        expressions: &[Expr],
+    ) -> Result<RecordBatch> {
+        let scan = cache_scan(self.nodes[id].plan.schema(), batch, id)?;
+        // Aliases avoid duplicate expression names for repeated/composite keys.
+        let projection = expressions
+            .iter()
+            .enumerate()
+            .map(|(i, e)| e.clone().alias(format!("__key_{i}")))
+            .collect::<Vec<_>>();
+        self.execute(
+            LogicalPlanBuilder::from(scan)
+                .project(projection)?
+                .build()?,
+        )
+        .await
+    }
+
+    async fn eval_scoped_delta(
+        &self,
+        id: usize,
+        expr: &DeltaExpr,
+        deltas: &[Bag],
+        states: &[Relation],
+    ) -> Result<(Bag, KeyedState, KeyedWork)> {
+        let node = &self.nodes[id];
+        let scope = expr
+            .key_scope()
+            .ok_or_else(|| Error::Invalid("missing scope declaration".into()))?;
+        let keys = key_expressions(&node.plan, scope)?
+            .ok_or_else(|| Error::Invalid("missing qualified keys".into()))?;
+        let index = self.keyed[id]
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("missing compiled key index".into()))?;
+        let mut positives = vec![];
+        let mut negatives = vec![];
+        let mut positive_keys = vec![];
+        let mut negative_keys = vec![];
+        let mut changed_input_rows = 0usize;
+        for (port, child) in node.inputs.iter().enumerate() {
+            let (pos, neg) = deltas[*child].signed_parts()?;
+            changed_input_rows = changed_input_rows
+                .checked_add(pos.num_rows())
+                .and_then(|n| n.checked_add(neg.num_rows()))
+                .ok_or(Error::Overflow)?;
+            positive_keys.push(self.project_keys(*child, pos.clone(), &keys[port]).await?);
+            negative_keys.push(self.project_keys(*child, neg.clone(), &keys[port]).await?);
+            positives.push(pos);
+            negatives.push(neg);
+        }
+        let need_before = expr.reads_scoped(SnapshotVersion::Before);
+        let need_after = expr.reads_scoped(SnapshotVersion::After);
+        let mut update = index.prepare(
+            &positives,
+            &positive_keys,
+            &negatives,
+            &negative_keys,
+            need_before,
+            need_after,
+        )?;
+        let mut work = KeyedWork {
+            scope,
+            total_keys_before: index.totals(),
+            total_keys_after: update.state.totals(),
+            touched_keys: update.touched(),
+            changed_input_rows,
+            snapshot_input_rows_before: vec![0; node.inputs.len()],
+            snapshot_input_rows_after: vec![0; node.inputs.len()],
+            snapshot_evaluations_before: 0,
+            snapshot_evaluations_after: 0,
+            cached_before_output_rows: 0,
+            full_input_scans: 0,
+        };
+        let mut snapshots = ScopedSnapshots {
+            before: None,
+            after: None,
+        };
+        for version in [SnapshotVersion::Before, SnapshotVersion::After] {
+            if !expr.reads_scoped(version) {
+                continue;
+            }
+            let value = if update.touched() == 0 {
+                Bag::empty(self.states[id].bag.schema())
+            } else if version == SnapshotVersion::Before && scope == KeyScope::WindowPartitions {
+                let cached = update
+                    .cached_before()
+                    .ok_or_else(|| Error::Invalid("missing committed window output".into()))?;
+                work.cached_before_output_rows = cached.num_rows();
+                Bag::from_batch(cached)?
+            } else {
+                let inputs = update.inputs(version);
+                let rows = inputs.iter().map(RecordBatch::num_rows).collect();
+                match version {
+                    SnapshotVersion::Before => {
+                        work.snapshot_input_rows_before = rows;
+                        work.snapshot_evaluations_before += 1;
+                    }
+                    SnapshotVersion::After => {
+                        work.snapshot_input_rows_after = rows;
+                        work.snapshot_evaluations_after += 1;
+                    }
+                }
+                Bag::from_batch(&self.eval_inputs(id, inputs.to_vec()).await?)?
+            };
+            match version {
+                SnapshotVersion::Before => snapshots.before = Some(value),
+                SnapshotVersion::After => snapshots.after = Some(value),
+            }
+        }
+        let delta = self
+            .eval_delta_expr(
+                id,
+                expr,
+                DeltaBindings {
+                    deltas,
+                    after: states,
+                    source: None,
+                    scoped: Some(&snapshots),
+                },
+                self.states[id].bag.schema(),
+            )
+            .await?;
+        if scope == KeyScope::WindowPartitions {
+            let (pos, neg) = delta.signed_parts()?;
+            let pos_keys = self.project_keys(id, pos.clone(), &keys[0]).await?;
+            let neg_keys = self.project_keys(id, neg.clone(), &keys[0]).await?;
+            update.apply_window_delta(&pos, &pos_keys, &neg, &neg_keys)?;
+        }
+        Ok((delta, update.state, work))
+    }
+
     // Expressions are verified and frozen before bootstrap. Boxing only the
     // bounded expression recursion avoids adding another async dependency.
     fn eval_delta_expr<'a>(
@@ -673,6 +910,19 @@ impl SqlView {
         Box::pin(async move {
             let node = &self.nodes[id];
             match expr {
+                DeltaExpr::ScopedSnapshot { version, .. } => {
+                    let snapshots = bindings
+                        .scoped
+                        .ok_or_else(|| Error::Invalid("missing scoped snapshot binding".into()))?;
+                    match version {
+                        SnapshotVersion::Before => &snapshots.before,
+                        SnapshotVersion::After => &snapshots.after,
+                    }
+                    .clone()
+                    .ok_or_else(|| {
+                        Error::Invalid("missing requested scoped snapshot version".into())
+                    })
+                }
                 DeltaExpr::InputDelta(port) => Ok(bindings.deltas[node.inputs[*port]].clone()),
                 DeltaExpr::InputSnapshot { input, version } => {
                     let states = match version {
@@ -805,6 +1055,7 @@ impl SqlView {
         }
         let mut states = self.states.clone();
         let mut groups = self.groups.clone();
+        let mut keyed = self.keyed.clone();
         let mut deltas: Vec<Bag> = Vec::with_capacity(self.nodes.len());
         // A sorted relation can reorder without changing its bag (for example,
         // projecting away a modified sort key). LIMIT must still be refreshed.
@@ -817,6 +1068,7 @@ impl SqlView {
             let compiled = &self.incremental_plan.nodes()[id];
             let selected_strategy = compiled.maintenance.strategy();
             let mut group_work = None;
+            let mut keyed_work = None;
             let schema = self.states[id].bag.schema();
             // Scans own a raw-source dependency even though they have no graph
             // children. This binding is independent of the selected rule.
@@ -840,6 +1092,13 @@ impl SqlView {
                 (Bag::empty(schema), None)
             } else {
                 match &compiled.maintenance {
+                    Maintenance::Delta(expr) if compiled.maintenance.key_scope().is_some() => {
+                        let (delta, index, work) =
+                            self.eval_scoped_delta(id, expr, &deltas, &states).await?;
+                        keyed[id] = Some(index);
+                        keyed_work = Some(work);
+                        (delta, None)
+                    }
                     Maintenance::Delta(expr) => {
                         let delta = self
                             .eval_delta_expr(
@@ -849,6 +1108,7 @@ impl SqlView {
                                     deltas: &deltas,
                                     after: &states,
                                     source: source_delta.as_ref(),
+                                    scoped: None,
                                 },
                                 schema,
                             )
@@ -909,6 +1169,7 @@ impl SqlView {
                     rule: compiled.rule.clone(),
                     delta_rows: delta.len(),
                     group_work,
+                    keyed_work,
                 });
             }
             sequence_changed.push(node.ordered && states[id].batch != self.states[id].batch);
@@ -923,6 +1184,7 @@ impl SqlView {
             tables,
             states,
             groups,
+            keyed,
             delta,
             stats,
         })
@@ -937,6 +1199,7 @@ impl SqlView {
         self.tables = candidate.tables;
         self.states = candidate.states;
         self.groups = candidate.groups;
+        self.keyed = candidate.keyed;
         Ok(())
     }
 }
@@ -1050,5 +1313,41 @@ impl DurableSqlView {
         let stats = candidate.stats.clone();
         self.view.acknowledge(candidate)?;
         Ok(stats)
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+    use datafusion::logical_expr::{col, Distinct, EmptyRelation};
+
+    #[test]
+    fn remaining_distinct_normalizes_with_exact_qualifiers_and_zero_columns_stay_distinct(
+    ) -> Result<()> {
+        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new("k", DataType::Int64, true),
+        ]));
+        let scan = cache_scan(
+            &Arc::new(datafusion::common::DFSchema::try_from_qualified_schema(
+                "t", &schema,
+            )?),
+            RecordBatch::new_empty(schema),
+            0,
+        )?;
+        let input = LogicalPlanBuilder::from(scan)
+            .project(vec![col("t.k")])?
+            .build()?;
+        let distinct = LogicalPlan::Distinct(Distinct::All(Arc::new(input)));
+        let normalized = normalize_distinct(distinct.clone())?;
+        assert!(matches!(normalized, LogicalPlan::Aggregate(_)));
+        assert_eq!(normalized.schema(), distinct.schema());
+        let zero = LogicalPlan::Distinct(Distinct::All(Arc::new(LogicalPlan::EmptyRelation(
+            EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(datafusion::common::DFSchema::empty()),
+            },
+        ))));
+        assert_eq!(normalize_distinct(zero.clone())?, zero);
+        Ok(())
     }
 }

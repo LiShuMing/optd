@@ -56,7 +56,9 @@ The default optimizer includes explicit rule families for:
 * ordinary scans applying signed source changes through pushed scan expressions;
 * linear operators, such as projection, filter, alias and union;
 * inner joins using both input changes and the appropriate before/after states;
-* qualified grouped aggregation using changed-group maintenance;
+* qualified grouped aggregation, including normalized DISTINCT, using changed-group maintenance;
+* qualified outer/semi/anti equijoins using indexed affected-key snapshots;
+* qualified partitioned windows using indexed affected partitions and committed output;
 * fetch scans, ordered chains and supported nonlinear operators using explicit
   local recomputation.
 
@@ -208,3 +210,59 @@ changes on both join sides, deletions, duplicates, NULL values, self joins and
 reopen followed by another refresh where applicable. Explain output establishes
 which expression was selected; independent comparison establishes the tested
 semantics. Performance requires a separately controlled measurement.
+
+## Key-scoped snapshots and strict planning
+
+The [scoped-snapshot design](scoped_snapshots.md) adds
+`DeltaExpr::ScopedSnapshot { scope, version }`. Unlike `InputSnapshot`, this
+returns the **original operator output** over complete affected input buckets.
+The selected expression declares its derived index through
+`KeyScope::JoinKeys` or `KeyScope::WindowPartitions`. Built-in rules emit:
+
+```text
+Sum([
+  ScopedSnapshot(scope, After),
+  Negate(ScopedSnapshot(scope, Before))
+])
+```
+
+Join scope unions the changed keys from both sides, including removed and new
+keys. Window scope requires a common nonempty PARTITION BY; Before reads the
+actual committed partition output, preserving retraction identity for ties.
+After executes the original function, ordering and frame on complete affected
+partitions. Each requested version is evaluated at most once and shared by
+repeated references. Unsupported key equality, non-equijoins and global windows
+retain explicit complete-node recomputation in compatibility mode.
+
+Use the strict registry when a plan must reject that compatibility path:
+
+```rust
+use std::collections::BTreeMap;
+use datafusion::arrow::record_batch::RecordBatch;
+use optd_incremental_sql::{Result, SqlView};
+use optd_incremental_sql::planner::IncrementalOptimizer;
+
+async fn create_strict(sql: &str, tables: BTreeMap<String, RecordBatch>) -> Result<SqlView> {
+    SqlView::new_with_optimizer(
+        sql,
+        tables,
+        IncrementalOptimizer::default().require_incremental(),
+    ).await
+}
+```
+
+Strict mode rejects any selected `Maintenance::Recompute` before bootstrap. It
+accepts `ChangedGroups` and scoped snapshot differences; it does not promise
+constant work per changed row. A changed window partition or join key can be
+large. Global sorting, limit/fetch and unqualified aggregation may reject an
+otherwise partly incremental query, so inspect the complete compiled plan.
+
+`NodeStats.keyed_work` reports installed buckets, affected keys, changed input
+rows, rows actually supplied to before/after operator calls, evaluation counts,
+and cached window output rows. `full_input_scans == 0` describes indexed bucket
+selection only. The implementation still copies index maps, maintains complete
+operator result caches, acquires source endpoints and writes complete checkpoints.
+Default inner joins still use the existing whole-side input snapshots; the new
+scope primitive is also available to custom inner-join rules. No end-to-end
+O(delta), production performance or complete strict TPC coverage is claimed.
+See [observed qualification](scoped_snapshot_qualification.md).

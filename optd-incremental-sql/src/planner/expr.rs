@@ -21,6 +21,15 @@ pub enum SnapshotVersion {
     After,
 }
 
+/// Dependency closure used to select complete indexed input buckets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum KeyScope {
+    /// Union of equijoin keys changed on either original input.
+    JoinKeys,
+    /// Common nonempty PARTITION BY keys changed on the window input.
+    WindowPartitions,
+}
+
 /// Executable signed relations with references bound to this operator's ports.
 ///
 /// `Linear` and `Join` retain the original logical operator's expressions. Their
@@ -29,6 +38,14 @@ pub enum SnapshotVersion {
 /// from the typed position where it occurs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum DeltaExpr {
+    /// Original operator output over complete affected buckets at one version.
+    /// Window Before uses cached committed output rather than reevaluating ties.
+    ScopedSnapshot {
+        /// Verified key/partition closure and its derived index requirement.
+        scope: KeyScope,
+        /// Committed or candidate output restricted to that same closure.
+        version: SnapshotVersion,
+    },
     /// Signed output changes from an original graph-input port.
     InputDelta(usize),
     /// Complete positive relation at an original graph-input port.
@@ -72,12 +89,51 @@ pub enum Maintenance {
 }
 
 impl Maintenance {
+    /// Derived state required by this executable program, if any.
+    pub fn key_scope(&self) -> Option<KeyScope> {
+        match self {
+            Self::Delta(expr) => expr.key_scope(),
+            _ => None,
+        }
+    }
+
     /// Derive the public strategy from the executable program, never independently.
     pub fn strategy(&self) -> Strategy {
         match self {
+            Self::Delta(_) if self.key_scope().is_some() => Strategy::KeyedRecompute,
             Self::Delta(_) | Self::Constant => Strategy::NativeDelta,
             Self::ChangedGroups => Strategy::ChangedGroupRecompute,
             Self::Recompute => Strategy::OperatorRecompute,
+        }
+    }
+}
+
+impl DeltaExpr {
+    pub(crate) fn key_scope(&self) -> Option<KeyScope> {
+        let mut pending = vec![self];
+        for _ in 0..MAX_EXPR_NODES {
+            let expression = pending.pop()?;
+            match expression {
+                Self::ScopedSnapshot { scope, .. } => return Some(*scope),
+                Self::Sum(xs) | Self::Linear(xs) => pending.extend(xs.iter().rev()),
+                Self::Negate(x) => pending.push(x),
+                Self::Join { left, right } => {
+                    pending.push(right);
+                    pending.push(left);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub(crate) fn reads_scoped(&self, version: SnapshotVersion) -> bool {
+        match self {
+            Self::ScopedSnapshot { version: v, .. } => *v == version,
+            Self::Sum(xs) | Self::Linear(xs) => xs.iter().any(|x| x.reads_scoped(version)),
+            Self::Negate(x) => x.reads_scoped(version),
+            Self::Join { left, right } => left.reads_scoped(version) || right.reads_scoped(version),
+            _ => false,
         }
     }
 }
@@ -145,6 +201,7 @@ pub(super) fn verify(context: &RuleContext<'_>, maintenance: &Maintenance) -> Re
         Maintenance::Delta(expression) => {
             if !linear_operator(context.logical_plan())
                 && !matches!(context.logical_plan(), LogicalPlan::Join(join) if join.join_type == JoinType::Inner)
+                && expression.key_scope().is_none()
             {
                 return Err(Error::Invalid(
                     "this operator has no legal signed-expression primitives".into(),
@@ -206,6 +263,16 @@ fn verify_expr(
         )));
     }
     match expression {
+        DeltaExpr::ScopedSnapshot { scope, .. } => {
+            if !context.supports_key_scope(*scope)? {
+                return Err(Error::Invalid("unqualified scoped snapshot".into()));
+            }
+            verify_schema(
+                context.logical_plan().schema().as_arrow(),
+                expected,
+                "scoped output",
+            )
+        }
         DeltaExpr::InputDelta(input) | DeltaExpr::InputSnapshot { input, .. } => {
             let plans = context.logical_plan().inputs();
             let plan = plans

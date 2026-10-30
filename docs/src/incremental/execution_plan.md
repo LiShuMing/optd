@@ -439,3 +439,31 @@ publication. Next work requiring its own design/evidence includes
 cost-based rule alternatives, persistent aggregate/join state and controlled
 scale/performance measurements; rule extensibility alone establishes none of
 those outcomes.
+
+
+## 2026-10-30 — key-scoped snapshot rules
+
+The [accepted scoped-snapshot design](./scoped_snapshots.md) adds affected-key
+outer/semi/anti join maintenance, partitioned windows, DISTINCT-to-grouping
+normalization and strict refusal of full-node recomputation. Nineteen built-in
+rules now drive actual execution; `KeyedRecompute` has input-row, key-count and
+evaluation counters. Window Before reads committed output, retaining exact
+retractions for peer-sensitive functions. See the [qualification record](./scoped_snapshot_qualification.md)
+for observed checks and remaining boundaries; the earlier 17-rule/query results remain
+historical evidence for their recorded executable.
+
+This is operator-local scope qualification. Complete input/result caches, endpoint
+acquisition, checkpoint writes, full-side native inner-join snapshots and native
+aggregate accumulators remain separate work. Strict planning is fail-closed and
+does not mean every TPC query can avoid complete global-operation maintenance.
+
+Observed final local gates: SQL default 106 passed / 1 ignored, Iceberg 120 passed /
+2 ignored; workspace 386 passed / 4 ignored / 1 Postgres-backed test explicitly
+filtered; fresh feature-library check, warnings-denied lint, 28 tool tests and
+three compiled usage examples passed. Final frozen-binary Iceberg runs cover
+TPC-H 22/22 across complete qualifying profiles and TPC-DS 99/99 query-directed
+witnesses, each with three verified rounds. These compatibility-mode results do
+not certify full strict TPC coverage or standard-scale performance. The
+qualification record retains the initial normalization and harness failures,
+artifact hashes and source-scope limits. Publication is local pending resolution
+of the previously rejected `origin/main` destination.

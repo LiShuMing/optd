@@ -1360,3 +1360,86 @@ async fn custom_optimizer_survives_typed_source_refresh_reopen_and_replay() {
     }
     folded_history(&store);
 }
+
+#[tokio::test]
+async fn strict_keyed_join_and_partition_window_refresh_real_endpoints_after_reopen() {
+    use optd_incremental_sql::planner::IncrementalOptimizer;
+    use optd_incremental_sql::Strategy;
+
+    let _activity = PROCESS_ACTIVITY.enter();
+    for query in [
+        "SELECT o.id, l.id AS lid, l.amount FROM orders o FULL JOIN lineitems l ON o.id=l.id",
+        "SELECT id, amount, SUM(amount) OVER (PARTITION BY id) AS total FROM lineitems",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("catalog");
+        let store = temp.path().join("store");
+        let catalog = fixture(&root).await;
+        append(&catalog, "orders", &[row(1, 100), row(2, 200)]).await;
+        append(
+            &catalog,
+            "lineitems",
+            &[row(1, 100), row(1, 100), row(3, 300)],
+        )
+        .await;
+        let mut view = IcebergSqlView::bootstrap_with_optimizer(
+            &store,
+            query,
+            inputs(&root),
+            heads(&root).await,
+            IncrementalOptimizer::default().require_incremental(),
+        )
+        .await
+        .unwrap();
+        assert!(view
+            .view()
+            .strategies()
+            .iter()
+            .any(|n| n.strategy == Strategy::KeyedRecompute));
+        append(&catalog, "lineitems", &[row(2, 250)]).await;
+        let first = heads(&root).await;
+        let IcebergRefresh::Committed { sql_stats, .. } =
+            view.refresh(first.clone()).await.unwrap()
+        else {
+            panic!("first endpoint change must commit");
+        };
+        assert!(sql_stats.nodes.iter().any(|n| n
+            .keyed_work
+            .as_ref()
+            .is_some_and(|w| w.touched_keys == 1 && w.full_input_scans == 0)));
+        equal(
+            &view.view().contents().unwrap(),
+            &oracle(&root, &first, query).await,
+        );
+        drop(view);
+        let mut view = IcebergSqlView::reopen_with_optimizer(
+            &store,
+            query,
+            inputs(&root),
+            IncrementalOptimizer::default().require_incremental(),
+        )
+        .await
+        .unwrap();
+        overwrite(
+            &catalog,
+            "lineitems",
+            &[row(2, 250), row(3, 350), row(3, 350)],
+        )
+        .await;
+        let next = heads(&root).await;
+        let IcebergRefresh::Committed { sql_stats, .. } = view.refresh(next.clone()).await.unwrap()
+        else {
+            panic!("second endpoint change must commit");
+        };
+        assert!(sql_stats.nodes.iter().any(|n| n
+            .keyed_work
+            .as_ref()
+            .is_some_and(|w| w.touched_keys == 2 && w.full_input_scans == 0)));
+        equal(
+            &view.view().contents().unwrap(),
+            &oracle(&root, &next, query).await,
+        );
+        drop(view);
+        folded_history(&store);
+    }
+}

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use datafusion::logical_expr::{JoinType, LogicalPlan};
 
-use super::{DeltaExpr, IncrementalRule, Maintenance, RuleContext, RuleRewrite, SnapshotVersion};
+use super::{
+    DeltaExpr, IncrementalRule, KeyScope, Maintenance, RuleContext, RuleRewrite, SnapshotVersion,
+};
 use crate::Result;
 
 #[derive(Clone, Copy)]
@@ -21,6 +23,8 @@ enum Builtin {
     GroupedAggregate,
     OrderedRecompute,
     AggregateRecompute,
+    KeyedJoin,
+    PartitionedWindow,
     NonInnerJoinRecompute,
     WindowRecompute,
     DistinctRecompute,
@@ -42,6 +46,8 @@ pub(super) fn builtins() -> Vec<Arc<dyn IncrementalRule>> {
         Builtin::GroupedAggregate,
         Builtin::OrderedRecompute,
         Builtin::AggregateRecompute,
+        Builtin::KeyedJoin,
+        Builtin::PartitionedWindow,
         Builtin::NonInnerJoinRecompute,
         Builtin::WindowRecompute,
         Builtin::DistinctRecompute,
@@ -68,6 +74,8 @@ impl IncrementalRule for Builtin {
             Self::GroupedAggregate => "builtin.grouped_aggregate",
             Self::OrderedRecompute => "builtin.ordered_recompute",
             Self::AggregateRecompute => "builtin.aggregate_recompute",
+            Self::KeyedJoin => "builtin.keyed_join",
+            Self::PartitionedWindow => "builtin.partitioned_window",
             Self::NonInnerJoinRecompute => "builtin.non_inner_join_recompute",
             Self::WindowRecompute => "builtin.window_recompute",
             Self::DistinctRecompute => "builtin.distinct_recompute",
@@ -123,10 +131,19 @@ impl IncrementalRule for Builtin {
             Self::AggregateRecompute => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && !context.group_eligible()
             }
+            Self::KeyedJoin => {
+                matches!(plan, LogicalPlan::Join(join) if join.join_type != JoinType::Inner)
+                    && context.supports_key_scope(KeyScope::JoinKeys)?
+            }
+            Self::PartitionedWindow => context.supports_key_scope(KeyScope::WindowPartitions)?,
             Self::NonInnerJoinRecompute => {
                 matches!(plan, LogicalPlan::Join(join) if join.join_type != JoinType::Inner)
+                    && !context.supports_key_scope(KeyScope::JoinKeys)?
             }
-            Self::WindowRecompute => matches!(plan, LogicalPlan::Window(_)),
+            Self::WindowRecompute => {
+                matches!(plan, LogicalPlan::Window(_))
+                    && !context.supports_key_scope(KeyScope::WindowPartitions)?
+            }
             Self::DistinctRecompute => matches!(plan, LogicalPlan::Distinct(_)),
             Self::LimitRecompute => matches!(plan, LogicalPlan::Limit(_)),
             Self::UnnestRecompute => matches!(plan, LogicalPlan::Unnest(_)),
@@ -174,6 +191,13 @@ impl IncrementalRule for Builtin {
                 Maintenance::ChangedGroups,
                 "qualified group keys and aggregate functions permit recomputing only changed groups",
             ),
+            Self::KeyedJoin | Self::PartitionedWindow => {
+                let scope = if matches!(self, Self::KeyedJoin) { KeyScope::JoinKeys } else { KeyScope::WindowPartitions };
+                (Maintenance::Delta(DeltaExpr::Sum(vec![
+                    DeltaExpr::ScopedSnapshot { scope, version: SnapshotVersion::After },
+                    DeltaExpr::Negate(Box::new(DeltaExpr::ScopedSnapshot { scope, version: SnapshotVersion::Before })),
+                ])), "after minus committed before over complete affected key buckets")
+            },
             Self::SourceFetchRecompute => (
                 Maintenance::Recompute,
                 "scan fetch changes membership; evaluate on the complete candidate raw source",

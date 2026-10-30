@@ -500,7 +500,7 @@ async fn outer_semi_and_anti_joins_handle_last_match_retractions() {
             .nodes
             .iter()
             .any(|node| node.operator.to_lowercase().contains("join")
-                && node.strategy == Strategy::OperatorRecompute));
+                && node.strategy == Strategy::KeyedRecompute));
         refresh(
             &mut view,
             &[

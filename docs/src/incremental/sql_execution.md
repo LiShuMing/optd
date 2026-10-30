@@ -88,19 +88,24 @@ to both inputs and self-joins without double counting. Arrow/DataFusion executes
 each local operation against explicitly substituted child relations, not the
 original source tables. Empty deltas do not dirty ancestors.
 
-Nonlinear operators initially replace their cached local output from maintained
-child state and propagate the difference. This supports nested aggregates,
-HAVING, DISTINCT, outer/semi/anti joins, sorting/limit and windows without
-misrepresenting them as native delta algorithms. Each refresh reports node
-strategies and input/output counts: `NativeDelta`, `ChangedGroupRecompute` or
+Nonlinear operators expose the selected maintenance scope. Qualified outer,
+semi and anti equijoins now use indexed snapshots over the union of changed
+join keys. Qualified windows recompute complete affected PARTITION BY groups;
+their Before snapshot reads committed output to preserve exact retractions.
+Remaining DISTINCT ALL is normalized to grouped membership when it has output
+columns. See [key-scoped snapshots](./scoped_snapshots.md).
+
+Refresh reports `NativeDelta`, `ChangedGroupRecompute`, `KeyedRecompute` or
 `OperatorRecompute`. [Changed-group maintenance](./group_maintenance.md) narrows
 ordinary, qualified GROUP BY refreshes to indexed groups whose input changed.
-It reports both changed rows and the surviving group rows actually aggregated;
-it does not claim native accumulator updates. Global aggregates, grouping sets,
-floating keys/arithmetic and unqualified functions retain local recomputation.
-There is no silent `QueryRecompute` fallback. Unsupported plans fail with an
-operator-specific reason. A query whose root needs local recomputation is
-reported as such even when its descendants use native delta propagation.
+It reports changed rows and surviving group rows actually aggregated; native
+accumulator updates are still future work. Unqualified keys/functions, global
+aggregates, grouping sets, global windows and ordering retain explicit complete
+node recomputation in compatibility mode. `IncrementalOptimizer::require_incremental()`
+rejects selected `Maintenance::Recompute` before bootstrap. Unsupported plans
+fail with an operator-specific reason; there is no whole-query fallback.
+Operator-local indexed work excludes complete source/result cache and checkpoint
+costs and does not establish end-to-end delta complexity.
 
 ORDER BY determines LIMIT membership. Each node retains its ordered Arrow
 output in addition to the bag used for differences. Sort and order-preserving

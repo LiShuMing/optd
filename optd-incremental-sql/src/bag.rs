@@ -17,7 +17,7 @@ use crate::{Error, Result};
 /// output, so a corrupt or accidental large weight cannot exhaust host memory.
 pub const MAX_MATERIALIZED_ROWS: usize = 1_000_000;
 /// Conservative scalar-size accounting also bounds wide or variable-width rows.
-const MAX_MATERIALIZED_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_MATERIALIZED_BYTES: usize = 256 * 1024 * 1024;
 
 type Entry<'a> = (&'a Vec<ScalarValue>, i64);
 
