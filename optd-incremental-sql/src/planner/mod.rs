@@ -1,12 +1,17 @@
-//! Deterministic SQL maintenance rules and their verified executable plans.
+//! SQL maintenance rules compiled into verified Optd logical/physical plans.
 //!
 //! Rules construct signed-expression programs rather than assigning diagnostic
 //! strategy labels. Custom rules are trusted algebraic extensions: the verifier
 //! checks their shape and types, while independent SQL comparisons must establish
 //! their semantic identities.
 
+mod capability;
 mod expr;
+pub(crate) mod lower;
+mod optd_rules;
+pub mod plan;
 mod rules;
+mod verify_plan;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -85,7 +90,7 @@ impl<'a> RuleContext<'a> {
 
     /// Whether this operator has a proven, typed dependency closure for a scope.
     pub fn supports_key_scope(&self, scope: KeyScope) -> Result<bool> {
-        Ok(!self.ordered && crate::keyed_state::key_expressions(self.plan, scope)?.is_some())
+        Ok(!self.ordered && capability::key_expressions(self.plan, scope)?.is_some())
     }
 }
 
@@ -158,6 +163,7 @@ impl RegisteredRule {
 pub struct IncrementalOptimizer {
     rules: Vec<RegisteredRule>,
     require_incremental: bool,
+    plan_rules: Vec<Arc<plan::PlanRule>>,
 }
 
 impl std::fmt::Debug for IncrementalOptimizer {
@@ -180,6 +186,7 @@ impl Default for IncrementalOptimizer {
     fn default() -> Self {
         let mut optimizer = Self {
             require_incremental: false,
+            plan_rules: vec![],
             rules: rules::builtins()
                 .into_iter()
                 .map(RegisteredRule::new)
@@ -196,7 +203,23 @@ impl IncrementalOptimizer {
         Self {
             rules: vec![],
             require_incremental: false,
+            plan_rules: vec![],
         }
+    }
+
+    /// Register an Optd logical-plan transformer, applied after snapshot expansion.
+    /// Rules are trusted algebraic extensions; their output is structurally verified.
+    pub fn with_plan_rule(mut self, rule: Arc<plan::PlanRule>) -> Self {
+        self.plan_rules.push(rule);
+        self
+    }
+
+    pub(crate) fn requires_incremental(&self) -> bool {
+        self.require_incremental
+    }
+
+    pub(crate) fn plan_rules(&self) -> &[Arc<plan::PlanRule>] {
+        &self.plan_rules
     }
 
     /// Reject complete-operator recomputation before bootstrap.
@@ -320,7 +343,7 @@ pub struct MaintenanceNode {
     pub ordered: bool,
     /// Transformer whose program actually executes for this node.
     pub rule: RuleIdentity,
-    /// Verified executable replacement.
+    /// Verified compatibility-rule result; execution uses the compiled Optd program.
     pub maintenance: Maintenance,
     /// Why the rule selected this implementation.
     pub reason: String,
@@ -330,6 +353,8 @@ pub struct MaintenanceNode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct IncrementalPlan {
     nodes: Vec<MaintenanceNode>,
+    #[serde(skip)]
+    programs: Vec<plan::CompiledProgram>,
 }
 
 impl IncrementalPlan {
@@ -372,7 +397,23 @@ impl IncrementalPlan {
                 Error::Invalid("incremental plan contains nodes unreachable from its root".into()),
             ));
         }
-        Ok(Self { nodes })
+        Ok(Self {
+            nodes,
+            programs: vec![],
+        })
+    }
+
+    pub(crate) fn install_programs(&mut self, programs: Vec<plan::CompiledProgram>) -> Result<()> {
+        if programs.len() != self.nodes.len() {
+            return Err(Error::Invalid("compiled program count differs".into()));
+        }
+        self.programs = programs;
+        Ok(())
+    }
+
+    /// Actual Optd logical/physical programs in original dependency order.
+    pub fn programs(&self) -> &[plan::CompiledProgram] {
+        &self.programs
     }
 
     /// Verified nodes in dependency-before-consumer order.
@@ -386,12 +427,12 @@ impl IncrementalPlan {
         self.nodes.len() - 1
     }
 
-    /// Explain selected rules and the expression programs that actually execute.
+    /// Explain compatibility-rule results followed by actual Optd logical/physical plans.
     pub fn explain(&self) -> String {
         let mut explanation = String::new();
         for node in &self.nodes {
             explanation.push_str(&format!(
-                "#{} {} inputs={:?} ordered={} rule={}@{} priority={} strategy={:?}\n  {:?}\n  reason: {}\n",
+                "#{} {} inputs={:?} ordered={} rule={}@{} priority={} strategy={:?}\n  frontend: {:?}\n  reason: {}\n",
                 node.id,
                 node.operator,
                 node.inputs,
@@ -399,9 +440,18 @@ impl IncrementalPlan {
                 node.rule.name,
                 node.rule.version,
                 node.rule.priority,
-                node.maintenance.strategy(),
+                self.programs.get(node.id).map_or_else(|| node.maintenance.strategy(), plan::CompiledProgram::strategy),
                 node.maintenance,
                 node.reason,
+            ));
+        }
+        for (id, program) in self.programs.iter().enumerate() {
+            explanation.push_str(&format!(
+                "#{} Optd logical:\n{}\n#{} Optd physical:\n{}\n",
+                id,
+                plan::explain(&program.logical),
+                id,
+                plan::explain(&program.physical)
             ));
         }
         explanation

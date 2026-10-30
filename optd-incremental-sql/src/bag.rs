@@ -194,6 +194,33 @@ impl Bag {
         Ok(())
     }
 
+    /// Preflight complete positive bags without sorting or allocating Arrow output.
+    /// Preparation retains its early resource rejection even when physical
+    /// lookups defer actual materialization until execution.
+    pub(crate) fn check_materialization<'a>(
+        bags: impl IntoIterator<Item = &'a Self>,
+    ) -> Result<usize> {
+        let mut rows = 0usize;
+        let mut bytes = 0usize;
+        for bag in bags {
+            bag.validate_relation()?;
+            for (row, weight) in &bag.rows {
+                let repeats = usize::try_from(*weight).map_err(|_| Error::Overflow)?;
+                rows = rows.checked_add(repeats).ok_or(Error::Overflow)?;
+                check_row_limit(rows)?;
+                bytes = bytes
+                    .checked_add(
+                        scalar_bytes(row)?
+                            .checked_mul(repeats)
+                            .ok_or(Error::Overflow)?,
+                    )
+                    .ok_or(Error::Overflow)?;
+            }
+        }
+        check_byte_limit(bytes)?;
+        Ok(rows)
+    }
+
     /// Expand positive multiplicities in deterministic complete-row order.
     pub(crate) fn to_batch(&self) -> Result<RecordBatch> {
         check_row_limit(self.total()?)?;

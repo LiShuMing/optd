@@ -40,7 +40,7 @@ pub(crate) struct GroupState {
 pub(crate) struct GroupUpdate {
     state: GroupState,
     touched: BTreeMap<GroupKey, Bag>,
-    affected_input: RecordBatch,
+    aggregate_input_rows: usize,
 }
 
 impl GroupState {
@@ -124,17 +124,11 @@ impl GroupState {
             after.validate_relation()?;
             touched.insert(key, after);
         }
-        // Bag performs the aggregate row/byte checks before Arrow allocation.
-        // Balanced merging avoids repeatedly copying an ever-growing prefix.
-        let affected_input = merge_bags(
-            Arc::clone(&self.input_schema),
-            &touched.values().collect::<Vec<_>>(),
-        )?
-        .to_batch()?;
+        let aggregate_input_rows = Bag::check_materialization(touched.values())?;
         Ok(GroupUpdate {
             state: self.clone(),
             touched,
-            affected_input,
+            aggregate_input_rows,
         })
     }
 
@@ -147,7 +141,13 @@ impl GroupState {
 impl GroupUpdate {
     /// Return only surviving rows of touched groups, retaining the child schema.
     pub(crate) fn input_after(&self) -> Result<RecordBatch> {
-        Ok(self.affected_input.clone())
+        // The physical GroupLookup performs the actual relation materialization.
+        // Balanced merging retains the existing row/byte checks before allocation.
+        merge_bags(
+            self.state.input_schema.clone(),
+            &self.touched.values().collect::<Vec<_>>(),
+        )?
+        .to_batch()
     }
 
     /// Count keys whose complete input multiset changed, including removed keys.
@@ -157,7 +157,7 @@ impl GroupUpdate {
 
     /// Count actual rows supplied to the local aggregate evaluation.
     pub(crate) fn aggregate_input_rows(&self) -> usize {
-        self.affected_input.num_rows()
+        self.aggregate_input_rows
     }
 
     /// Validate local SQL output and produce the next index and exact output delta.

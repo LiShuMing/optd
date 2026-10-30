@@ -1,33 +1,26 @@
 //! DataFusion logical operators connected by typed, signed relation changes.
 
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::compute::concat_batches;
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, DFSchemaRef};
+use datafusion::common::Column;
 use datafusion::datasource::{provider_as_source, MemTable};
 use datafusion::logical_expr::{
     Distinct, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan, Volatility,
 };
-use datafusion::physical_plan::collect;
-use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::{SessionConfig, SessionContext};
-use serde::Serialize;
 
 use crate::bag::Bag;
+use crate::executor::{self, cache_scan, Bindings, Relation};
 use crate::group_state::{supported_key, GroupState, KeyPolicy};
-use crate::keyed_state::{key_expressions, KeyedState};
-use crate::planner::{
-    DeltaExpr, IncrementalOptimizer, IncrementalPlan, KeyScope, Maintenance, RuleContext,
-    RuleIdentity, SnapshotVersion, Strategy,
-};
+use crate::keyed_state::KeyedState;
+use crate::planner::plan::{self, StateSpec};
+use crate::planner::{IncrementalOptimizer, IncrementalPlan, RuleContext, Strategy};
 use crate::store::{CheckpointStore, PublishPoint, Snapshot};
 use crate::{Error, Result};
 
@@ -44,120 +37,13 @@ pub struct TableChange {
     pub weights: Vec<i64>,
 }
 
-/// Work observed for one operator, separate from performance claims.
-#[derive(Clone, Debug, Serialize)]
-pub struct NodeStats {
-    /// Stable postorder identity within this query definition.
-    pub id: usize,
-    /// Logical operator description.
-    pub operator: String,
-    /// Actual refresh path.
-    pub strategy: Strategy,
-    /// Rule whose compiled expression was executed for this operator.
-    pub rule: RuleIdentity,
-    /// Number of changed distinct output rows.
-    pub delta_rows: usize,
-    /// Indexed aggregate work, present only for changed-group maintenance.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub group_work: Option<GroupWork>,
-    /// Actual affected-bucket snapshot work, excluding full cache/source I/O.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub keyed_work: Option<KeyedWork>,
-}
-
-/// Actual input work at an indexed aggregate, independent of elapsed time.
-#[derive(Clone, Debug, Serialize)]
-pub struct GroupWork {
-    /// Number of installed groups before this refresh.
-    pub total_groups_before: usize,
-    /// Number of installed groups after this refresh.
-    pub total_groups_after: usize,
-    /// Keys whose complete input multiset changed, including removed groups.
-    pub touched_groups: usize,
-    /// Expanded insertions plus retractions supplied by the child delta.
-    pub changed_input_rows: usize,
-    /// Surviving rows actually read by the local aggregate.
-    pub aggregate_input_rows: usize,
-    /// Rows produced by recomputing affected groups.
-    pub aggregate_output_rows: usize,
-}
-
-/// Observed operator-local indexed work; not an end-to-end complexity claim.
-#[derive(Clone, Debug, Serialize)]
-pub struct KeyedWork {
-    /// Closure declared by the selected expression.
-    pub scope: KeyScope,
-    /// Installed input bucket counts before this refresh, one per port.
-    pub total_keys_before: Vec<usize>,
-    /// Candidate input bucket counts, one per port.
-    pub total_keys_after: Vec<usize>,
-    /// Union of changed keys across the input ports.
-    pub touched_keys: usize,
-    /// Expanded insertions and retractions received from children.
-    pub changed_input_rows: usize,
-    /// Rows supplied per port to a before operator evaluation.
-    pub snapshot_input_rows_before: Vec<usize>,
-    /// Rows supplied per port to an after operator evaluation.
-    pub snapshot_input_rows_after: Vec<usize>,
-    /// Actual before operator calls; windows use cached output instead.
-    pub snapshot_evaluations_before: usize,
-    /// Actual after operator calls.
-    pub snapshot_evaluations_after: usize,
-    /// Committed window output rows read for the before snapshot.
-    pub cached_before_output_rows: usize,
-    /// Complete child scans used to find affected buckets (zero on this path).
-    /// All buckets may still be affected; source and result I/O are excluded.
-    pub full_input_scans: usize,
-}
-
-/// Actual dirty nodes and source epoch for a prepared refresh.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct RefreshStats {
-    /// Candidate source epoch.
-    pub epoch: u64,
-    /// Operators that were evaluated; unchanged ancestors are omitted.
-    pub nodes: Vec<NodeStats>,
-}
+pub use crate::metrics::{GroupWork, KeyedWork, NodeStats, RefreshStats};
 
 #[derive(Clone)]
 struct Node {
     plan: LogicalPlan,
     inputs: Vec<usize>,
     ordered: bool,
-}
-
-#[derive(Clone)]
-struct Relation {
-    bag: Bag,
-    // Preserve physical sequence for ordering-sensitive consumers. Native
-    // delta operators otherwise materialize in a deterministic canonical order.
-    batch: RecordBatch,
-}
-impl Relation {
-    fn new(batch: RecordBatch) -> Result<Self> {
-        Ok(Self {
-            bag: Bag::from_batch(&batch)?,
-            batch,
-        })
-    }
-    fn from_bag(bag: Bag) -> Result<Self> {
-        bag.validate_relation()?;
-        let batch = bag.to_batch()?;
-        Ok(Self { bag, batch })
-    }
-}
-
-#[derive(Clone, Copy)]
-struct DeltaBindings<'a> {
-    deltas: &'a [Bag],
-    after: &'a [Relation],
-    source: Option<&'a Bag>,
-    scoped: Option<&'a ScopedSnapshots>,
-}
-
-struct ScopedSnapshots {
-    before: Option<Bag>,
-    after: Option<Bag>,
 }
 
 // DISTINCT is set membership, represented by the existing indexed group state.
@@ -328,24 +214,6 @@ fn add_node(
     Ok(id)
 }
 
-fn cache_scan(schema: &DFSchemaRef, batch: RecordBatch, id: usize) -> Result<LogicalPlan> {
-    let provider = Arc::new(MemTable::try_new(batch.schema(), vec![vec![batch]])?);
-    // The graph's columns retain their original qualifiers, including joins
-    // whose fields come from multiple tables. Materialization changes storage,
-    // not the expression's binding to a column index. Construct directly because
-    // TableScanBuilder first assigns ONE qualifier to every field, rejecting
-    // valid join schemas such as a.id, b.id before we can restore qualifiers.
-    Ok(LogicalPlan::TableScan(TableScan {
-        table_name: format!("__optd_cache_{id}").into(),
-        source: provider_as_source(provider),
-        projection: None,
-        projected_schema: schema.clone(),
-        filters: vec![],
-        fetch: None,
-        statistics_requests: Default::default(),
-    }))
-}
-
 impl SqlView {
     /// Rebuild exactly the committed sources and validate its result before
     /// restoring the logical epoch. Source provenance is validated by its owner.
@@ -469,7 +337,43 @@ impl SqlView {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let incremental_plan = IncrementalPlan::new(compiled)?;
+        let mut incremental_plan = IncrementalPlan::new(compiled)?;
+        let mut after_bindings: Vec<plan::IncrementalRel> = Vec::with_capacity(nodes.len());
+        let mut programs = Vec::with_capacity(nodes.len());
+        for (id, node) in nodes.iter().enumerate() {
+            let children = node
+                .inputs
+                .iter()
+                .map(|i| after_bindings[*i].clone())
+                .collect::<Vec<_>>();
+            let context = RuleContext::new(
+                id,
+                &node.plan,
+                &node.inputs,
+                node.ordered,
+                Self::admits_group_index(&ctx, &node.plan)?,
+            );
+            let program = crate::planner::lower::compile(
+                &context,
+                &incremental_plan.nodes()[id].maintenance,
+                children.clone(),
+                optimizer.plan_rules(),
+            )?;
+            if optimizer.requires_incremental() && program.strategy() == Strategy::OperatorRecompute
+            {
+                return Err(Error::Invalid(
+                    "strict incremental planning forbids physical replacement recomputation".into(),
+                ));
+            }
+            programs.push(program);
+            after_bindings.push(crate::planner::lower::after_input(
+                id,
+                &node.plan,
+                node.ordered,
+                children,
+            )?);
+        }
+        incremental_plan.install_programs(programs)?;
         let group_slots = vec![None; nodes.len()];
         let mut out = Self {
             sql: sql.into(),
@@ -491,54 +395,57 @@ impl SqlView {
                 out.eval_full(id, &out.states).await?
             };
             out.states.push(Relation::new(batch)?);
-            if matches!(
-                out.incremental_plan.nodes()[id].maintenance,
-                Maintenance::ChangedGroups
-            ) {
-                let child = out.nodes[id].inputs[0];
-                let input = &out.states[child].batch;
-                let keys = out.group_keys(id, input.clone()).await?;
-                let index = GroupState::try_new(
-                    input,
-                    &keys,
-                    &out.states[id].batch,
-                    KeyPolicy {
-                        binary_strings: true,
-                    },
-                )?
-                .ok_or_else(|| Error::Rewrite {
-                    node: id,
-                    rule: out.incremental_plan.nodes()[id].rule.name.clone(),
-                    phase: "verify",
-                    source: Box::new(Error::Invalid(
-                        "qualified grouped plan could not initialize its index".into(),
-                    )),
-                })?;
-                out.groups[id] = Some(index);
-            }
-            if let Some(scope) = out.incremental_plan.nodes()[id].maintenance.key_scope() {
-                let keys = key_expressions(&out.nodes[id].plan, scope)?
-                    .ok_or_else(|| Error::Invalid("missing qualified scope keys".into()))?;
-                let mut inputs = vec![];
-                let mut projected = vec![];
-                for (port, expressions) in keys.iter().enumerate() {
-                    let child = out.nodes[id].inputs[port];
-                    let batch = out.states[child].batch.clone();
-                    projected.push(out.project_keys(child, batch.clone(), expressions).await?);
-                    inputs.push(batch);
+            match &out.incremental_plan.programs()[id].state {
+                Some(StateSpec::Group {
+                    input, projection, ..
+                }) => {
+                    let input = &out.states[*input].batch;
+                    let keys =
+                        executor::apply(&out.ctx, projection, std::slice::from_ref(input)).await?;
+                    let index = GroupState::try_new(
+                        input,
+                        &keys,
+                        &out.states[id].batch,
+                        KeyPolicy {
+                            binary_strings: true,
+                        },
+                    )?
+                    .ok_or_else(|| {
+                        Error::Invalid("qualified group index could not initialize".into())
+                    })?;
+                    out.groups[id] = Some(index);
                 }
-                let output_keys = if scope == KeyScope::WindowPartitions {
-                    Some(
-                        out.project_keys(id, out.states[id].batch.clone(), &keys[0])
+                Some(StateSpec::Keyed(spec)) => {
+                    let inputs = spec
+                        .inputs
+                        .iter()
+                        .map(|i| out.states[*i].batch.clone())
+                        .collect::<Vec<_>>();
+                    let mut projected = Vec::with_capacity(inputs.len());
+                    for (input, projection) in inputs.iter().zip(&spec.projections) {
+                        projected.push(
+                            executor::apply(&out.ctx, projection, std::slice::from_ref(input))
+                                .await?,
+                        );
+                    }
+                    let output_keys = if let Some(projection) = &spec.output_projection {
+                        Some(
+                            executor::apply(
+                                &out.ctx,
+                                projection,
+                                std::slice::from_ref(&out.states[id].batch),
+                            )
                             .await?,
-                    )
-                } else {
-                    None
-                };
-                let output = output_keys
-                    .as_ref()
-                    .map(|keys| (&out.states[id].batch, keys));
-                out.keyed[id] = Some(KeyedState::new(&inputs, &projected, output)?);
+                        )
+                    } else {
+                        None
+                    };
+                    let output = output_keys
+                        .as_ref()
+                        .map(|keys| (&out.states[id].batch, keys));
+                    out.keyed[id] = Some(KeyedState::new(&inputs, &projected, output)?);
+                }
+                None => {}
             }
         }
         Ok(out)
@@ -588,7 +495,7 @@ impl SqlView {
     }
 
     fn node_strategy(&self, id: usize) -> Strategy {
-        self.incremental_plan.nodes()[id].maintenance.strategy()
+        self.incremental_plan.programs()[id].strategy()
     }
 
     fn admits_group_index(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool> {
@@ -655,20 +562,6 @@ impl SqlView {
         Ok(true)
     }
 
-    async fn group_keys(&self, id: usize, input: RecordBatch) -> Result<RecordBatch> {
-        let LogicalPlan::Aggregate(aggregate) = &self.nodes[id].plan else {
-            return Err(Error::Invalid(
-                "group projection requires an aggregate".into(),
-            ));
-        };
-        let child = self.nodes[id].inputs[0];
-        let plan =
-            LogicalPlanBuilder::from(cache_scan(self.nodes[child].plan.schema(), input, child)?)
-                .project(aggregate.group_expr.clone())?
-                .build()?;
-        self.execute(plan).await
-    }
-
     fn source_for<'a>(
         &self,
         scan: &TableScan,
@@ -681,14 +574,7 @@ impl SqlView {
     }
 
     async fn execute(&self, plan: LogicalPlan) -> Result<RecordBatch> {
-        let schema = Arc::new(plan.schema().as_arrow().clone());
-        // The graph has already been optimized. Re-optimizing a local node can
-        // push LIMIT across a materialization boundary or discard qualifiers.
-        let physical = DefaultPhysicalPlanner::default()
-            .create_physical_plan(&plan, &self.ctx.state())
-            .await?;
-        let batches = collect(physical, self.ctx.task_ctx()).await?;
-        Ok(concat_batches(&schema, &batches)?)
+        executor::execute(&self.ctx, plan).await
     }
 
     async fn eval_scan(&self, scan: &TableScan, batch: RecordBatch) -> Result<RecordBatch> {
@@ -747,297 +633,6 @@ impl SqlView {
             })
     }
 
-    async fn eval_inputs(&self, id: usize, batches: Vec<RecordBatch>) -> Result<RecordBatch> {
-        let node = &self.nodes[id];
-        let inputs = node
-            .inputs
-            .iter()
-            .zip(batches)
-            .map(|(i, b)| cache_scan(self.nodes[*i].plan.schema(), b, *i))
-            .collect::<Result<Vec<_>>>()?;
-        self.execute(node.plan.with_new_exprs(node.plan.expressions(), inputs)?)
-            .await
-            .map_err(|source| Error::Operator {
-                id,
-                plan: node.plan.display().to_string(),
-                source: Box::new(source),
-            })
-    }
-
-    async fn project_keys(
-        &self,
-        id: usize,
-        batch: RecordBatch,
-        expressions: &[Expr],
-    ) -> Result<RecordBatch> {
-        let scan = cache_scan(self.nodes[id].plan.schema(), batch, id)?;
-        // Aliases avoid duplicate expression names for repeated/composite keys.
-        let projection = expressions
-            .iter()
-            .enumerate()
-            .map(|(i, e)| e.clone().alias(format!("__key_{i}")))
-            .collect::<Vec<_>>();
-        self.execute(
-            LogicalPlanBuilder::from(scan)
-                .project(projection)?
-                .build()?,
-        )
-        .await
-    }
-
-    async fn eval_scoped_delta(
-        &self,
-        id: usize,
-        expr: &DeltaExpr,
-        deltas: &[Bag],
-        states: &[Relation],
-    ) -> Result<(Bag, KeyedState, KeyedWork)> {
-        let node = &self.nodes[id];
-        let scope = expr
-            .key_scope()
-            .ok_or_else(|| Error::Invalid("missing scope declaration".into()))?;
-        let keys = key_expressions(&node.plan, scope)?
-            .ok_or_else(|| Error::Invalid("missing qualified keys".into()))?;
-        let index = self.keyed[id]
-            .as_ref()
-            .ok_or_else(|| Error::Invalid("missing compiled key index".into()))?;
-        let mut positives = vec![];
-        let mut negatives = vec![];
-        let mut positive_keys = vec![];
-        let mut negative_keys = vec![];
-        let mut changed_input_rows = 0usize;
-        for (port, child) in node.inputs.iter().enumerate() {
-            let (pos, neg) = deltas[*child].signed_parts()?;
-            changed_input_rows = changed_input_rows
-                .checked_add(pos.num_rows())
-                .and_then(|n| n.checked_add(neg.num_rows()))
-                .ok_or(Error::Overflow)?;
-            positive_keys.push(self.project_keys(*child, pos.clone(), &keys[port]).await?);
-            negative_keys.push(self.project_keys(*child, neg.clone(), &keys[port]).await?);
-            positives.push(pos);
-            negatives.push(neg);
-        }
-        let need_before = expr.reads_scoped(SnapshotVersion::Before);
-        let need_after = expr.reads_scoped(SnapshotVersion::After);
-        let mut update = index.prepare(
-            &positives,
-            &positive_keys,
-            &negatives,
-            &negative_keys,
-            need_before,
-            need_after,
-        )?;
-        let mut work = KeyedWork {
-            scope,
-            total_keys_before: index.totals(),
-            total_keys_after: update.state.totals(),
-            touched_keys: update.touched(),
-            changed_input_rows,
-            snapshot_input_rows_before: vec![0; node.inputs.len()],
-            snapshot_input_rows_after: vec![0; node.inputs.len()],
-            snapshot_evaluations_before: 0,
-            snapshot_evaluations_after: 0,
-            cached_before_output_rows: 0,
-            full_input_scans: 0,
-        };
-        let mut snapshots = ScopedSnapshots {
-            before: None,
-            after: None,
-        };
-        for version in [SnapshotVersion::Before, SnapshotVersion::After] {
-            if !expr.reads_scoped(version) {
-                continue;
-            }
-            let value = if update.touched() == 0 {
-                Bag::empty(self.states[id].bag.schema())
-            } else if version == SnapshotVersion::Before && scope == KeyScope::WindowPartitions {
-                let cached = update
-                    .cached_before()
-                    .ok_or_else(|| Error::Invalid("missing committed window output".into()))?;
-                work.cached_before_output_rows = cached.num_rows();
-                Bag::from_batch(cached)?
-            } else {
-                let inputs = update.inputs(version);
-                let rows = inputs.iter().map(RecordBatch::num_rows).collect();
-                match version {
-                    SnapshotVersion::Before => {
-                        work.snapshot_input_rows_before = rows;
-                        work.snapshot_evaluations_before += 1;
-                    }
-                    SnapshotVersion::After => {
-                        work.snapshot_input_rows_after = rows;
-                        work.snapshot_evaluations_after += 1;
-                    }
-                }
-                Bag::from_batch(&self.eval_inputs(id, inputs.to_vec()).await?)?
-            };
-            match version {
-                SnapshotVersion::Before => snapshots.before = Some(value),
-                SnapshotVersion::After => snapshots.after = Some(value),
-            }
-        }
-        let delta = self
-            .eval_delta_expr(
-                id,
-                expr,
-                DeltaBindings {
-                    deltas,
-                    after: states,
-                    source: None,
-                    scoped: Some(&snapshots),
-                },
-                self.states[id].bag.schema(),
-            )
-            .await?;
-        if scope == KeyScope::WindowPartitions {
-            let (pos, neg) = delta.signed_parts()?;
-            let pos_keys = self.project_keys(id, pos.clone(), &keys[0]).await?;
-            let neg_keys = self.project_keys(id, neg.clone(), &keys[0]).await?;
-            update.apply_window_delta(&pos, &pos_keys, &neg, &neg_keys)?;
-        }
-        Ok((delta, update.state, work))
-    }
-
-    // Expressions are verified and frozen before bootstrap. Boxing only the
-    // bounded expression recursion avoids adding another async dependency.
-    fn eval_delta_expr<'a>(
-        &'a self,
-        id: usize,
-        expr: &'a DeltaExpr,
-        bindings: DeltaBindings<'a>,
-        expected_schema: SchemaRef,
-    ) -> Pin<Box<dyn Future<Output = Result<Bag>> + Send + 'a>> {
-        Box::pin(async move {
-            let node = &self.nodes[id];
-            match expr {
-                DeltaExpr::ScopedSnapshot { version, .. } => {
-                    let snapshots = bindings
-                        .scoped
-                        .ok_or_else(|| Error::Invalid("missing scoped snapshot binding".into()))?;
-                    match version {
-                        SnapshotVersion::Before => &snapshots.before,
-                        SnapshotVersion::After => &snapshots.after,
-                    }
-                    .clone()
-                    .ok_or_else(|| {
-                        Error::Invalid("missing requested scoped snapshot version".into())
-                    })
-                }
-                DeltaExpr::InputDelta(port) => Ok(bindings.deltas[node.inputs[*port]].clone()),
-                DeltaExpr::InputSnapshot { input, version } => {
-                    let states = match version {
-                        SnapshotVersion::Before => &self.states,
-                        SnapshotVersion::After => bindings.after,
-                    };
-                    Ok(states[node.inputs[*input]].bag.clone())
-                }
-                DeltaExpr::SourceDelta => bindings.source.cloned().ok_or_else(|| {
-                    Error::Invalid("compiled source expression has no source binding".into())
-                }),
-                DeltaExpr::Empty => Ok(Bag::empty(expected_schema)),
-                DeltaExpr::Sum(terms) => {
-                    let mut result = Bag::empty(expected_schema.clone());
-                    for term in terms {
-                        let value = self
-                            .eval_delta_expr(id, term, bindings, expected_schema.clone())
-                            .await?;
-                        result = result.add(&value)?;
-                    }
-                    Ok(result)
-                }
-                DeltaExpr::Negate(inner) => {
-                    let value = self
-                        .eval_delta_expr(id, inner, bindings, expected_schema.clone())
-                        .await?;
-                    Bag::empty(expected_schema).difference(&value)
-                }
-                DeltaExpr::Linear(inputs) => {
-                    let schemas = match &node.plan {
-                        LogicalPlan::TableScan(scan) => vec![scan.source.schema()],
-                        _ => node
-                            .inputs
-                            .iter()
-                            .map(|input| self.states[*input].bag.schema())
-                            .collect(),
-                    };
-                    let mut positive = Vec::with_capacity(inputs.len());
-                    let mut negative = Vec::with_capacity(inputs.len());
-                    for (input, schema) in inputs.iter().zip(schemas) {
-                        let value = self.eval_delta_expr(id, input, bindings, schema).await?;
-                        let (pos, neg) = value.signed_parts()?;
-                        positive.push(pos);
-                        negative.push(neg);
-                    }
-                    let (pos, neg) = if let LogicalPlan::TableScan(scan) = &node.plan {
-                        // The verifier establishes the scan's one synthetic raw-source port.
-                        let pos = positive.pop().ok_or_else(|| {
-                            Error::Invalid("compiled scan is missing its raw-source port".into())
-                        })?;
-                        let neg = negative.pop().ok_or_else(|| {
-                            Error::Invalid("compiled scan is missing its raw-source port".into())
-                        })?;
-                        (
-                            self.eval_scan(scan, pos).await?,
-                            self.eval_scan(scan, neg).await?,
-                        )
-                    } else {
-                        (
-                            self.eval_inputs(id, positive).await?,
-                            self.eval_inputs(id, negative).await?,
-                        )
-                    };
-                    Bag::from_parts(&pos, &neg)
-                }
-                DeltaExpr::Join { left, right } => {
-                    // The verifier requires an inner join and its two typed input ports.
-                    let l = self
-                        .eval_delta_expr(
-                            id,
-                            left,
-                            bindings,
-                            self.states[node.inputs[0]].bag.schema(),
-                        )
-                        .await?;
-                    let r = self
-                        .eval_delta_expr(
-                            id,
-                            right,
-                            bindings,
-                            self.states[node.inputs[1]].bag.schema(),
-                        )
-                        .await?;
-                    self.eval_signed_join(id, &l, &r).await
-                }
-            }
-        })
-    }
-
-    async fn eval_signed_join(&self, id: usize, left: &Bag, right: &Bag) -> Result<Bag> {
-        let (lp, ln) = left.signed_parts()?;
-        let (rp, rn) = right.signed_parts()?;
-        let mut result = Bag::empty(self.states[id].bag.schema());
-        // Bilinear lifting includes negative x negative with a positive sign.
-        // Empty inner-join branches have no output and need no physical execution.
-        for (l, r, negative) in [
-            (&lp, &rp, false),
-            (&lp, &rn, true),
-            (&ln, &rp, true),
-            (&ln, &rn, false),
-        ] {
-            if l.num_rows() == 0 || r.num_rows() == 0 {
-                continue;
-            }
-            let batch = self.eval_inputs(id, vec![l.clone(), r.clone()]).await?;
-            let value = Bag::from_batch(&batch)?;
-            result = if negative {
-                result.difference(&value)?
-            } else {
-                result.add(&value)?
-            };
-        }
-        Ok(result)
-    }
-
     /// Prepare an atomic multi-table epoch, without mutating any visible state.
     pub async fn prepare(&self, changes: &[TableChange]) -> Result<PreparedSqlRefresh> {
         let epoch = self.epoch.checked_add(1).ok_or(Error::Overflow)?;
@@ -1066,7 +661,7 @@ impl SqlView {
         };
         for (id, node) in self.nodes.iter().enumerate() {
             let compiled = &self.incremental_plan.nodes()[id];
-            let selected_strategy = compiled.maintenance.strategy();
+            let selected_strategy = self.incremental_plan.programs()[id].strategy();
             let mut group_work = None;
             let mut keyed_work = None;
             let schema = self.states[id].bag.schema();
@@ -1091,71 +686,37 @@ impl SqlView {
             let (delta, next) = if !dirty {
                 (Bag::empty(schema), None)
             } else {
-                match &compiled.maintenance {
-                    Maintenance::Delta(expr) if compiled.maintenance.key_scope().is_some() => {
-                        let (delta, index, work) =
-                            self.eval_scoped_delta(id, expr, &deltas, &states).await?;
-                        keyed[id] = Some(index);
-                        keyed_work = Some(work);
-                        (delta, None)
-                    }
-                    Maintenance::Delta(expr) => {
-                        let delta = self
-                            .eval_delta_expr(
-                                id,
-                                expr,
-                                DeltaBindings {
-                                    deltas: &deltas,
-                                    after: &states,
-                                    source: source_delta.as_ref(),
-                                    scoped: None,
-                                },
-                                schema,
-                            )
-                            .await?;
-                        (delta, None)
-                    }
-                    Maintenance::ChangedGroups => {
-                        let index = self.groups[id].as_ref().ok_or_else(|| {
-                            Error::Invalid("compiled grouped plan has no group index".into())
-                        })?;
-                        let child = node.inputs[0];
-                        let (positive, negative) = deltas[child].signed_parts()?;
-                        let positive_keys = self.group_keys(id, positive.clone()).await?;
-                        let negative_keys = self.group_keys(id, negative.clone()).await?;
-                        let update =
-                            index.prepare(&positive, &positive_keys, &negative, &negative_keys)?;
-                        let touched_groups = update.touched_groups();
-                        let aggregate_input_rows = update.aggregate_input_rows();
-                        let output = self.eval_inputs(id, vec![update.input_after()?]).await?;
-                        let aggregate_output_rows = output.num_rows();
-                        let (next_index, delta) = update.finish(&output)?;
-                        group_work = Some(GroupWork {
-                            total_groups_before: index.total_groups(),
-                            total_groups_after: next_index.total_groups(),
-                            touched_groups,
-                            changed_input_rows: positive
-                                .num_rows()
-                                .checked_add(negative.num_rows())
-                                .ok_or(Error::Overflow)?,
-                            aggregate_input_rows,
-                            aggregate_output_rows,
-                        });
-                        groups[id] = Some(next_index);
-                        (delta, None)
-                    }
-                    Maintenance::Recompute => {
-                        let batch = if let LogicalPlan::TableScan(scan) = &node.plan {
-                            self.eval_scan(scan, self.source_for(scan, &tables)?.to_batch()?)
-                                .await?
-                        } else {
-                            self.eval_full(id, &states).await?
-                        };
-                        let next = Relation::new(batch)?;
-                        (next.bag.difference(&self.states[id].bag)?, Some(next))
-                    }
-                    Maintenance::Constant => (Bag::empty(schema), None),
+                let result = executor::run(
+                    &self.ctx,
+                    &self.incremental_plan.programs()[id].steps,
+                    Bindings {
+                        deltas: &deltas,
+                        before: &self.states,
+                        after: &states,
+                        source_before: &self.tables,
+                        source_after: &tables,
+                        keyed: &self.keyed,
+                        groups: &self.groups,
+                    },
+                )
+                .await
+                .map_err(|source| Error::Operator {
+                    id,
+                    plan: node.plan.display().to_string(),
+                    source: Box::new(source),
+                })?;
+                if let Some(index) = result.keyed {
+                    keyed[id] = Some(index);
                 }
+                if let Some(index) = result.groups {
+                    groups[id] = Some(index);
+                }
+                keyed_work = result.keyed_work;
+                group_work = result.group_work;
+                (
+                    result.delta,
+                    result.replacement.map(Relation::new).transpose()?,
+                )
             };
             if dirty {
                 states[id] = match next {

@@ -6,85 +6,13 @@ use std::sync::Arc;
 use datafusion::arrow::array::{RecordBatch, UInt32Array};
 use datafusion::arrow::compute::{concat_batches, take};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::logical_expr::{Expr, ExprSchemable, JoinType, LogicalPlan};
 
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES, MAX_MATERIALIZED_ROWS};
-use crate::group_state::{encode_keys, partition, supported_key, KeyPolicy};
-use crate::planner::{KeyScope, SnapshotVersion};
+use crate::group_state::{encode_keys, partition};
+use crate::planner::SnapshotVersion;
 use crate::{Error, Result};
 
 type Key = Vec<u8>;
-
-/// Return only proven SQL-equality keys; None is a planning capability boundary.
-pub(crate) fn key_expressions(
-    plan: &LogicalPlan,
-    scope: KeyScope,
-) -> Result<Option<Vec<Vec<Expr>>>> {
-    let expressions = match (scope, plan) {
-        (KeyScope::JoinKeys, LogicalPlan::Join(join))
-            if !join.on.is_empty()
-                && matches!(
-                    join.join_type,
-                    JoinType::Inner
-                        | JoinType::Left
-                        | JoinType::Right
-                        | JoinType::Full
-                        | JoinType::LeftSemi
-                        | JoinType::RightSemi
-                        | JoinType::LeftAnti
-                        | JoinType::RightAnti
-                ) =>
-        {
-            vec![
-                join.on.iter().map(|(l, _)| l.clone()).collect(),
-                join.on.iter().map(|(_, r)| r.clone()).collect(),
-            ]
-        }
-        (KeyScope::WindowPartitions, LogicalPlan::Window(window)) => {
-            let mut common = None;
-            for expression in &window.window_expr {
-                let mut expression = expression;
-                while let Expr::Alias(alias) = expression {
-                    expression = &alias.expr;
-                }
-                let Expr::WindowFunction(function) = expression else {
-                    return Ok(None);
-                };
-                let keys = &function.params.partition_by;
-                if keys.is_empty() || common.as_ref().is_some_and(|common| common != keys) {
-                    return Ok(None);
-                }
-                common = Some(keys.clone());
-            }
-            let Some(common) = common else {
-                return Ok(None);
-            };
-            vec![common]
-        }
-        _ => return Ok(None),
-    };
-    let inputs = plan.inputs();
-    let mut common_types: Option<Vec<DataType>> = None;
-    for (keys, input) in expressions.iter().zip(inputs) {
-        let types = keys
-            .iter()
-            .map(|key| key.get_type(input.schema()))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if types.iter().any(|ty| {
-            !supported_key(
-                ty,
-                KeyPolicy {
-                    binary_strings: true,
-                },
-            )
-        }) || common_types.as_ref().is_some_and(|common| common != &types)
-        {
-            return Ok(None);
-        }
-        common_types = Some(types);
-    }
-    Ok(Some(expressions))
-}
 
 #[derive(Clone, Debug)]
 struct Bucket {
@@ -102,12 +30,11 @@ pub(crate) struct KeyedState {
     outputs: Option<(SchemaRef, BTreeMap<Key, Arc<Bag>>)>,
 }
 
-pub(crate) struct KeyedUpdate {
+pub(crate) struct KeyedUpdate<'a> {
     pub(crate) state: KeyedState,
     keys: BTreeSet<Key>,
-    before: Vec<RecordBatch>,
-    after: Vec<RecordBatch>,
-    cached_before: Option<RecordBatch>,
+    before: Option<&'a KeyedState>,
+    after_readable: bool,
 }
 
 fn invalid(message: &str) -> Error {
@@ -234,7 +161,7 @@ impl KeyedState {
         negative_keys: &[RecordBatch],
         need_before: bool,
         need_after: bool,
-    ) -> Result<KeyedUpdate> {
+    ) -> Result<KeyedUpdate<'_>> {
         let n = self.inputs.len();
         if [
             positives.len(),
@@ -287,63 +214,69 @@ impl KeyedState {
                 }
             }
         }
-        let select = |state: &Self| -> Result<Vec<RecordBatch>> {
-            state
-                .inputs
-                .iter()
-                .zip(&state.schemas)
-                .map(|(index, schema)| {
-                    merge(
-                        schema,
-                        touched
-                            .iter()
-                            .filter_map(|key| index.get(key).map(|b| b.batch.clone()))
-                            .collect(),
-                    )
-                })
-                .collect()
-        };
-        let before = if need_before && self.outputs.is_none() {
-            select(self)?
-        } else {
-            vec![]
-        };
-        let after = if need_after { select(&next)? } else { vec![] };
-        let cached_before = self
-            .outputs
-            .as_ref()
-            .filter(|_| need_before)
-            .map(|(schema, outputs)| {
-                let batches = touched
-                    .iter()
-                    .filter_map(|key| outputs.get(key))
-                    .map(|b| b.to_batch())
-                    .collect::<Result<Vec<_>>>()?;
-                merge(schema, batches)
-            })
-            .transpose()?;
         Ok(KeyedUpdate {
             state: next,
             keys: touched,
-            before,
-            after,
-            cached_before,
+            // Keep immutable buckets, not eagerly materialized snapshot inputs.
+            // Physical lookups alone read the requested versions and ports.
+            before: need_before.then_some(self),
+            after_readable: need_after,
         })
     }
 }
 
-impl KeyedUpdate {
+impl KeyedUpdate<'_> {
     pub(crate) fn touched(&self) -> usize {
         self.keys.len()
     }
-    pub(crate) fn inputs(&self, version: SnapshotVersion) -> &[RecordBatch] {
-        match version {
-            SnapshotVersion::Before => &self.before,
-            SnapshotVersion::After => &self.after,
-        }
+    /// Materialize exactly one requested port over the affected-key closure.
+    pub(crate) fn lookup_input(
+        &self,
+        port: usize,
+        version: SnapshotVersion,
+    ) -> Result<RecordBatch> {
+        let state = match version {
+            SnapshotVersion::Before => self
+                .before
+                .as_ref()
+                .ok_or_else(|| invalid("Before index is not bound"))?,
+            SnapshotVersion::After if self.after_readable => &self.state,
+            SnapshotVersion::After => return Err(invalid("After index is not bound")),
+        };
+        let index = state
+            .inputs
+            .get(port)
+            .ok_or_else(|| invalid("index lookup port is invalid"))?;
+        let schema = state
+            .schemas
+            .get(port)
+            .ok_or_else(|| invalid("index schema port is invalid"))?;
+        merge(
+            schema,
+            self.keys
+                .iter()
+                .filter_map(|key| index.get(key).map(|bucket| bucket.batch.clone()))
+                .collect(),
+        )
     }
-    pub(crate) fn cached_before(&self) -> Option<&RecordBatch> {
-        self.cached_before.as_ref()
+
+    /// Read actual committed output buckets when the physical plan requests them.
+    pub(crate) fn lookup_output(&self) -> Result<RecordBatch> {
+        let before = self
+            .before
+            .as_ref()
+            .ok_or_else(|| invalid("Before output is not bound"))?;
+        let (schema, outputs) = before
+            .outputs
+            .as_ref()
+            .ok_or_else(|| invalid("missing committed output index"))?;
+        let batches = self
+            .keys
+            .iter()
+            .filter_map(|key| outputs.get(key))
+            .map(|bag| bag.to_batch())
+            .collect::<Result<Vec<_>>>()?;
+        merge(schema, batches)
     }
 
     /// Follow the executed custom program, rather than silently replacing its output.

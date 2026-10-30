@@ -13,7 +13,7 @@ pub const MAX_EXPR_DEPTH: usize = 64;
 pub const MAX_EXPR_NODES: usize = 1024;
 
 /// Which immutable relation snapshot a signed expression reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum SnapshotVersion {
     /// The committed relation before this candidate batch.
     Before,
@@ -22,7 +22,7 @@ pub enum SnapshotVersion {
 }
 
 /// Dependency closure used to select complete indexed input buckets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub enum KeyScope {
     /// Union of equijoin keys changed on either original input.
     JoinKeys,
@@ -30,13 +30,13 @@ pub enum KeyScope {
     WindowPartitions,
 }
 
-/// Executable signed relations with references bound to this operator's ports.
+/// Compatibility-rule expressions, compiled into explicit Optd plan nodes.
 ///
 /// `Linear` and `Join` retain the original logical operator's expressions. Their
 /// legality is verified before execution; arbitrary operators cannot be lifted
 /// as though they were linear or bilinear. `Empty` inherits its exact schema
 /// from the typed position where it occurs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum DeltaExpr {
     /// Original operator output over complete affected buckets at one version.
     /// Window Before uses cached committed output rather than reevaluating ties.
@@ -75,10 +75,10 @@ pub enum DeltaExpr {
     Empty,
 }
 
-/// The compiled maintenance program that drives one logical operator.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Compatibility frontend for one logical operator; never interpreted at refresh.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum Maintenance {
-    /// Execute exactly this verified signed-expression tree.
+    /// Compile this verified shorthand into Optd logical and physical plans.
     Delta(DeltaExpr),
     /// Update the derived group index and recompute surviving touched groups.
     ChangedGroups,
