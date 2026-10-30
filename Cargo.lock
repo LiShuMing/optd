@@ -4291,6 +4291,7 @@ dependencies = [
  "datafusion",
  "futures",
  "iceberg",
+ "optd-core",
  "optd-incremental",
  "serde",
  "serde_json",

@@ -12,6 +12,8 @@ rust-version = "1.95"
 iceberg = ["dep:iceberg", "dep:futures", "dep:optd-incremental"]
 
 [dependencies]
+# Generic Optd plans and transformation/implementation rules; SQL stays typed.
+optd-core = { path = "../optd-core" }
 # Reuse the workspace's pinned SQL/type implementation. The default graph has
 # no catalog dependency; optional IO reuse never uses the legacy Value bridge.
 datafusion = { version = "55.0.0", default-features = false, features = ["sql", "datetime_expressions", "regex_expressions", "string_expressions", "unicode_expressions", "nested_expressions", "math_expressions"] }
