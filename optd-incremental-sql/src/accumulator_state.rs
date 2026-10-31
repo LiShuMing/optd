@@ -118,6 +118,11 @@ pub(crate) struct AccumulatorState {
 }
 
 impl AccumulatorState {
+    /// Account for one group-directory clone, excluding shared accumulator cells.
+    pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
+        work.record_accumulators(self.entries.len())
+    }
+
     /// Bootstrap a planner-qualified aggregate from its complete positive input.
     /// The planner must apply `eligible` first; this is not a general aggregate
     /// interpreter. A global aggregate retains its output even for empty input.

@@ -20,6 +20,7 @@ mod metrics;
 pub mod planner;
 pub mod source_vector;
 pub mod store;
+mod work;
 
 #[cfg(feature = "iceberg")]
 pub mod coordinator;
@@ -34,6 +35,7 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use metrics::AccumulatorWork;
 pub use planner::Strategy;
+pub use work::{RefreshWork, RelationWork, StateCopyWork};
 
 #[cfg(all(test, feature = "iceberg"))]
 mod dependency_contract {

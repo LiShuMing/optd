@@ -534,6 +534,10 @@ impl SqlView {
     /// Prepare an atomic multi-table epoch, without mutating any visible state.
     pub async fn prepare(&self, changes: &[TableChange]) -> Result<PreparedSqlRefresh> {
         let epoch = self.epoch.checked_add(1).ok_or(Error::Overflow)?;
+        let mut stats = RefreshStats {
+            epoch,
+            ..Default::default()
+        };
         let mut tables = self.tables.clone();
         let mut source_deltas = BTreeMap::<String, Bag>::new();
         for change in changes {
@@ -542,6 +546,9 @@ impl SqlView {
                 .ok_or_else(|| Error::Invalid(format!("unknown changed table {}", change.table)))?;
             let delta = Bag::from_weighted(&change.rows, &change.weights)?;
             let next = old.add(&delta)?;
+            if !delta.is_empty() {
+                stats.work.sources.record_rebuild(old.len())?;
+            }
             let combined = match source_deltas.get(&change.table) {
                 Some(previous) => previous.add(&delta)?,
                 None => delta,
@@ -552,6 +559,18 @@ impl SqlView {
         for name in source_deltas.keys() {
             tables[name].validate_relation()?;
         }
+        for state in self.groups.iter().flatten() {
+            stats
+                .work
+                .state_copies
+                .record_groups(state.total_groups())?;
+        }
+        for state in self.keyed.iter().flatten() {
+            state.record_copy(&mut stats.work.state_copies)?;
+        }
+        for state in self.accumulators.iter().flatten() {
+            state.record_copy(&mut stats.work.state_copies)?;
+        }
         let mut states = self.states.clone();
         let mut groups = self.groups.clone();
         let mut keyed = self.keyed.clone();
@@ -560,10 +579,6 @@ impl SqlView {
         // A sorted relation can reorder without changing its bag (for example,
         // projecting away a modified sort key). LIMIT must still be refreshed.
         let mut sequence_changed: Vec<bool> = Vec::with_capacity(self.nodes.len());
-        let mut stats = RefreshStats {
-            epoch,
-            nodes: vec![],
-        };
         for (id, node) in self.nodes.iter().enumerate() {
             let compiled = &self.incremental_plan.nodes()[id];
             let selected_strategy = self.incremental_plan.programs()[id].strategy();
@@ -608,6 +623,7 @@ impl SqlView {
                         groups: &self.groups,
                         accumulators: &self.accumulators,
                     },
+                    &mut stats.work,
                 )
                 .await
                 .map_err(|source| Error::Operator {
@@ -636,7 +652,16 @@ impl SqlView {
                 states[id] = match next {
                     Some(next) => next,
                     None if delta.is_empty() => self.states[id].clone(),
-                    None => Relation::from_bag(self.states[id].bag.add(&delta)?)?,
+                    None => {
+                        let updated = self.states[id].bag.add(&delta)?;
+                        stats
+                            .work
+                            .caches
+                            .record_rebuild(self.states[id].bag.len())?;
+                        let relation = Relation::from_bag(updated)?;
+                        stats.work.caches.record_materialization(&relation.batch)?;
+                        relation
+                    }
                 };
                 stats.nodes.push(NodeStats {
                     id,

@@ -235,6 +235,7 @@ pub(crate) async fn run(
     ctx: &SessionContext,
     steps: &[PhysicalStep],
     bindings: Bindings<'_>,
+    refresh_work: &mut crate::RefreshWork,
 ) -> Result<ExecutionResult> {
     let mut values: Vec<Value> = Vec::with_capacity(steps.len());
     let mut indexes: BTreeMap<usize, KeyedUpdate> = BTreeMap::new();
@@ -255,6 +256,7 @@ pub(crate) async fn run(
                     .ok_or_else(|| Error::Invalid("missing aggregate accumulator state".into()))?;
                 let (positive, negative) = inputs[0].relation()?.bag.signed_parts()?;
                 let (next, delta, work) = index.update(&positive, &negative)?;
+                index.record_copy(&mut refresh_work.state_copies)?;
                 next_accumulator = Some(next);
                 accumulator_work = Some(work);
                 Value::Relation(RelationValue::from_signed(delta)?)
@@ -315,6 +317,7 @@ pub(crate) async fn run(
                 let index = bindings.keyed[spec.id]
                     .as_ref()
                     .ok_or_else(|| Error::Invalid("missing physical index".into()))?;
+                index.record_copy(&mut refresh_work.state_copies)?;
                 let update = index.prepare(
                     &changes
                         .iter()
@@ -446,6 +449,9 @@ pub(crate) async fn run(
                 let index = bindings.groups[*state]
                     .as_ref()
                     .ok_or_else(|| Error::Invalid("missing group index".into()))?;
+                refresh_work
+                    .state_copies
+                    .record_groups(index.total_groups())?;
                 let update =
                     index.prepare(&p.positive, &p.positive_keys, &p.negative, &p.negative_keys)?;
                 group_work = Some(GroupWork {

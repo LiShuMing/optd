@@ -115,6 +115,17 @@ fn merge(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<RecordBatch> {
 }
 
 impl KeyedState {
+    /// Account for one directory clone; shared bucket payloads are not copied.
+    pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
+        for input in &self.inputs {
+            work.record_keyed_input(input.len())?;
+        }
+        if let Some((_, outputs)) = &self.outputs {
+            work.record_window_output(outputs.len())?;
+        }
+        Ok(())
+    }
+
     /// Bootstrap complete input indexes from aligned row/key batches.
     /// Optional window output must have exactly the input's partition keys.
     pub(crate) fn new(

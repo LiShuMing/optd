@@ -94,4 +94,7 @@ pub struct RefreshStats {
     pub epoch: u64,
     /// Operators that were evaluated; unchanged ancestors are omitted.
     pub nodes: Vec<NodeStats>,
+    /// Full relation-cache rebuilds and state-directory copies during prepare.
+    /// This does not include SQL DML, external-source IO, checkpoints or recovery.
+    pub work: crate::RefreshWork,
 }
