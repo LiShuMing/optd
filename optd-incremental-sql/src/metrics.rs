@@ -121,6 +121,31 @@ pub struct KeyedWork {
     /// Complete child scans used to find affected buckets (zero on this path).
     /// All buckets may still be affected; source and result I/O are excluded.
     pub full_input_scans: usize,
+    /// Actual match-count work; absent for scoped algorithms and older reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_join_work: Option<MatchJoinWork>,
+}
+
+/// Operator-local pure equijoin work, including touched-bucket rebuilding.
+/// Source/cache IO and persistent-directory copies are recorded separately.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct MatchJoinWork {
+    /// Consolidated distinct changed rows processed over the two stages.
+    pub changed_entries: usize,
+    /// O(1) peer bucket cardinality probes, including absent/NULL buckets.
+    pub count_probes: usize,
+    /// Distinct peer rows visited to emit matched pairs or membership changes.
+    pub peer_entries_visited: usize,
+    /// Changed-distinct-row times peer-distinct-row products emitted by outer joins.
+    pub matched_pairs: usize,
+    /// Valid key counts whose positivity changes during one of the two stages.
+    pub zero_crossings: usize,
+    /// Nonzero weighted output contributions before consolidation (duplicates included).
+    pub emitted_contributions: usize,
+    /// Input distinct entries copied while rebuilding complete touched buckets.
+    pub bucket_entries_copied: usize,
+    /// Expanded positive rows materialized while rebuilding touched input buckets.
+    pub bucket_rows_materialized: usize,
 }
 
 /// Actual dirty nodes and source epoch for a prepared refresh.

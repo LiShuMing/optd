@@ -37,7 +37,7 @@ pub use engine::{
     GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, TableChange,
 };
 pub use error::{Error, Result};
-pub use metrics::{AccumulatorWork, DistinctWork, ValueIndexWork};
+pub use metrics::{AccumulatorWork, DistinctWork, MatchJoinWork, ValueIndexWork};
 pub use planner::Strategy;
 pub use planning::{NodePreflight, PlanBlocker, PlanPreflight};
 pub use work::{

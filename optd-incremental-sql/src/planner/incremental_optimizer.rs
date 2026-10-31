@@ -17,6 +17,8 @@ pub enum Strategy {
     NativeDelta,
     /// Propagate signed changes using indexed affected-key peer snapshots.
     IndexedDelta,
+    /// Maintain outer/semi/anti membership through indexed match-count transitions.
+    MatchCountDelta,
     /// Update retractable aggregate state using only inserted/deleted rows.
     AccumulatorDelta,
     /// Re-evaluate only groups whose indexed input multiset changed.
@@ -201,6 +203,12 @@ impl Default for IncrementalOptimizer {
 }
 
 impl IncrementalOptimizer {
+    /// Register opt-in pure equijoin match-count maintenance for outer/semi/anti joins.
+    /// Residual and NULL-aware joins retain their separately qualified alternatives.
+    pub fn with_match_count_joins(self) -> Result<Self> {
+        self.with_rule(rules::match_count_join())
+    }
+
     /// Start without any implementation, so unmatched nodes are explicit errors.
     pub fn empty() -> Self {
         Self {

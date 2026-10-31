@@ -1,6 +1,6 @@
 # Stateful outer/semi/anti join maintenance from match-count transitions
 
-**Status:** accepted · 2026-10-31; local source/API design review, implementation pending
+**Status:** accepted · 2026-10-31; local source/API design review; pure-equijoin opt-in implemented, residual acceptance pending
 **Scope:** R04a typed equijoin keys, all seven outer/semi/anti orientations, optional
 SQL residual conditions and null-safe equality. Reuse Optd plans and derived
 candidate state. Mark/range joins, NULL-aware anti-join global dependencies and durable operator-state formats are separate.
@@ -189,3 +189,38 @@ This API registers a concrete physical alternative, not a semantic opt-out. Keep
 it opt-in until residual support and the complete R04a acceptance matrix qualify
 default selection; no default coverage/performance claim follows from this slice.
 Add its RED plan test before implementation. R04a stays in_progress throughout.
+
+The shared index declaration carries an explicit `IndexAlgorithm`: `Scoped` or
+`MatchCounts(RelationOperator)`. Preparation retains original consolidated deltas
+only for the latter. Verification binds `MaintainMatchJoin` to that exact operator,
+state token and Before/After permissions. Buckets retain a key-NULL flag derived
+from projected arrays, never inferred from encoded key bytes.
+
+
+## 11. Pure-equijoin slice and remaining acceptance
+
+The opt-in registry now lowers `Maintenance::MatchJoin` to shared PrepareIndex,
+MaintainMatchJoin and CompleteIndex steps. State and operator identities are
+verified before bootstrap. The runtime consumes original per-port net deltas,
+uses O(1) bucket cardinalities, and emits peer membership only at zero crossings.
+Typed key NULL flags come from projected Arrow arrays. Ordinary equality never
+matches those buckets; NULL-safe equality may match them. No residual is discarded.
+
+The independent nested-loop oracle exercises all seven orientations with ordinary,
+NULL-safe and composite keys over 756 signed epochs. Tests also cover deterministic
+first/last matches, empty inputs, duplicates, stale/discarded/invalid candidates,
+checked overflow, forged physical bindings, computed/USING/self joins, downstream
+aggregate/window consumers and per-round DurableSqlView reopen. Fresh full SQL
+comparisons verify schemas and bags independently of incremental state.
+
+Work regressions grow untouched keys while keeping delta and output fixed. Pure
+semi/anti hot-bucket changes without zero crossings visit zero unchanged peer
+entries and emit zero pairs. These tests also expose the remaining complete
+changed-bucket copies and expanded materialization; source/cache/store work is
+separate. No end-to-end complexity or latency claim follows from this slice.
+
+The database SQL session still uses its default registry. It does not exercise
+this opt-in physical operation yet. SQL CREATE MV/identified retry/output-history
+and original-query-directed witnesses must be rerun after residual qualification
+and default selection. R04a stays in_progress; no full-TPC or performance acceptance
+is claimed. Final gate commands/results are recorded in ROADMAP.md.

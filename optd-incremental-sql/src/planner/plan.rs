@@ -97,11 +97,22 @@ impl RelationOperator {
     }
 }
 
+/// Physical maintenance algorithm declared independently from execution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum IndexAlgorithm {
+    /// Complete affected input snapshots for join/window evaluation.
+    Scoped,
+    /// Pure equijoin membership maintained from original consolidated changes.
+    MatchCounts(RelationOperator),
+}
+
 /// Explicit state declaration consumed by index initialization and execution.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct IndexSpec {
     /// Stable state slot in this query.
     pub id: usize,
+    /// Selected maintenance algorithm and its exact typed operator.
+    pub algorithm: IndexAlgorithm,
     /// Proven affected-key closure.
     pub scope: KeyScope,
     /// Global upstream relation ids, in index-port order.
@@ -204,6 +215,13 @@ pub enum Operation {
     ProjectKeys(RelationOperator),
     /// Union affected keys and prepare an isolated candidate index exactly once.
     PrepareIndex(IndexSpec),
+    /// Maintain pure equijoin output from signed changes and match-count crossings.
+    MaintainMatchJoin {
+        /// Keyed-state slot prepared by the single shared token.
+        state: usize,
+        /// Original join type, null equality and exact output schema.
+        operator: RelationOperator,
+    },
     /// Read one complete affected input port from a prepared index version.
     IndexLookup {
         /// Declared keyed-state slot prepared earlier in this program.
@@ -303,6 +321,7 @@ impl Operation {
             Self::Apply { .. } => "Apply",
             Self::ProjectKeys(_) => "ProjectKeys",
             Self::PrepareIndex(_) => "PrepareIndex",
+            Self::MaintainMatchJoin { .. } => "MaintainMatchJoin",
             Self::IndexLookup { .. } => "IndexLookup",
             Self::CachedOutput { .. } => "CachedOutput",
             Self::EvaluateSnapshot { .. } => "EvaluateSnapshot",
@@ -350,6 +369,13 @@ impl CompiledProgram {
             match self.state {
                 Some(StateSpec::Accumulator { .. }) => super::Strategy::AccumulatorDelta,
                 Some(StateSpec::Keyed(_))
+                    if self.steps.iter().any(|step| {
+                        matches!(step.operation, Operation::MaintainMatchJoin { .. })
+                    }) =>
+                {
+                    super::Strategy::MatchCountDelta
+                }
+                Some(StateSpec::Keyed(_))
                     if !self.steps.iter().any(|step| {
                         matches!(step.operation, Operation::EvaluateSnapshot { .. })
                     }) =>
@@ -373,6 +399,9 @@ pub fn explain(root: &IncrementalRel) -> String {
             IncrementalNode::Logical(op) | IncrementalNode::Physical(op) => match op {
                 Operation::Apply { operator, mode } => {
                     let _ = write!(output, " mode={mode:?} {}", operator.template.display());
+                }
+                Operation::MaintainMatchJoin { state, operator } => {
+                    let _ = write!(output, " state={state} {}", operator.template.display());
                 }
                 Operation::EvaluateSnapshot {
                     state,

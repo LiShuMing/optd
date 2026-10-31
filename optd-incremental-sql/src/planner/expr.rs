@@ -87,6 +87,8 @@ pub enum DeltaExpr {
 pub enum Maintenance {
     /// Update qualified retractable aggregate states from signed changes only.
     Accumulate,
+    /// Maintain pure outer/semi/anti joins using indexed match-count transitions.
+    MatchJoin,
     /// Compile this verified shorthand into Optd logical and physical plans.
     Delta(DeltaExpr),
     /// Update the derived group index and recompute surviving touched groups.
@@ -102,6 +104,7 @@ impl Maintenance {
     pub fn key_scope(&self) -> Option<KeyScope> {
         match self {
             Self::Delta(expr) => expr.key_scope(),
+            Self::MatchJoin => Some(KeyScope::JoinKeys),
             _ => None,
         }
     }
@@ -110,6 +113,7 @@ impl Maintenance {
     pub fn strategy(&self) -> Strategy {
         match self {
             Self::Accumulate => Strategy::AccumulatorDelta,
+            Self::MatchJoin => Strategy::MatchCountDelta,
             Self::Delta(expr) if self.key_scope().is_some() && !expr.has_scoped_output() => {
                 Strategy::IndexedDelta
             }
@@ -222,6 +226,13 @@ pub(super) fn verify(context: &RuleContext<'_>, maintenance: &Maintenance) -> Re
         ));
     }
     match maintenance {
+        Maintenance::MatchJoin => {
+            if super::capability::match_join_eligible(context)? {
+                Ok(())
+            } else {
+                Err(Error::Invalid("unqualified pure match-count join".into()))
+            }
+        }
         Maintenance::Accumulate if context.accumulator_eligible() => Ok(()),
         Maintenance::Accumulate => Err(Error::Invalid("unqualified accumulator state".into())),
         Maintenance::Delta(expression) => {

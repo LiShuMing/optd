@@ -1141,3 +1141,66 @@ R04a next physical slice follows match_count_joins.md §10: opt-in pure-equijoin
 match-count rule and explicit MaintainMatchJoin over existing indexed bucket
 cardinalities, before residual support/default rollout. No algorithm code is yet
 implemented at this checkpoint; R04a remains in_progress.
+
+### R04a — opt-in pure equijoin match-count physical slice
+
+Implemented the initial physical alternative from
+[match-count join design §10–11](docs/src/incremental/match_count_joins.md).
+`IncrementalOptimizer::with_match_count_joins()` registers
+`builtin.match_count_join`; `Maintenance::MatchJoin` lowers to one shared
+PrepareIndex, MaintainMatchJoin and CompleteIndex with an explicit
+IndexAlgorithm::MatchCounts operator declaration. Runtime uses original consolidated
+per-port deltas and bucket cardinalities, with Delta-left/Before-right followed by
+After-left/Delta-right. Semi/anti peers and outer NULL extensions change only at
+zero crossings; outer matched pairs carry checked multiplicity products.
+
+**Verified:** eight new integration tests, a frontend admission regression and a
+checked-arithmetic kernel test. All seven orientations cover ordinary, NULL-safe
+and composite keys over 756 signed epochs against an independent nested-loop bag
+oracle, periodic fresh full SQL/schema checks, delta-prefix replay and discarded
+candidates. Directed tests cover empty/duplicate first/last matches, stale and
+invalid candidates, forged physical operator/state/token bindings, computed/USING/
+self joins, downstream aggregate/partitioned-window consumers and per-round
+DurableSqlView reopen. The initial RED failed because the opt-in API did not exist:
+`target/roadmap-r04a-match-count-red-20261031.log` (exit 101).
+
+Fixed-delta/full-join work remains identical as untouched keys grow. Pure semi/anti
+hot buckets without a zero crossing visit zero peer entries and emit zero pairs.
+The counters also expose remaining full touched-bucket copies and expanded input
+materialization. These are operator-local observations, not end-to-end O(delta) or
+performance certification. Nested report-tool tests preserve measured zeros and
+historical absence as unknown.
+
+Final environment: Rust 1.95.0, offline locked dependencies, four jobs, debug=0,
+compiler incremental disabled. Existing isolated task target:
+`target/roadmap-20261031`, with its `tmp` subdirectory as TMPDIR. Commands:
+
+```sh
+bash /tmp/optd-sql-env-20261029.sh env \
+  CARGO_TARGET_DIR=/home/admin/xwork/optd/target/roadmap-20261031 \
+  TMPDIR=/home/admin/xwork/optd/target/roadmap-20261031/tmp \
+  bash scripts/agent-check.sh sql
+python3 -m unittest discover -s optd-incremental-sql/benchmarks/tools -p 'test_*.py'
+bash /tmp/optd-sql-env-20261029.sh env \
+  CARGO_TARGET_DIR=/home/admin/xwork/optd/target/roadmap-20261031 \
+  TMPDIR=/home/admin/xwork/optd/target/roadmap-20261031/tmp \
+  RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --offline --locked \
+  -p optd-incremental-sql --no-deps --document-private-items --features iceberg
+bash /tmp/optd-sql-env-20261029.sh env \
+  MDBOOK_BUILD__BUILD_DIR=/home/admin/xwork/optd/target/roadmap-r04a-match-count-book-20261031 \
+  mdbook build docs
+```
+
+Observed: **277 default / 291 Iceberg passed; 2/3 ignored**, fmt and both Clippy
+configurations PASS, 45 Python tool tests PASS, private rustdoc/mdBook PASS, all exit
+0. Logs: `target/roadmap-r04a-match-count-{gates,tools,rustdoc,book}-20261031.log`.
+The ignored tests are existing explicit full-query/large-recovery/subprocess drivers;
+no new match-count test is ignored.
+
+**Remaining:** residual predicates retain qualified scoped maintenance; NULL-aware
+anti joins retain the explicit R06 global-dependency refusal. The database SQL
+session still uses its default registry, so this opt-in operation has not yet been
+qualified through SQL CREATE MV/identified retry/history or original-query-directed
+TPC witnesses. Complete residual/all-type/default-rollout acceptance before marking
+R04a verified. No storage format, dependency or toolchain change. Local commit only;
+no push. Overall ledger remains 12/31 verified, R04a in_progress, 18 pending.

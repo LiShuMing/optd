@@ -6,6 +6,13 @@ use crate::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::{Expr, ExprSchemable, JoinType, LogicalPlan};
 
+/// Match-count execution currently admits only pure, non-NULL-aware equijoins.
+pub(super) fn match_join_eligible(context: &super::RuleContext<'_>) -> Result<bool> {
+    Ok(matches!(context.logical_plan(), LogicalPlan::Join(join)
+        if join.join_type != JoinType::Inner && join.filter.is_none() && !join.null_aware)
+        && context.supports_key_scope(KeyScope::JoinKeys)?)
+}
+
 /// Return only proven SQL-equality keys; None is a planning capability boundary.
 pub(crate) fn key_expressions(
     plan: &LogicalPlan,

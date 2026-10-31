@@ -1,7 +1,8 @@
 //! Verify expanded Optd plans before either bootstrap or physical execution.
 
 use super::plan::{
-    ApplyMode, IncrementalNode, IncrementalRel, Operation, RelationOperator, StateSpec,
+    ApplyMode, IncrementalNode, IncrementalRel, IndexAlgorithm, Operation, RelationOperator,
+    StateSpec,
 };
 use super::{RuleContext, SnapshotVersion};
 use crate::{Error, Result};
@@ -238,6 +239,30 @@ pub(super) fn verify(
                     }
                     self.preparations.insert(node.clone());
                     Type::Index(spec.id)
+                }
+                Operation::MaintainMatchJoin { state, operator } => {
+                    arity(&types, 1)?;
+                    let Some(StateSpec::Keyed(spec)) = self.state else {
+                        return Err(invalid("missing match-count index declaration"));
+                    };
+                    if *state != spec.id
+                        || types[0] != Type::Index(*state)
+                        || !spec.before
+                        || !spec.after
+                        || spec.algorithm != IndexAlgorithm::MatchCounts(operator.clone())
+                        || operator != &RelationOperator::from_logical(self.context.logical_plan())?
+                        || !super::capability::match_join_eligible(self.context)?
+                    {
+                        return Err(invalid("match-count operator/state/version differs"));
+                    }
+                    apply(
+                        operator,
+                        &operator
+                            .inputs
+                            .iter()
+                            .map(|s| Type::Relation(std::sync::Arc::new(s.as_arrow().clone())))
+                            .collect::<Vec<_>>(),
+                    )?
                 }
                 Operation::IndexLookup {
                     state,

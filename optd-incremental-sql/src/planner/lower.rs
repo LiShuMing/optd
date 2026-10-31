@@ -2,8 +2,8 @@
 
 use super::optd_rules::{matcher, optimize, ExpandScoped, Implement};
 use super::plan::{
-    logical, lower_steps, ApplyMode, CompiledProgram, IncrementalNode, IncrementalRel, IndexSpec,
-    Operation, PlanRule, RelationOperator, StateSpec,
+    logical, lower_steps, ApplyMode, CompiledProgram, IncrementalNode, IncrementalRel,
+    IndexAlgorithm, IndexSpec, Operation, PlanRule, RelationOperator, StateSpec,
 };
 use super::{DeltaExpr, KeyScope, Maintenance, RuleContext, SnapshotVersion};
 use crate::{Error, Result};
@@ -136,61 +136,85 @@ pub(crate) fn compile(
         token: None,
     };
     let mut state = None;
-    if let Maintenance::Delta(expr) = maintenance {
-        if let Some(scope) = expr.key_scope() {
-            let keys = super::capability::key_expressions(context.logical_plan(), scope)?
-                .ok_or_else(|| Error::Invalid("missing qualified scope".into()))?;
-            let projections = operator
-                .inputs
-                .iter()
-                .zip(&keys)
-                .map(|(schema, keys)| {
-                    RelationOperator::projection(
-                        schema.clone(),
-                        keys.iter()
-                            .enumerate()
-                            .map(|(i, e)| e.clone().alias(format!("__key_{i}")))
-                            .collect(),
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let output_projection = if scope == KeyScope::WindowPartitions {
-                Some(RelationOperator::projection(
-                    operator.template.schema().clone(),
-                    keys[0]
-                        .iter()
+    if let Some(scope) = maintenance.key_scope() {
+        let keys = super::capability::key_expressions(context.logical_plan(), scope)?
+            .ok_or_else(|| Error::Invalid("missing qualified scope".into()))?;
+        let projections = operator
+            .inputs
+            .iter()
+            .zip(&keys)
+            .map(|(schema, keys)| {
+                RelationOperator::projection(
+                    schema.clone(),
+                    keys.iter()
                         .enumerate()
                         .map(|(i, e)| e.clone().alias(format!("__key_{i}")))
                         .collect(),
-                )?)
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let output_projection = if scope == KeyScope::WindowPartitions {
+            Some(RelationOperator::projection(
+                operator.template.schema().clone(),
+                keys[0]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| e.clone().alias(format!("__key_{i}")))
+                    .collect(),
+            )?)
+        } else {
+            None
+        };
+        let spec = IndexSpec {
+            id: context.node_id(),
+            scope,
+            algorithm: if matches!(maintenance, Maintenance::MatchJoin) {
+                IndexAlgorithm::MatchCounts(operator.clone())
             } else {
-                None
-            };
-            let spec = IndexSpec {
-                id: context.node_id(),
-                scope,
-                inputs: context.inputs().to_vec(),
-                projections,
-                output_projection,
-                before: expr.reads_scoped(SnapshotVersion::Before),
-                after: expr.reads_scoped(SnapshotVersion::After),
-            };
-            let changes = spec
-                .projections
-                .iter()
-                .enumerate()
-                .map(|(port, p)| {
-                    logical(
-                        Operation::ProjectKeys(p.clone()),
-                        vec![compiler.input(port, None)],
-                    )
-                })
-                .collect();
-            compiler.token = Some(logical(Operation::PrepareIndex(spec.clone()), changes));
-            state = Some(StateSpec::Keyed(spec));
-        }
+                IndexAlgorithm::Scoped
+            },
+            inputs: context.inputs().to_vec(),
+            projections,
+            output_projection,
+            before: matches!(maintenance, Maintenance::MatchJoin)
+                || matches!(maintenance, Maintenance::Delta(expr) if expr.reads_scoped(SnapshotVersion::Before)),
+            after: matches!(maintenance, Maintenance::MatchJoin)
+                || matches!(maintenance, Maintenance::Delta(expr) if expr.reads_scoped(SnapshotVersion::After)),
+        };
+        let changes = spec
+            .projections
+            .iter()
+            .enumerate()
+            .map(|(port, p)| {
+                logical(
+                    Operation::ProjectKeys(p.clone()),
+                    vec![compiler.input(port, None)],
+                )
+            })
+            .collect();
+        compiler.token = Some(logical(Operation::PrepareIndex(spec.clone()), changes));
+        state = Some(StateSpec::Keyed(spec));
     }
     let root = match maintenance {
+        Maintenance::MatchJoin => {
+            let Some(StateSpec::Keyed(spec)) = &state else {
+                return Err(Error::Invalid(
+                    "missing match-count index declaration".into(),
+                ));
+            };
+            let token = compiler
+                .token
+                .clone()
+                .ok_or_else(|| Error::Invalid("missing match-count token".into()))?;
+            let delta = logical(
+                Operation::MaintainMatchJoin {
+                    state: context.node_id(),
+                    operator: operator.clone(),
+                },
+                vec![token.clone()],
+            );
+            logical(Operation::CompleteIndex(spec.clone()), vec![token, delta])
+        }
         Maintenance::Accumulate => {
             state = Some(StateSpec::Accumulator {
                 id: context.node_id(),

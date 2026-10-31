@@ -346,8 +346,7 @@ pub(crate) async fn run(
                         .iter()
                         .map(|p| p.negative_keys.clone())
                         .collect::<Vec<_>>(),
-                    spec.before,
-                    spec.after,
+                    spec,
                 )?;
                 let changed_input_rows = changes.iter().try_fold(0usize, |n, p| {
                     n.checked_add(p.positive.num_rows())
@@ -366,9 +365,23 @@ pub(crate) async fn run(
                     snapshot_evaluations_after: 0,
                     cached_before_output_rows: 0,
                     full_input_scans: 0,
+                    match_join_work: None,
                 });
                 indexes.insert(spec.id, update);
                 Value::Index(spec.id)
+            }
+            Operation::MaintainMatchJoin { state, operator } => {
+                if !matches!(inputs[0], Value::Index(id) if id == state) {
+                    return Err(Error::Invalid("match-count index token differs".into()));
+                }
+                let update = indexes
+                    .get(state)
+                    .ok_or_else(|| Error::Invalid("missing match-count index".into()))?;
+                let (delta, work) = update.maintain_match_join(operator)?;
+                if let Some(keyed) = &mut keyed_work {
+                    keyed.match_join_work = Some(work);
+                }
+                Value::Relation(RelationValue::from_signed(delta)?)
             }
             Operation::IndexLookup {
                 state,

@@ -1,4 +1,4 @@
-//! Derived typed indexes for complete affected-key snapshots, never full filters.
+//! Derived typed indexes for affected-key snapshots and direct join maintenance.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -9,9 +9,13 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef};
 
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES, MAX_MATERIALIZED_ROWS};
 use crate::group_state::{encode_keys, partition};
+use crate::metrics::MatchJoinWork;
+use crate::planner::plan::{IndexAlgorithm, IndexSpec};
 use crate::planner::SnapshotVersion;
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
+
+mod match_join;
 
 type Key = Vec<u8>;
 
@@ -21,6 +25,8 @@ struct Bucket {
     bag: Bag,
     // Before must retain the actual bootstrap input sequence, including peers.
     batch: RecordBatch,
+    // Derived from projected key arrays; encoded key bytes are opaque.
+    key_has_null: bool,
 }
 
 /// Complete per-key input buckets for joins or partitioned windows.
@@ -44,6 +50,19 @@ pub(crate) struct KeyedUpdate<'a> {
     keys: BTreeSet<Key>,
     before: Option<&'a KeyedState>,
     after_readable: bool,
+    match_update: Option<MatchUpdate>,
+}
+
+/// Match execution owns its original deltas and the corresponding preparation work.
+struct MatchUpdate {
+    changes: Vec<BTreeMap<Key, KeyedDelta>>,
+    work: MatchJoinWork,
+}
+
+/// Original consolidated delta and its SQL NULL matching policy input.
+struct KeyedDelta {
+    bag: Bag,
+    key_has_null: bool,
 }
 
 fn invalid(message: &str) -> Error {
@@ -89,6 +108,11 @@ fn buckets(rows: &RecordBatch, keys: &RecordBatch) -> Result<StateDirectory<Arc<
                 key,
                 Arc::new(Bucket {
                     bag: Bag::from_batch(&batch)?,
+                    // Group construction always pushes at least one row index.
+                    key_has_null: keys
+                        .columns()
+                        .iter()
+                        .any(|c| c.is_null(indices.value(0) as usize)),
                     batch,
                 }),
             ))
@@ -181,14 +205,14 @@ impl KeyedState {
     /// Every row batch needs aligned keys of the fixed index type. Invalid schemas
     /// or retractions fail without changing the installed state. Snapshot rows are
     /// materialized later by lookups, restricted to the union of touched keys.
+    /// Match-count candidates also retain original net changes for their two stages.
     pub(crate) fn prepare(
         &self,
         positives: &[RecordBatch],
         positive_keys: &[RecordBatch],
         negatives: &[RecordBatch],
         negative_keys: &[RecordBatch],
-        need_before: bool,
-        need_after: bool,
+        spec: &IndexSpec,
     ) -> Result<KeyedUpdate<'_>> {
         let n = self.inputs.len();
         if [
@@ -204,6 +228,8 @@ impl KeyedState {
         }
         let mut next = self.clone();
         let mut touched = BTreeSet::new();
+        let mut retained = matches!(spec.algorithm, IndexAlgorithm::MatchCounts(_)).then(Vec::new);
+        let mut match_work = retained.as_ref().map(|_| MatchJoinWork::default());
         for port in 0..n {
             for (rows, keys) in [
                 (&positives[port], &positive_keys[port]),
@@ -229,17 +255,59 @@ impl KeyedState {
             for (key, neg) in negative {
                 changes.insert(key, empty.difference(&neg)?);
             }
-            for (key, delta) in changes {
+            // One NULL flag per touched key, derived from the actual projections.
+            let mut nulls = BTreeMap::new();
+            for keys in [&positive_keys[port], &negative_keys[port]] {
+                for (i, key) in encode_keys(keys)?.into_iter().enumerate() {
+                    nulls.insert(key, keys.columns().iter().any(|c| c.is_null(i)));
+                }
+            }
+            for (key, delta) in &changes {
                 touched.insert(key.clone());
-                let before = self.inputs[port].get(&key).map_or(&empty, |b| &b.bag);
-                let after = before.add(&delta)?;
+                let before = self.inputs[port].get(key).map_or(&empty, |b| &b.bag);
+                if let Some(work) = &mut match_work {
+                    work.bucket_entries_copied = work
+                        .bucket_entries_copied
+                        .checked_add(before.len())
+                        .ok_or(Error::Overflow)?;
+                }
+                let after = before.add(delta)?;
                 after.validate_relation()?;
                 if after.is_empty() {
-                    next.inputs[port].remove(&key);
+                    next.inputs[port].remove(key);
                 } else {
                     let batch = after.to_batch()?;
-                    next.inputs[port].insert(key, Arc::new(Bucket { bag: after, batch }));
+                    if let Some(work) = &mut match_work {
+                        work.bucket_rows_materialized = work
+                            .bucket_rows_materialized
+                            .checked_add(batch.num_rows())
+                            .ok_or(Error::Overflow)?;
+                    }
+                    let key_has_null = *nulls
+                        .get(key)
+                        .ok_or_else(|| invalid("missing changed-key NULL flag"))?;
+                    next.inputs[port].insert(
+                        key.clone(),
+                        Arc::new(Bucket {
+                            bag: after,
+                            batch,
+                            key_has_null,
+                        }),
+                    );
                 }
+            }
+            if let Some(retained) = &mut retained {
+                retained.push(
+                    changes
+                        .into_iter()
+                        .map(|(key, bag)| {
+                            let key_has_null = *nulls
+                                .get(&key)
+                                .ok_or_else(|| invalid("missing delta key NULL flag"))?;
+                            Ok((key, KeyedDelta { bag, key_has_null }))
+                        })
+                        .collect::<Result<BTreeMap<_, _>>>()?,
+                );
             }
         }
         Ok(KeyedUpdate {
@@ -247,8 +315,11 @@ impl KeyedState {
             keys: touched,
             // Keep immutable buckets, not eagerly materialized snapshot inputs.
             // Physical lookups alone read the requested versions and ports.
-            before: need_before.then_some(self),
-            after_readable: need_after,
+            before: spec.before.then_some(self),
+            after_readable: spec.after,
+            match_update: retained
+                .zip(match_work)
+                .map(|(changes, work)| MatchUpdate { changes, work }),
         })
     }
 }

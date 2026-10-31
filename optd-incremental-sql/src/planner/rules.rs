@@ -25,6 +25,7 @@ enum Builtin {
     OrderedRecompute,
     AggregateRecompute,
     KeyedJoin,
+    MatchCountJoin,
     PartitionedWindow,
     NonInnerJoinRecompute,
     WindowRecompute,
@@ -61,6 +62,10 @@ pub(super) fn builtins() -> Vec<Arc<dyn IncrementalRule>> {
     .collect()
 }
 
+pub(super) fn match_count_join() -> Arc<dyn IncrementalRule> {
+    Arc::new(Builtin::MatchCountJoin)
+}
+
 impl IncrementalRule for Builtin {
     fn name(&self) -> &str {
         match self {
@@ -78,6 +83,7 @@ impl IncrementalRule for Builtin {
             Self::OrderedRecompute => "builtin.ordered_recompute",
             Self::AggregateRecompute => "builtin.aggregate_recompute",
             Self::KeyedJoin => "builtin.keyed_join",
+            Self::MatchCountJoin => "builtin.match_count_join",
             Self::PartitionedWindow => "builtin.partitioned_window",
             Self::NonInnerJoinRecompute => "builtin.non_inner_join_recompute",
             Self::WindowRecompute => "builtin.window_recompute",
@@ -90,6 +96,8 @@ impl IncrementalRule for Builtin {
     fn priority(&self) -> i32 {
         if matches!(self, Self::OrderedRecompute) {
             100
+        } else if matches!(self, Self::MatchCountJoin) {
+            20
         } else if matches!(self, Self::Accumulator) {
             10
         } else {
@@ -137,6 +145,7 @@ impl IncrementalRule for Builtin {
             Self::AggregateRecompute => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && !context.group_eligible()
             }
+            Self::MatchCountJoin => super::capability::match_join_eligible(context)?,
             Self::KeyedJoin => {
                 matches!(plan, LogicalPlan::Join(join) if join.join_type != JoinType::Inner)
                     && context.supports_key_scope(KeyScope::JoinKeys)?
@@ -158,6 +167,7 @@ impl IncrementalRule for Builtin {
 
     fn rewrite(&self, context: &RuleContext<'_>) -> Result<RuleRewrite> {
         let (maintenance, reason) = match self {
+            Self::MatchCountJoin => (Maintenance::MatchJoin, "maintain pure equijoin match counts using delta-left/before-right then after-left/delta-right; peer membership changes only at zero crossings"),
             Self::Accumulator => (Maintenance::Accumulate, "update qualified builtin aggregate state from insertions/retractions without reading historical group inputs"),
             Self::Constant => (
                 Maintenance::Constant,

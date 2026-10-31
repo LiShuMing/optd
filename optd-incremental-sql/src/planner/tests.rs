@@ -322,3 +322,31 @@ fn null_aware_anti_join_cannot_declare_only_equal_key_dependencies() -> Result<(
     }
     Ok(())
 }
+
+#[test]
+fn match_join_frontend_refuses_inner_residual_and_null_aware_operators() -> Result<()> {
+    use datafusion::logical_expr::{lit, Join, JoinType};
+    let LogicalPlan::Join(join) = keyed_join(DataType::Int64, DataType::Int64)? else {
+        panic!("builder creates a join");
+    };
+    for (kind, residual, null_aware, eligible) in [
+        (JoinType::Full, None, false, true),
+        (JoinType::Inner, None, false, false),
+        (JoinType::Left, Some(lit(true)), false, false),
+        (JoinType::LeftAnti, None, true, false),
+    ] {
+        let plan = LogicalPlan::Join(Join::try_new(
+            join.left.clone(),
+            join.right.clone(),
+            join.on.clone(),
+            residual,
+            kind,
+            join.join_constraint,
+            join.null_equality,
+            null_aware,
+        )?);
+        let context = RuleContext::new(2, &plan, &[0, 1], false, false);
+        assert_eq!(verify(&context, &Maintenance::MatchJoin).is_ok(), eligible);
+    }
+    Ok(())
+}

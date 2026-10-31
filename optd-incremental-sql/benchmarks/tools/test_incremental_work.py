@@ -48,6 +48,23 @@ class IncrementalWork(unittest.TestCase):
             del round_["sql_stats"]["nodes"][0]["accumulator_work"]["distinct_work"]
         self.assertFalse(any("distinct_work" in key for key in audit(source)["observed_work"]))
 
+    def test_match_count_work_retains_measured_zeros_and_legacy_unknown(self):
+        source = self.fixture()
+        rounds = source["queries"][0]["profiles"][0]["verification"]["rounds"]
+        for round_ in rounds:
+            round_["sql_stats"]["nodes"] = [{"strategy": "MatchCountDelta", "keyed_work": {
+                "scope": "JoinKeys", "snapshot_input_rows_before": [0, 0],
+                "snapshot_input_rows_after": [0, 0], "match_join_work": {
+                    "count_probes": 1, "peer_entries_visited": 0,
+                    "matched_pairs": 0, "bucket_entries_copied": 300}}}]
+        work = audit(source)["observed_work"]
+        self.assertEqual(work["keyed_work.match_join_work.count_probes"], 3)
+        self.assertEqual(work["keyed_work.match_join_work.peer_entries_visited"], 0)
+        self.assertEqual(work["keyed_work.match_join_work.bucket_entries_copied"], 900)
+        for round_ in rounds:
+            del round_["sql_stats"]["nodes"][0]["keyed_work"]["match_join_work"]
+        self.assertFalse(any("match_join_work" in key for key in audit(source)["observed_work"]))
+
     def test_unexecuted_planned_blocker_prevents_strict_coverage_claim(self):
         result=audit(self.fixture())
         self.assertEqual(result["counts"],{"total":1,"semantic_pass":1,"strict_plan_eligible":0,
