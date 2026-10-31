@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+use super::dml_work::DmlExecutionWork;
+
 /// DML selection and emitted changes, distinct from incremental operator work.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DmlWork {
@@ -16,6 +18,10 @@ pub struct DmlWork {
     pub source_relation_rows: usize,
     /// Distinct nonzero full-row changes after consolidation.
     pub net_changed_rows: usize,
+    /// Actual selector delivery and target replacement work, when measured.
+    /// Missing in historical receipts means unknown; retries retain the original.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<DmlExecutionWork>,
 }
 
 /// Durable outcome of one database transaction; retained for identified retries.

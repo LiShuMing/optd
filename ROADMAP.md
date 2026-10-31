@@ -30,7 +30,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | ID | Priority | Work | Acceptance criterion | Status |
 | --- | --- | --- | --- | --- |
 | R01a | P0 | Refresh work accounting: state-directory copies, relation rebuilds and materialization | Actual operation-boundary counters distinguish rows, entries and Arrow bytes; fixed-delta tests expose current scale costs; explicit scope exclusions | verified |
-| R01b | P0 | SQL selector and DML work accounting | Measure consumed source batches/rows separately from available relation rows; report target rebuild and delta generation | pending |
+| R01b | P0 | SQL selector and DML work accounting | Measure consumed source batches/rows separately from available relation rows; report target rebuild and delta generation | verified |
 | R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | pending |
 | R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | pending |
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
@@ -165,10 +165,46 @@ directory copies remain. Consolidating staged deltas also has its own work.
 This increment removes repeated complete-source rebuilds; it does not establish
 end-to-end delta complexity or a controlled latency/memory improvement.
 
+### R01b — actual SQL selector and target work
+
+Design: [DML work accounting](docs/src/incremental/dml_work_accounting.md).
+The physical scan providers count delivered batches, expanded rows and Arrow buffer
+bytes without retaining batches or introducing background work. Preserve provider
+statistics, fetch, projection and scalar subquery behavior. VALUES counts zero
+relation reads. `source_relation_rows` retains its logical meaning. Optional
+`DmlWork.execution` separates actual selector output, target collection/full-map
+copy/materialization and old/new row images. Old receipts retain unknown fields;
+identified retries retain their original diagnostic and `replayed=true`.
+
+**Verified regression:** the six initial focused cases failed against the previous
+implementation (exit 101, missing execution fields), log
+`target/roadmap-r01b-red-20261031.log`. Subsequent seven focused cases passed (exit 0),
+log `target/roadmap-r01b-green-20261031.log`. The complete gates additionally tested
+a mixed table/constant UNION branch. Cases cover fixed changes with growing
+untouched input, eliminated/limited/repeated reads, scalar subqueries, duplicate
+outputs, NULL rejection, transaction snapshots, retries/reopen and concurrent roots.
+Two unit tests check Pending/error/empty/zero-column stream behavior and atomic
+counter-overflow rejection.
+
+Commands use the R01a wrapper, Rust 1.95.0, locked offline dependencies, four jobs,
+debug=0, compiler incremental disabled, project target/TMPDIR. Focused command:
+`cargo +1.95.0 test --offline --locked -p optd-incremental-sql --test dml_work`.
+`bash scripts/agent-check.sh sql` exited 0: format, both Clippy configurations,
+175 default tests (2 ignored), 189 Iceberg tests (3 ignored). Log:
+`target/roadmap-r01b-gates-20261031.log`. Ignored qualification cases remain excluded.
+The private-rustdoc command from R01a exited 0; log
+`target/roadmap-r01b-rustdoc-20261031.log`. mdBook via the same wrapper and
+`MDBOOK_BUILD__BUILD_DIR=/home/admin/xwork/optd/target/roadmap-book-20261031`
+exited 0; log `target/roadmap-r01b-docs-20261031.log`. An initial unwrapped invocation
+could not find mdBook (exit 127); it is not reported as a successful build.
+
+The existing resolved futures and async-trait APIs were exposed in separate local
+commits `d1d1f74` and `c85014b`; versions and resolved package identities are unchanged.
+Implementation is local-only. Counting delivered Arrow buffers does not measure
+allocator/device IO. Full target conversion and replacement remain visible costs;
+no efficiency or full TPC/performance qualification is claimed.
+
 ### Next increment
 
-R01b: measure SQL selector batches/rows actually consumed, complete target-Bag
-collection/rebuild and target Arrow materialization separately from available
-relation rows. Keep statement snapshots and explicit-transaction read-your-writes;
-retries must retain the original diagnostic rather than claim fresh execution.
-Write its design and operation-boundary tests before implementing the counters.
+R01c: instrument SQL database payload reuse/writes, metadata/history reads and
+recovery reconstruction without serializing invocation work into original receipts.

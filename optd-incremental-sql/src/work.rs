@@ -1,7 +1,7 @@
 //! Candidate-local accounting for full relation caches and cloned state directories.
 
 use datafusion::arrow::array::RecordBatch;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
@@ -12,7 +12,7 @@ use crate::{Error, Result};
 /// allocator traffic, retained unique bytes or disk IO. Temporary expressions and
 /// affected-bucket payload updates are outside this counter's scope. Complete
 /// replacement batches from physical expressions are also excluded.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationWork {
     /// Nonempty signed updates that rebuild a complete relation map.
     pub map_rebuilds: usize,

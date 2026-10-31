@@ -1,14 +1,14 @@
 //! Compile one DML statement into old/new typed row images from one snapshot.
 
+use super::dml_work::{DmlExecutionWork, DmlTargetWork, SelectorWork};
 use super::response::DmlWork;
-use super::sql::{self, RelationScope};
 use super::store::DatabaseSnapshot;
+use super::{selector_work, sql};
 use crate::bag::Bag;
 use crate::error::invalid;
 use crate::Result;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::logical_expr::LogicalPlan;
-use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::{
     AssignmentTarget, FromTable, Statement, TableFactor, TableObject, TableWithJoins,
 };
@@ -30,6 +30,7 @@ struct RowImages {
     old: RecordBatch,
     new: RecordBatch,
     source_plan: LogicalPlan,
+    source_work: SelectorWork,
 }
 
 fn target(table: &TableWithJoins) -> Result<String> {
@@ -53,7 +54,7 @@ fn target(table: &TableWithJoins) -> Result<String> {
 }
 
 /// A candidate table replacement and its consolidated `new - old` signed changes.
-/// Work counters describe logical inputs and affected rows, not measured IO.
+/// Work separates logical dependencies from measured delivery and target replacement.
 pub(super) struct DmlResult {
     pub table: String,
     pub batch: RecordBatch,
@@ -67,7 +68,7 @@ pub(super) struct DmlResult {
 /// incremental view maintenance. No table, view or durable state is mutated.
 pub(super) struct DmlCompiler<'a> {
     snapshot: &'a DatabaseSnapshot,
-    context: SessionContext,
+    selector: selector_work::MeasuredSelector,
     mode: TransactionMode,
 }
 
@@ -76,7 +77,7 @@ impl<'a> DmlCompiler<'a> {
     pub(super) fn new(snapshot: &'a DatabaseSnapshot, mode: TransactionMode) -> Result<Self> {
         Ok(Self {
             snapshot,
-            context: sql::context(snapshot, RelationScope::AllRelations)?,
+            selector: selector_work::MeasuredSelector::new(snapshot)?,
             mode,
         })
     }
@@ -86,12 +87,13 @@ impl<'a> DmlCompiler<'a> {
     /// Images must match the target schema. UPDATE assignments all read the old
     /// row, including when one assignment refers to another assigned column.
     /// Errors discard local work and leave the borrowed snapshot unchanged.
-    pub(super) async fn compile(&self, statement: &Statement) -> Result<DmlResult> {
+    pub(super) async fn compile(self, statement: &Statement) -> Result<DmlResult> {
         let RowImages {
             table,
             old,
             new,
             source_plan: plan,
+            source_work,
         } = match statement {
             Statement::Insert(_) => self.compile_insert(statement).await?,
             Statement::Delete(_) => self.compile_delete(statement).await?,
@@ -105,7 +107,26 @@ impl<'a> DmlCompiler<'a> {
             .ok_or_else(|| invalid("unbound DML target"))?
             .batch;
         let delta = Bag::from_parts(&new, &old)?;
-        let next = Bag::from_batch(before)?.add(&delta)?.to_batch()?;
+        let target = Bag::from_batch(before)?;
+        let mut execution = DmlExecutionWork {
+            selector: source_work,
+            old_image_rows: old.num_rows(),
+            new_image_rows: new.num_rows(),
+            target: DmlTargetWork {
+                collected_rows: before.num_rows(),
+                distinct_entries: target.len(),
+                ..Default::default()
+            },
+        };
+        let next = target.add(&delta)?;
+        if !delta.is_empty() {
+            execution.target.delta_update.record_rebuild(target.len())?;
+        }
+        let next = next.to_batch()?;
+        execution
+            .target
+            .delta_update
+            .record_materialization(&next)?;
         let mut input_rows = 0usize;
         for name in sql::reads(&plan)? {
             let rows = self
@@ -129,6 +150,7 @@ impl<'a> DmlCompiler<'a> {
                 affected_rows,
                 source_relation_rows: input_rows,
                 net_changed_rows: delta.len(),
+                execution: Some(execution),
             },
             delta,
         })
@@ -140,7 +162,7 @@ impl<'a> DmlCompiler<'a> {
             return Err(invalid("expected INSERT statement"));
         };
         let snapshot = self.snapshot;
-        let ctx = &self.context;
+        let ctx = &self.selector.context;
         let mode = self.mode;
         let TableObject::TableName(target) = &insert.table else {
             return Err(invalid("INSERT requires a named base table"));
@@ -187,15 +209,14 @@ impl<'a> DmlCompiler<'a> {
         let input = dml.input.as_ref().clone();
         sql::immutable(&input)?;
         sql::reject_mv_reads(snapshot, &input, mode)?;
-        let new = sql::typed(
-            &sql::collect(ctx, input.clone()).await?,
-            original.batch.schema(),
-        )?;
+        let selected = self.selector.collect(input.clone()).await?;
+        let new = sql::typed(&selected.batch, original.batch.schema())?;
         Ok(RowImages {
             table,
             old: RecordBatch::new_empty(original.batch.schema()),
             new,
             source_plan: input,
+            source_work: selected.work,
         })
     }
 
@@ -205,7 +226,7 @@ impl<'a> DmlCompiler<'a> {
             return Err(invalid("expected DELETE statement"));
         };
         let snapshot = self.snapshot;
-        let ctx = &self.context;
+        let ctx = &self.selector.context;
         let mode = self.mode;
         let from = match &delete.from {
             FromTable::WithFromKeyword(f) | FromTable::WithoutKeyword(f) => f,
@@ -232,16 +253,15 @@ impl<'a> DmlCompiler<'a> {
         )
         .await?;
         sql::reject_mv_reads(snapshot, &plan, mode)?;
-        let old = sql::typed(
-            &sql::collect(ctx, plan.clone()).await?,
-            original.batch.schema(),
-        )?;
+        let selected = self.selector.collect(plan.clone()).await?;
+        let old = sql::typed(&selected.batch, original.batch.schema())?;
         let new = RecordBatch::new_empty(original.batch.schema());
         Ok(RowImages {
             table,
             old,
             new,
             source_plan: plan,
+            source_work: selected.work,
         })
     }
 
@@ -251,7 +271,7 @@ impl<'a> DmlCompiler<'a> {
             return Err(invalid("expected UPDATE statement"));
         };
         let snapshot = self.snapshot;
-        let ctx = &self.context;
+        let ctx = &self.selector.context;
         let mode = self.mode;
         let table = target(&update.table)?;
         let original = snapshot
@@ -315,7 +335,8 @@ impl<'a> DmlCompiler<'a> {
         )
         .await?;
         sql::reject_mv_reads(snapshot, &plan, mode)?;
-        let images = sql::collect(ctx, plan.clone()).await?;
+        let selected = self.selector.collect(plan.clone()).await?;
+        let images = selected.batch;
         let old = sql::typed(
             &images.project(&(0..width).collect::<Vec<_>>())?,
             original.batch.schema(),
@@ -329,6 +350,7 @@ impl<'a> DmlCompiler<'a> {
             old,
             new,
             source_plan: plan,
+            source_work: selected.work,
         })
     }
 }

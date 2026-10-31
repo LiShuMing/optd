@@ -1,6 +1,6 @@
 # SQL DML execution work accounting
 
-**Status:** accepted · 2026-10-31; implementation pending
+**Status:** accepted · 2026-10-31; implementation verified (ROADMAP R01b)
 **Scope:** ROADMAP R01b. Diagnostic accounting only; transaction representation,
 source IO, durable store work and recovery computation remain separate increments.
 

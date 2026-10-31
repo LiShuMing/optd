@@ -4,11 +4,14 @@
 //! images and delegated to the existing incremental planner and executor.
 
 mod dml_compiler;
+mod dml_work;
 mod response;
+mod selector_work;
 mod sql;
 mod sql_session;
 mod store;
 mod transaction_workspace;
 
+pub use dml_work::{DmlExecutionWork, DmlTargetWork, SelectorWork};
 pub use response::{display_rows, CommitReport, DmlWork, SqlResponse};
 pub use sql_session::SqlSession;
