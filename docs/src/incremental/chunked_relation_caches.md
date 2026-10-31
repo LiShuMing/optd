@@ -37,8 +37,10 @@ bootstrap and materialization work types to the state/work layer and preserve ol
 public import paths using explicit re-exports/adapters. No whole-map conversion is
 needed merely to pass changes between source, graph and SQL ownership layers.
 
-Use RowBlocks for positive raw sources and maintained relations. Signed incoming,
-intermediate and outgoing deltas remain Bags. Probe staged source additions only
+Use RowBlocks for positive maintained relations. Raw-source storage must retain
+nonexpanded weights and its existing admission contract before switching away from
+complete Bags; using materialized SQL row blocks directly is insufficient. Signed
+incoming, intermediate and outgoing deltas remain Bags. Probe staged source additions only
 for incoming rows through row-block lookup, retaining ordered checked arithmetic
 before net consolidation. Apply a nonempty net delta once per source/node and
 measure actual touched-leaf copies, splits, encoding and directory work. Retain all
@@ -53,10 +55,16 @@ requires it. Finalize the root before returning a prepared refresh; its public
 borrowed contents API remains infallible. Snapshot operations explicitly request
 materialization and record misses. Repeated demands share the cache.
 
-Deliver in two reviewable stages within R02d: first shared positive blocks and lazy
-complete concatenation, then deferred/chunked leaf caches and duplicate expansion.
+Deliver in two reviewable stages within R02d: first shared maintained-node blocks
+and lazy complete concatenation, then raw-source state, deferred/chunked leaf caches
+and duplicate expansion.
 The first stage retains eager touched-leaf batches, their measured cost and the
-existing SQL provider behavior; it cannot mark R02d verified. The second stage
+existing SQL provider behavior and complete raw-source Bags; it cannot mark R02d
+verified. Raw source multiplicities may exceed a single materialization budget when
+the SQL graph does not read them. Importing SQL-table limits into that state would
+reject previously valid prepares. Preserve that behavior until raw storage separates
+retained weights from demanded expansion; test an unread source at `i64::MAX` and
+a later deletion back to its initial weight. The second stage
 must preserve provider laziness and account actual leaf cache misses instead of
 materializing unused registered tables. No invented zero or hidden complete Bag
 rebuild is permitted to make either stage's counters look bounded.
@@ -104,3 +112,24 @@ arithmetic must probe historical exact row weights before consolidation, includi
 negative intermediate prefixes and representable extreme cancellation. Existing
 RowBlocks' shared converter and two-phase final-budget checks remain mandatory.
 This is local source/design review, not independent review or implementation proof.
+
+
+Review during implementation separates raw-source admission from materialized node
+caches. `Bag::from_batch` checks physical inputs, while unused raw source state can
+retain huge positive weights without expanding them. The stage-one source switch
+was removed before delivery to preserve this contract. Existing staged-overflow
+checks and complete-source rebuild counters remain in place. Physical replacements
+now report their Arrow collection/leaf bootstrap separately; full maintained-node snapshot/root
+concatenations report actual misses, rows and Arrow bytes. Old work JSON without
+these new counters is not evidence of measured zero.
+
+Raw SourceRead keeps its original lazy Bag binding in stage one; do not eagerly
+materialize it merely to count an available relation. Raw-source physical expression
+expansion remains outside the new maintained-node concatenation counters until the
+source/leaf-laziness stage provides operation-boundary attribution.
+
+Extended cache diagnostics use one boxed `CacheRelationWork` with flattened JSON
+fields. This keeps the existing public Iceberg refresh enum and its field types
+compact as counters grow; it does not box or share mutable operator state. Old
+`database::TableBlockWork`, `TableBootstrapWork` and `TableMaterializationWork`
+imports remain explicit re-exports of the neutral work definitions.

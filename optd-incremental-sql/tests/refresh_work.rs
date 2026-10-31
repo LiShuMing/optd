@@ -86,7 +86,7 @@ async fn check_oracle(
 }
 
 #[tokio::test]
-async fn fixed_delta_exposes_full_source_and_cache_rebuilds_as_untouched_rows_grow() {
+async fn fixed_delta_separates_full_sources_leaf_updates_and_required_root_output() {
     let sql = "SELECT k, v FROM t";
     for n in [32, 256] {
         let maintained = view(sql, tables(n)).await;
@@ -99,16 +99,20 @@ async fn fixed_delta_exposes_full_source_and_cache_rebuilds_as_untouched_rows_gr
         assert_eq!(work.sources.old_row_entries_copied, n);
         assert_eq!(work.sources.materializations, 0);
         assert!(work.caches.map_rebuilds > 0);
-        assert_eq!(work.caches.materializations, work.caches.map_rebuilds);
+        // A touched leaf can split into two new caches at the 256-entry boundary.
+        assert!(work.caches.materializations >= work.caches.map_rebuilds);
+        assert!(work.caches.materializations <= 2 * work.caches.map_rebuilds);
         assert_eq!(
             work.caches.old_row_entries_copied,
             n * work.caches.map_rebuilds
         );
         assert_eq!(
             work.caches.materialized_rows,
-            (n + 1) * work.caches.materializations
+            (n + 1) * work.caches.map_rebuilds
         );
         assert!(work.caches.materialized_array_bytes > 0);
+        assert_eq!(work.cache_work.complete_caches.rows, (n + 1) as u64);
+        assert_eq!(work.cache_work.complete_caches.misses, 1);
         let mut expected = rows(n);
         expected.push((n as i64, 7));
         check_oracle(

@@ -22,6 +22,7 @@ use crate::group_state::{supported_key, GroupState, KeyPolicy};
 use crate::keyed_state::KeyedState;
 use crate::planner::plan::{self, StateSpec};
 use crate::planner::{IncrementalOptimizer, IncrementalPlan, RuleContext, Strategy};
+use crate::row_blocks::RowBlocks;
 use crate::store::Snapshot;
 use crate::{Error, Result};
 
@@ -51,12 +52,13 @@ pub struct PreparedSqlRefresh {
     keyed: Vec<Option<KeyedState>>,
     accumulators: Vec<Option<AccumulatorState>>,
     delta: Bag,
+    output: RecordBatch,
     stats: RefreshStats,
 }
 impl PreparedSqlRefresh {
     /// Candidate full SQL result, preserving the root's ordering if present.
     pub fn contents(&self) -> &RecordBatch {
-        &self.states[self.states.len() - 1].batch
+        &self.output
     }
     /// Complete row images followed by signed `__optd_weight` multiplicities.
     pub fn delta(&self) -> Result<RecordBatch> {
@@ -155,12 +157,7 @@ impl SqlView {
             epoch: 0,
             tables: self.tables()?,
             output: self.contents()?,
-            delta: self
-                .states
-                .last()
-                .ok_or_else(|| Error::Invalid("empty SQL graph".into()))?
-                .bag
-                .weighted_batch()?,
+            delta: Bag::from_batch(&self.contents()?)?.weighted_batch()?,
         })
     }
 
@@ -286,19 +283,20 @@ impl SqlView {
                     out.accumulators[id] = Some(AccumulatorState::new(
                         &out.ctx,
                         operator,
-                        &out.states[*input].batch,
+                        &out.states[*input].rows.materialize()?.batch,
                     )?);
                 }
                 Some(StateSpec::Group {
                     input, projection, ..
                 }) => {
-                    let input = &out.states[*input].batch;
+                    let input_batch = out.states[*input].rows.materialize()?.batch;
+                    let input = &input_batch;
                     let keys =
                         executor::apply(&out.ctx, projection, std::slice::from_ref(input)).await?;
                     let index = GroupState::try_new(
                         input,
                         &keys,
-                        &out.states[id].batch,
+                        &out.states[id].rows.materialize()?.batch,
                         KeyPolicy {
                             binary_strings: true,
                         },
@@ -312,8 +310,8 @@ impl SqlView {
                     let inputs = spec
                         .inputs
                         .iter()
-                        .map(|i| out.states[*i].batch.clone())
-                        .collect::<Vec<_>>();
+                        .map(|i| Ok(out.states[*i].rows.materialize()?.batch))
+                        .collect::<Result<Vec<_>>>()?;
                     let mut projected = Vec::with_capacity(inputs.len());
                     for (input, projection) in inputs.iter().zip(&spec.projections) {
                         projected.push(
@@ -326,16 +324,15 @@ impl SqlView {
                             executor::apply(
                                 &out.ctx,
                                 projection,
-                                std::slice::from_ref(&out.states[id].batch),
+                                std::slice::from_ref(&out.states[id].rows.materialize()?.batch),
                             )
                             .await?,
                         )
                     } else {
                         None
                     };
-                    let output = output_keys
-                        .as_ref()
-                        .map(|keys| (&out.states[id].batch, keys));
+                    let output_batch = out.states[id].rows.materialize()?.batch;
+                    let output = output_keys.as_ref().map(|keys| (&output_batch, keys));
                     out.keyed[id] = Some(KeyedState::new(&inputs, &projected, output)?);
                 }
                 None => {}
@@ -352,8 +349,10 @@ impl SqlView {
     pub fn contents(&self) -> Result<RecordBatch> {
         self.states
             .last()
-            .map(|s| s.batch.clone())
-            .ok_or_else(|| Error::Invalid("empty plan graph".into()))
+            .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
+            .rows
+            .materialize()
+            .map(|m| m.batch)
     }
     /// Canonical source snapshots at this epoch, suitable for a separate oracle.
     pub fn tables(&self) -> Result<BTreeMap<String, RecordBatch>> {
@@ -512,7 +511,7 @@ impl SqlView {
                 .collect::<Result<Vec<_>>>()?;
             return Ok(node.plan.with_new_exprs(node.plan.expressions(), inputs)?);
         }
-        cache_scan(node.plan.schema(), states[id].batch.clone(), id)
+        cache_scan(node.plan.schema(), states[id].rows.materialize()?.batch, id)
     }
 
     async fn eval_full(&self, id: usize, states: &[Relation]) -> Result<RecordBatch> {
@@ -581,7 +580,7 @@ impl SqlView {
             let mut group_work = None;
             let mut keyed_work = None;
             let mut accumulator_work = None;
-            let schema = self.states[id].bag.schema();
+            let schema = self.states[id].rows.schema();
             // Scans own a raw-source dependency even though they have no graph
             // children. This binding is independent of the selected rule.
             let source_delta = if let LogicalPlan::TableScan(scan) = &node.plan {
@@ -639,24 +638,34 @@ impl SqlView {
                 accumulator_work = result.accumulator_work;
                 keyed_work = result.keyed_work;
                 group_work = result.group_work;
-                (
-                    result.delta,
-                    result.replacement.map(Relation::new).transpose()?,
-                )
+                let replacement = if let Some(batch) = result.replacement {
+                    let imported = RowBlocks::from_batch(batch)?;
+                    stats
+                        .work
+                        .cache_work
+                        .replacement_bootstrap
+                        .absorb(&imported.work)?;
+                    Some(Relation {
+                        rows: imported.rows,
+                    })
+                } else {
+                    None
+                };
+                (result.delta, replacement)
             };
             if dirty {
                 states[id] = match next {
                     Some(next) => next,
                     None if delta.is_empty() => self.states[id].clone(),
                     None => {
-                        let updated = self.states[id].bag.add(&delta)?;
+                        let update = self.states[id].rows.apply(&delta)?;
+                        stats.work.caches.absorb(&update.work.delta_update)?;
                         stats
                             .work
-                            .caches
-                            .record_rebuild(self.states[id].bag.len())?;
-                        let relation = Relation::from_bag(updated)?;
-                        stats.work.caches.record_materialization(&relation.batch)?;
-                        relation
+                            .cache_work
+                            .cache_blocks
+                            .absorb(&update.work.block_update)?;
+                        Relation { rows: update.rows }
                     }
                 };
                 stats.nodes.push(NodeStats {
@@ -670,12 +679,29 @@ impl SqlView {
                     accumulator_work,
                 });
             }
-            sequence_changed.push(node.ordered && states[id].batch != self.states[id].batch);
+            let changed_sequence = if node.ordered {
+                let after = states[id]
+                    .rows
+                    .materialize_recorded(&mut stats.work.cache_work.complete_caches)?;
+                let before = self.states[id]
+                    .rows
+                    .materialize_recorded(&mut stats.work.cache_work.complete_caches)?;
+                after != before
+            } else {
+                false
+            };
+            sequence_changed.push(changed_sequence);
             deltas.push(delta);
         }
         let delta = deltas
             .pop()
             .ok_or_else(|| Error::Invalid("empty graph".into()))?;
+        // Complete root output is an explicit API demand; intermediates remain lazy.
+        let output = states
+            .last()
+            .ok_or_else(|| Error::Invalid("empty graph".into()))?
+            .rows
+            .materialize_recorded(&mut stats.work.cache_work.complete_caches)?;
         Ok(PreparedSqlRefresh {
             owner: self.owner,
             before: self.epoch,
@@ -685,6 +711,7 @@ impl SqlView {
             keyed,
             accumulators,
             delta,
+            output,
             stats,
         })
     }

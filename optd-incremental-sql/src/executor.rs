@@ -19,6 +19,7 @@ use crate::keyed_state::{KeyedState, KeyedUpdate};
 use crate::metrics::{AccumulatorWork, GroupWork, KeyedWork};
 use crate::planner::plan::{ApplyMode, Operation, PhysicalStep, RelationOperator};
 use crate::planner::SnapshotVersion;
+use crate::row_blocks::RowBlocks;
 use crate::{Error, Result};
 
 pub(crate) async fn execute(ctx: &SessionContext, plan: LogicalPlan) -> Result<RecordBatch> {
@@ -266,8 +267,12 @@ pub(crate) async fn run(
             }
             Operation::SnapshotRead { input, version, .. } => {
                 Value::Relation(RelationValue::new(match version {
-                    SnapshotVersion::Before => bindings.before[*input].batch.clone(),
-                    SnapshotVersion::After => bindings.after[*input].batch.clone(),
+                    SnapshotVersion::Before => bindings.before[*input]
+                        .rows
+                        .materialize_recorded(&mut refresh_work.cache_work.complete_caches)?,
+                    SnapshotVersion::After => bindings.after[*input]
+                        .rows
+                        .materialize_recorded(&mut refresh_work.cache_work.complete_caches)?,
                 })?)
             }
             Operation::SourceRead { name, delta, .. } => {
@@ -518,24 +523,16 @@ pub(crate) async fn run(
     })
 }
 
+/// One positive maintained relation, retaining physical bootstrap/replacement order.
 #[derive(Clone)]
 pub(crate) struct Relation {
-    pub(crate) bag: Bag,
-    // Preserve physical sequence for ordering-sensitive consumers. Native
-    // delta operators otherwise materialize in a deterministic canonical order.
-    pub(crate) batch: RecordBatch,
+    pub(crate) rows: RowBlocks,
 }
 impl Relation {
     pub(crate) fn new(batch: RecordBatch) -> Result<Self> {
         Ok(Self {
-            bag: Bag::from_batch(&batch)?,
-            batch,
+            rows: RowBlocks::from_batch(batch)?.rows,
         })
-    }
-    pub(crate) fn from_bag(bag: Bag) -> Result<Self> {
-        bag.validate_relation()?;
-        let batch = bag.to_batch()?;
-        Ok(Self { bag, batch })
     }
 }
 

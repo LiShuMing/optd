@@ -427,3 +427,65 @@ scans, per-bucket work, Arrow flattening, bootstrap/history or checkpoint costs.
 Directory allocations and tree comparisons are not allocator-byte or CPU counters.
 No full TPC matrix or controlled performance qualification was run. Local-only
 implementation; next work is R02d and all remaining ledger entries.
+
+
+### R02d — stage one: shared maintained blocks and lazy complete caches
+
+**Status: in_progress.** Design:
+[chunked relation caches](docs/src/incremental/chunked_relation_caches.md).
+Extracted the SQL row-block implementation into the neutral `row_blocks` module;
+SQL keeps its existing TableRows import and diagnostic aliases. Maintained graph
+relations now share bounded leaves, update touched leaves and defer complete Arrow
+concatenation until a snapshot, ordering or root-result demand. Root contents is
+finalized before prepare returns. Bootstrap/replacement physical sequence remains
+available. Complete replacements record collection and leaf bootstrap separately.
+Extended diagnostics use one boxed value with flattened JSON, preserving existing
+Iceberg result field types while avoiding a large enum allocation footprint.
+
+**Verified partial scope:** with fixed one-row changes and fixed one-row SUM root
+output, growing input from 1024 to 8192 leaves cache copying at 514 historical
+entries, leaf materialization at 516 rows, and complete concatenation at one root
+row/miss. Directory node copies grow from 8 to 12. Independent full SQL agrees.
+Three `relation_block_work` cases additionally retain an unread raw source at
+`i64::MAX` multiplicity and delete it back to its starting state; eager constant
+projection/COUNT duplicate expansion remains explicitly measured, not fixed.
+Raw-source complete-map copies remain 1024/8192 and are not relabeled as leaf work.
+
+An initial whole-R02d target failed against the old source cost (exit 101),
+`target/roadmap-r02d-red-20261031.log`; it included COUNT's constant projection and
+is not a claim that the final SUM stage-one case was run unchanged on the baseline.
+`target/roadmap-r02d-cache-focused-fixed-20261031.log` passed 55 unit, one initial
+scaling and 12 SQL semantic cases. Later gates include all three new integration
+cases. The prior complete-cache materialization assertion was changed to include
+leaf splitting and a separately asserted complete-root miss. Intermediate wrong
+test-target/compile/lint attempts are retained under the R02d logs.
+
+Commands use R01a's wrapper/toolchain/target/TMPDIR. Initial complete gates retained
+both Clippy failures (new test comparison style and expanded Iceberg enum layout)
+in `target/roadmap-r02d-stage1-gates-20261031.log`. After fixes,
+`bash scripts/agent-check.sh sql` exited 0: fmt, both Clippy modes, 202 default
+tests (2 ignored) and 216 Iceberg tests (3 ignored). Log:
+`target/roadmap-r02d-stage1-gates-fixed-20261031.log`. Private rustdoc, 38 Python
+report-tool tests and mdBook exited 0; logs
+`target/roadmap-r02d-stage1-rustdoc-final-20261031.log`,
+`target/roadmap-r02d-stage1-tools-20261031.log`,
+`target/roadmap-r02d-stage1-docs-verified-20261031.log`.
+
+**Verified frozen-binary SQL witnesses:** TPC-H Q1 and TPC-DS Q1 each pass strict
+planning, three DML rounds, independent SQL, reopen and delta history. Rebuild the
+default example after feature tests, copy it into a fresh artifact root as `runner`,
+hash before execution and verify the same hash after both runs. Use R02b's query
+mode/timeouts/manifests and independent database roots; coverage reports record the
+actual frozen runner command. Artifacts, source/binary/report hashes and exact work
+audit: `target/roadmap-r02d-stage1-verified-live-20261031/`. An earlier successful run
+at `target/roadmap-r02d-stage1-live-20261031/` had a post-run binary hash from a
+shared path subsequently replaced by Cargo feature tests; that identity limitation
+is preserved, and the frozen rerun supplies the bound binary evidence. Prior
+unfrozen hash records likewise remain observations, not proof of loaded-file identity.
+
+R02d remains incomplete: raw-source state still copies full Bags, touched duplicate
+leaves still expand eagerly, bootstrap/replacement leaf caches may retain complete
+row volume, and full checkpoints/recovery still rebuild/write complete state.
+No full TPC or controlled performance qualification was run. Implementation is a
+local, reviewable first stage; continue source-state sharing and leaf laziness before
+marking R02d verified, then proceed through the remaining roadmap.

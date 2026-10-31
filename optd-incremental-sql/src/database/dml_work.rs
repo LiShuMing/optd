@@ -23,28 +23,7 @@ pub struct SelectorWork {
     pub output_rows: usize,
 }
 
-/// Changed-leaf and actual directory path-copy work, distinct from checkpoint IO.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableBlockWork {
-    /// Installed nonempty leaves before this statement (size, not access work).
-    pub total_blocks_before: usize,
-    /// Shared old tree-node entries actually cloned on modified paths.
-    pub directory_entries_copied: usize,
-    /// Leaf ranges visited, including insertion into an empty table.
-    pub touched_blocks: usize,
-    /// Existing leaves replaced or removed by this statement.
-    pub touched_existing_blocks: usize,
-    /// Unchanged existing leaf payloads shared by the candidate.
-    pub reused_blocks: usize,
-    /// Changed leaves split into multiple bounded replacements.
-    pub split_blocks: usize,
-    /// New distinct entries copied to create split Bag subsets, beyond old-map copying.
-    pub split_row_entries_copied: usize,
-    /// Distinct signed entries encoded for directory lookup.
-    pub delta_key_rows: usize,
-    /// Arrow buffer sizes of those temporary encoding batches.
-    pub delta_key_array_bytes: usize,
-}
+pub use crate::work::RowBlockWork as TableBlockWork;
 
 /// Actual target collection and complete-map or changed-leaf replacement work.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,4 +53,14 @@ pub struct DmlExecutionWork {
     pub old_image_rows: usize,
     /// Complete new row images selected for INSERT/UPDATE, including duplicates.
     pub new_image_rows: usize,
+}
+
+impl From<crate::work::RowUpdateWork> for DmlTargetWork {
+    fn from(work: crate::work::RowUpdateWork) -> Self {
+        Self {
+            delta_update: work.delta_update,
+            block_update: Some(work.block_update),
+            ..Default::default()
+        }
+    }
 }

@@ -113,7 +113,7 @@ impl<'a> DmlCompiler<'a> {
             selector: source_work,
             old_image_rows: old.num_rows(),
             new_image_rows: new.num_rows(),
-            target: update.work,
+            target: update.work.into(),
         };
         let mut input_rows = 0usize;
         for name in sql::reads(&plan)? {

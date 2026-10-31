@@ -83,31 +83,9 @@ impl PayloadIoWork {
     }
 }
 
-/// Full-table cache misses at consumers that still require one Arrow batch.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableMaterializationWork {
-    /// Successful concatenations (zero for shared cache hits).
-    pub misses: u64,
-    /// Expanded rows emitted by those concatenations.
-    pub rows: u64,
-    /// Sum of Arrow array buffer sizes in the resulting batches.
-    pub array_bytes: u64,
-}
-
-/// Actual Arrow-to-block work during SQL table import and history restoration.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TableBootstrapWork {
-    /// Expanded table rows collected into a positive Bag.
-    pub collected_rows: u64,
-    /// Distinct complete rows in the collected Bags.
-    pub distinct_entries: u64,
-    /// Nonempty ordered leaf caches materialized during import.
-    pub leaf_materializations: u64,
-    /// Expanded rows in those leaf caches.
-    pub materialized_rows: u64,
-    /// Sum of Arrow array buffer sizes in those leaf caches.
-    pub materialized_array_bytes: u64,
-}
+pub use crate::work::{
+    RowBootstrapWork as TableBootstrapWork, RowMaterializationWork as TableMaterializationWork,
+};
 
 /// Cumulative, host-local SQL database work since this session began opening.
 ///

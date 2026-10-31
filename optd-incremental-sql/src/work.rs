@@ -1,4 +1,4 @@
-//! Candidate-local accounting for full relation caches and cloned state directories.
+//! Candidate-local accounting for relation updates, materialization and state copies.
 
 use datafusion::arrow::array::RecordBatch;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Error, Result};
 
 /// Relation-map rebuilding and cache materialization at the owning scope.
-/// Refresh uses complete source/cache maps; DML block maintenance uses leaf maps.
+/// Raw sources use complete maps; maintained caches and SQL targets use leaf maps.
 ///
 /// Row entries count distinct complete rows, not expanded multiplicities. Array
 /// bytes are Arrow's reported buffer sizes for materialized batches, not measured
@@ -91,17 +91,33 @@ impl StateCopyWork {
 /// measurements. SQL selection/DML, external sources, DataFusion internals, local
 /// bucket payload updates, physical subexpression materialization, checkpoint IO
 /// and recovery are excluded, as are source-name maps and graph-vector headers.
+/// Complete node replacement collection/leaf bootstrap is measured separately.
 /// Missing work in older serialized statistics is
 /// unknown; it must not be interpreted as measured zero.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct RefreshWork {
     /// Full raw source Bag rebuilds; sources are not Arrow-materialized here.
     pub sources: RelationWork,
-    /// Full delta-update relation-map rebuilds and their Arrow materializations.
-    /// Complete replacement batches from physical expressions are excluded.
+    /// Changed cache-leaf map rebuilds and their Arrow materializations.
+    /// Complete concatenations and replacement bootstrap have separate counters.
     pub caches: RelationWork,
     /// State-directory copies across candidate and physical-state preparation.
     pub state_copies: StateCopyWork,
+    /// Extended cache diagnostics share one allocation, keeping existing public
+    /// refresh-enum variants compact without changing their field types.
+    #[serde(flatten)]
+    pub cache_work: Box<CacheRelationWork>,
+}
+
+/// Actual maintained relation update, demand and replacement boundaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheRelationWork {
+    /// Actual maintained node row-leaf update and directory work.
+    pub cache_blocks: RowBlockWork,
+    /// Complete node concatenations demanded by snapshots, ordering or root output.
+    pub complete_caches: RowMaterializationWork,
+    /// Arrow collection and leaf bootstrap for complete physical replacements.
+    pub replacement_bootstrap: RowBootstrapWork,
 }
 
 /// Checked addition keeps diagnostic counters from silently wrapping.
@@ -119,5 +135,143 @@ mod tests {
         let mut counter = usize::MAX;
         assert!(matches!(add(&mut counter, 1), Err(Error::Overflow)));
         assert_eq!(counter, usize::MAX);
+    }
+}
+
+/// Changed-leaf and actual directory path-copy work, distinct from checkpoint IO.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowBlockWork {
+    /// Installed nonempty leaves before this statement (size, not access work).
+    pub total_blocks_before: usize,
+    /// Shared old tree-node entries actually cloned on modified paths.
+    pub directory_entries_copied: usize,
+    /// Leaf ranges visited, including insertion into an empty table.
+    pub touched_blocks: usize,
+    /// Existing leaves replaced or removed by this statement.
+    pub touched_existing_blocks: usize,
+    /// Unchanged existing leaf payloads shared by the candidate.
+    pub reused_blocks: usize,
+    /// Changed leaves split into multiple bounded replacements.
+    pub split_blocks: usize,
+    /// New distinct entries copied to create split Bag subsets, beyond old-map copying.
+    pub split_row_entries_copied: usize,
+    /// Distinct signed entries encoded for directory lookup.
+    pub delta_key_rows: usize,
+    /// Arrow buffer sizes of those temporary encoding batches.
+    pub delta_key_array_bytes: usize,
+}
+
+/// Complete-relation cache misses at consumers that require one Arrow batch.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowMaterializationWork {
+    /// Successful concatenations (zero for shared cache hits).
+    pub misses: u64,
+    /// Expanded rows emitted by those concatenations.
+    pub rows: u64,
+    /// Sum of Arrow array buffer sizes in the resulting batches.
+    pub array_bytes: u64,
+}
+
+/// Actual Arrow-to-block work during import, replacement and history restoration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowBootstrapWork {
+    /// Expanded table rows collected into a positive Bag.
+    pub collected_rows: u64,
+    /// Distinct complete rows in the collected Bags.
+    pub distinct_entries: u64,
+    /// Nonempty ordered leaf caches materialized during import.
+    pub leaf_materializations: u64,
+    /// Expanded rows in those leaf caches.
+    pub materialized_rows: u64,
+    /// Sum of Arrow array buffer sizes in those leaf caches.
+    pub materialized_array_bytes: u64,
+}
+
+/// Actual leaf-update work, independent of SQL statement or source ownership.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RowUpdateWork {
+    pub(crate) delta_update: RelationWork,
+    pub(crate) block_update: RowBlockWork,
+}
+
+impl RelationWork {
+    /// Merge independently measured leaf work without inferring complete-map copies.
+    pub(crate) fn absorb(&mut self, other: &Self) -> Result<()> {
+        add(&mut self.map_rebuilds, other.map_rebuilds)?;
+        add(
+            &mut self.old_row_entries_copied,
+            other.old_row_entries_copied,
+        )?;
+        add(&mut self.materializations, other.materializations)?;
+        add(&mut self.materialized_rows, other.materialized_rows)?;
+        add(
+            &mut self.materialized_array_bytes,
+            other.materialized_array_bytes,
+        )
+    }
+}
+impl RowBlockWork {
+    /// Sum actual block operations; total_blocks_before remains a summed size diagnostic.
+    pub(crate) fn absorb(&mut self, other: &Self) -> Result<()> {
+        add(&mut self.total_blocks_before, other.total_blocks_before)?;
+        add(
+            &mut self.directory_entries_copied,
+            other.directory_entries_copied,
+        )?;
+        add(&mut self.touched_blocks, other.touched_blocks)?;
+        add(
+            &mut self.touched_existing_blocks,
+            other.touched_existing_blocks,
+        )?;
+        add(&mut self.reused_blocks, other.reused_blocks)?;
+        add(&mut self.split_blocks, other.split_blocks)?;
+        add(
+            &mut self.split_row_entries_copied,
+            other.split_row_entries_copied,
+        )?;
+        add(&mut self.delta_key_rows, other.delta_key_rows)?;
+        add(&mut self.delta_key_array_bytes, other.delta_key_array_bytes)?;
+        Ok(())
+    }
+}
+impl RowMaterializationWork {
+    /// Sum actual complete-cache misses, not estimated available relation sizes.
+    pub(crate) fn absorb(&mut self, other: &Self) -> Result<()> {
+        self.misses = self
+            .misses
+            .checked_add(other.misses)
+            .ok_or(Error::Overflow)?;
+        self.rows = self.rows.checked_add(other.rows).ok_or(Error::Overflow)?;
+        self.array_bytes = self
+            .array_bytes
+            .checked_add(other.array_bytes)
+            .ok_or(Error::Overflow)?;
+        Ok(())
+    }
+}
+
+impl RowBootstrapWork {
+    pub(crate) fn absorb(&mut self, other: &Self) -> Result<()> {
+        self.collected_rows = self
+            .collected_rows
+            .checked_add(other.collected_rows)
+            .ok_or(Error::Overflow)?;
+        self.distinct_entries = self
+            .distinct_entries
+            .checked_add(other.distinct_entries)
+            .ok_or(Error::Overflow)?;
+        self.leaf_materializations = self
+            .leaf_materializations
+            .checked_add(other.leaf_materializations)
+            .ok_or(Error::Overflow)?;
+        self.materialized_rows = self
+            .materialized_rows
+            .checked_add(other.materialized_rows)
+            .ok_or(Error::Overflow)?;
+        self.materialized_array_bytes = self
+            .materialized_array_bytes
+            .checked_add(other.materialized_array_bytes)
+            .ok_or(Error::Overflow)?;
+        Ok(())
     }
 }
