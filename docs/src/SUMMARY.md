@@ -50,6 +50,7 @@
   - [RFCs]()
 - [Incremental Engine Design]()
   - [Work Accounting and Source Consolidation](./incremental/work_accounting.md)
+  - [SQL DML Work Accounting](./incremental/dml_work_accounting.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)
