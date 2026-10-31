@@ -54,6 +54,7 @@
   - [Database storage and recovery work](incremental/store_work_accounting.md)
   - [Unified SQL and benchmark work reports](incremental/unified_work_reports.md)
   - [Immutable transaction table blocks](incremental/transaction_table_blocks.md)
+  - [Shared state directories](incremental/shared_state_directories.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)
