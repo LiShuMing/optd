@@ -65,6 +65,7 @@
   - [Incremental plan preflight](incremental/plan_preflight.md)
   - [Match-count outer/semi/anti joins](incremental/match_count_joins.md)
   - [Mark joins and quantified truth](incremental/mark_joins.md)
+  - [Quantified truth relation normalization](incremental/quantified_truth_normalization.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)

@@ -1539,3 +1539,10 @@ notes are in `target/roadmap-r04b-three-valued-next-20261031.md`. Local only; no
 
 Final Boolean-slice mdBook build and `git diff --check` both exited 0; book log:
 `target/roadmap-r04b-boolean-docs-20261031.log`.
+
+
+R04b Boolean slice is committed locally as `af81593`. Next claimed prerequisite:
+[quantified truth relation normalization](docs/src/incremental/quantified_truth_normalization.md),
+a reviewed typed transformer before decorrelation. Start observed uncorrelated
+truth, then correlated partition/global dependency contracts; R04b and R06 remain
+open until their full acceptance. No task scope or success criterion is reduced.
