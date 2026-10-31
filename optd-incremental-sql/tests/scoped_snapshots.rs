@@ -186,7 +186,11 @@ async fn refresh_checked(
 }
 
 fn strict() -> IncrementalOptimizer {
-    IncrementalOptimizer::default().require_incremental()
+    // This suite specifically qualifies the retained scoped physical alternative.
+    IncrementalOptimizer::default()
+        .without_rule("builtin.match_count_join")
+        .unwrap()
+        .require_incremental()
 }
 
 fn sources() -> Sources {

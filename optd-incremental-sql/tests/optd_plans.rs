@@ -98,7 +98,11 @@ async fn all_outer_semi_anti_plans_expose_index_access_and_share_one_preparation
         let view = SqlView::new_with_optimizer(
             &sql,
             tables(),
-            IncrementalOptimizer::default().require_incremental(),
+            // Inspect snapshot expansion of the explicit scoped alternative.
+            IncrementalOptimizer::default()
+                .without_rule("builtin.match_count_join")
+                .unwrap()
+                .require_incremental(),
         )
         .await
         .unwrap();
@@ -516,7 +520,14 @@ async fn malformed_optd_rule_results_fail_during_planning_without_panicking() {
         Malformation::MultipleResults,
         Malformation::UnboundSource,
     ] {
-        let optimizer = IncrementalOptimizer::default().with_plan_rule(Arc::new(BadRule {
+        let optimizer = IncrementalOptimizer::default();
+        // BadPort mutates IndexLookup, which belongs to the scoped alternative.
+        let optimizer = if matches!(kind, Malformation::BadPort) {
+            optimizer.without_rule("builtin.match_count_join").unwrap()
+        } else {
+            optimizer
+        };
+        let optimizer = optimizer.with_plan_rule(Arc::new(BadRule {
             matcher: any_logical(),
             kind,
         }));

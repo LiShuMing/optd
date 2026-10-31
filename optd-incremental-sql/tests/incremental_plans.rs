@@ -31,6 +31,11 @@ fn strict() -> IncrementalOptimizer {
     IncrementalOptimizer::default().require_incremental()
 }
 
+// Snapshot expansion remains a separately registered physical alternative.
+fn scoped() -> IncrementalOptimizer {
+    strict().without_rule("builtin.match_count_join").unwrap()
+}
+
 async fn compile(sql: &str, optimizer: IncrementalOptimizer) -> SqlView {
     SqlView::new_with_optimizer(sql, tables(), optimizer)
         .await
@@ -145,7 +150,7 @@ async fn every_outer_semi_anti_plan_declares_join_scope_and_snapshot_subtraction
             "a.k=b.k AND a.v < b.v",
         ] {
             let sql = format!("SELECT * FROM a {kind} JOIN b ON {condition}");
-            let view = compile(&sql, strict()).await;
+            let view = compile(&sql, scoped()).await;
             let plan = view.incremental_plan();
             assert_graph(plan);
             let joins = selected(plan, "builtin.keyed_join");
@@ -273,7 +278,7 @@ async fn self_join_sharing_respects_scan_projections_and_qualified_ports() {
             2,
         ),
     ] {
-        let view = compile(sql, strict()).await;
+        let view = compile(sql, scoped()).await;
         let plan = view.incremental_plan();
         assert_graph(plan);
         let sources = selected(plan, "builtin.source.delta");
@@ -317,8 +322,8 @@ async fn self_join_sharing_respects_scan_projections_and_qualified_ports() {
 #[tokio::test]
 async fn diagnostics_are_deterministic_and_serialize_the_executed_snapshot_tree() {
     let sql = "SELECT a.k,b.v FROM a FULL JOIN b ON a.k=b.k";
-    let first = compile(sql, strict()).await;
-    let second = compile(sql, strict()).await;
+    let first = compile(sql, scoped()).await;
+    let second = compile(sql, scoped()).await;
     assert_eq!(first.incremental_plan(), second.incremental_plan());
     assert_eq!(
         first.incremental_plan().explain(),
@@ -355,6 +360,11 @@ async fn removing_scoped_rules_cannot_silently_select_complete_recompute() {
         ),
     ] {
         for optimizer in [IncrementalOptimizer::default(), strict()] {
+            let optimizer = if rule == "builtin.keyed_join" {
+                optimizer.without_rule("builtin.match_count_join").unwrap()
+            } else {
+                optimizer
+            };
             let err =
                 SqlView::new_with_optimizer(sql, tables(), optimizer.without_rule(rule).unwrap())
                     .await

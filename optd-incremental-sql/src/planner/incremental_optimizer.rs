@@ -203,9 +203,18 @@ impl Default for IncrementalOptimizer {
 }
 
 impl IncrementalOptimizer {
-    /// Register opt-in equijoin match-count maintenance for outer/semi/anti joins.
-    /// Deterministic residuals use per-row counts; NULL-aware joins remain separate.
+    /// Ensure equijoin match-count maintenance is registered, as in the default registry.
+    ///
+    /// Repeated calls preserve an existing rule with this stable name. Deterministic
+    /// residuals use per-row counts; NULL-aware joins remain separate.
     pub fn with_match_count_joins(self) -> Result<Self> {
+        if self
+            .rules
+            .iter()
+            .any(|rule| rule.identity.name == "builtin.match_count_join")
+        {
+            return Ok(self);
+        }
         self.with_rule(rules::match_count_join())
     }
 

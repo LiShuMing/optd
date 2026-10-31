@@ -1,6 +1,6 @@
 # Stateful outer/semi/anti join maintenance from match-count transitions
 
-**Status:** accepted · 2026-10-31; local source/API design review; pure/residual opt-in implemented, default/SQL acceptance pending
+**Status:** accepted · 2026-10-31; default implementation and R04a acceptance verified locally
 **Scope:** R04a typed equijoin keys, all seven outer/semi/anti orientations, optional
 SQL residual conditions and null-safe equality. Reuse Optd plans and derived
 candidate state. Mark/range joins, NULL-aware anti-join global dependencies and durable operator-state formats are separate.
@@ -331,3 +331,34 @@ to prove no scoped snapshots for the join. Repeat default/Iceberg gates and fres
 isolated TPC-H Q13/Q21 SQL witnesses (Q21 keeps its established 600-second deadline).
 Witness scale and performance qualification remain separate R10 gates. R04a cannot
 be marked verified until these checks actually complete.
+
+## 15. Default rollout qualification
+
+The default registry/SQL migration is verified locally. The default plan RED used
+the former scoped rule. All seven orientations now select the explicit version-2
+match-count operation, including qualified residual/null-safe variants; removing
+that rule retains scoped-alternative coverage and strict NULL-aware refusal.
+
+The SQL matrix covers seven orientations × four predicate modes × ten identified
+write rounds, with raw join, aggregate and partition-window consumers. Independent
+nested-loop joins and fresh full SQL/schema comparisons pass before/after reopen;
+retries preserve original receipts and every stored output prefix replays exactly.
+Zero projected source changes legitimately skip downstream execution; any skipped
+join is accepted only with all executed deltas zero and a qualified physical plan.
+
+Final complete gates: 290 default and 304 Iceberg tests passed (2/3 existing tests
+ignored), format and both Clippy modes pass; private rustdoc, mdBook and 46 report
+tool tests pass. Exact commands and retained RED/failure logs are in ROADMAP.md.
+
+Fresh isolated SQL database witnesses Q13/Q21 each pass all three write rounds,
+full independent comparisons, reopen and history. Q13 runs Left match counts;
+Q21 runs LeftSemi/LeftAnti with residual counts. All executed match-count joins
+record zero scoped snapshot evaluations/full keyed scans. The frozen default
+runner and implementation hashes remain unchanged. The relational_core profile
+and original/executed SQL identities are recorded explicitly; Q21 keeps its
+600-second deadline. See `target/roadmap-r04a-default-live-20261031/`.
+
+R04a is verified, with all touched-map/source/materialization/checkpoint costs
+still measured rather than hidden. This does not certify full-TPC runtime,
+standard-scale performance, NULL-aware global maintenance, mark/range joins or
+persisted operator states; those retain their separate roadmap acceptance gates.

@@ -50,6 +50,7 @@ pub(super) fn builtins() -> Vec<Arc<dyn IncrementalRule>> {
         Builtin::OrderedRecompute,
         Builtin::AggregateRecompute,
         Builtin::KeyedJoin,
+        Builtin::MatchCountJoin,
         Builtin::PartitionedWindow,
         Builtin::NonInnerJoinRecompute,
         Builtin::WindowRecompute,

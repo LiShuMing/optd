@@ -42,7 +42,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | verified |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
-| R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | in_progress |
+| R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | verified |
 | R04b | P1 | Mark joins | Maintain TRUE/FALSE/UNKNOWN with correlated/null semantics; qualify TPC-DS Q10/Q35/Q45 | pending |
 | R04c | P2 | Non-equality joins and range indexes | Rules prove affected ranges; exact deletes and boundary movement tests; explicit refusal when no sound scope is available | pending |
 | R05a | P2 | Window-specific physical maintenance | Partition aggregates use accumulators; finite frames use ordered ranges; ranking tracks affected positions; preserve cached Before output and ties across restart | pending |
@@ -1292,3 +1292,106 @@ witnesses do not certify fresh full TPC or standard-scale performance.
 rollout and fresh isolated directed TPC witnesses. NULL-aware anti joins retain
 strict refusal pending R06; mark/range joins remain separate tasks. R04a remains
 in_progress; ledger stays 12/31 verified and 18 pending. Local commit only, no push.
+
+Residual implementation is committed locally as `f6a1af7`; default registry/SQL
+migration design §14 is committed as `a09ebe9`.
+
+### R04a — default registry and SQL rollout (qualification in progress)
+
+The default registry now selects `builtin.match_count_join@2` at priority 20 for
+qualified outer/semi/anti joins. The prior priority-zero scoped rule remains an
+explicit alternative. `with_match_count_joins()` ensures a single stable-name rule
+without replacing an existing registration; ordinary duplicate rule registration
+still rejects. SqlSession CREATE/preflight/reopen use the same default registry,
+with no persisted format or user configuration change.
+
+RED default-plan evidence selected `builtin.keyed_join` instead of the required
+match-count operation (exit 101): `target/roadmap-r04a-default-red-20261031.log`.
+Existing tests specifically inspecting the old snapshot expression/physical steps
+now remove the new rule explicitly, retaining their original assertions. Default
+join semantic/Iceberg expectations name MatchCountDelta; window expectations still
+name KeyedRecompute. Removing all qualified join alternatives removes both rules.
+
+New SQL matrix: seven orientations × four ordinary/null-safe/residual predicates,
+10 identified INSERT/DELETE/UPDATE rounds each, including duplicate/key moves,
+two-source atomic transactions, first/last matches, empty inputs and NULLs. Each
+profile maintains the raw join plus downstream aggregate and partitioned window.
+Every current join is compared with an independent nested-loop bag model; all
+three consumers also compare fresh full SQL/schema before and after every reopen.
+Every round verifies persisted output prefixes and retries the identical request
+after reopen, asserting its exact original receipt and unchanged epoch.
+
+Runtime assertions require MatchCountDelta and zero join snapshot evaluation/full
+scans. A value-only UPDATE can consolidate to zero at key-only consumer scans;
+then an absent executed join is accepted only when every executed node emits zero
+delta. Structural plans still require PhysicalMaintainMatchJoin for each view.
+The initial fixture incorrectly demanded execution after such exact cancellation;
+its failed log is `target/roadmap-r04a-default-sql-first-20261031.log`. The corrected
+focused SQL matrix passed (exit 0, 212.63 seconds), log
+`target/roadmap-r04a-default-sql-second-20261031.log`. This is correctness evidence,
+not a performance comparison. Complete dual-feature gates and fresh frozen-runner
+TPC witnesses are still in progress; R04a is not yet verified.
+
+The SQL matrix now runs as seven independent join-orientation tests over the same
+28 profiles/280 rounds; no case or oracle was removed. The first complete gate
+failed its default `optd_plans` BadPort fixture: that fixture mutates IndexLookup,
+which the new default no longer generates. It now explicitly selects the scoped
+alternative for BadPort while the other malformed cases keep the new default;
+their failure assertions are unchanged. The original failed gate is retained as
+`target/roadmap-r04a-default-gates-20261031.log` (exit 1).
+
+**Verified final local gates:** the same R01a wrapper/environment with
+`bash scripts/agent-check.sh sql` exited 0: **290 default / 304 Iceberg tests passed,
+2/3 ignored**, format and both warnings-denied Clippy modes PASS. Log:
+`target/roadmap-r04a-default-final-gates-20261031.log`. No new test is ignored.
+The 46 report-tool tests exited 0 in
+`target/roadmap-r04a-default-tools-20261031.log`; warnings-denied Iceberg rustdoc
+with `--document-private-items --no-deps` exited 0 in
+`target/roadmap-r04a-default-rustdoc-20261031.log`. Production Rust source has not
+changed since these gates. Default examples `benchmark_sql_database` and
+`sql_database` were then explicitly built without Iceberg, exit 0, before copying
+the frozen witness runner; log `target/roadmap-r04a-default-runner-build-20261031.log`.
+
+**Verified fresh SQL witnesses:** `target/roadmap-r04a-default-witness-20261031.py`
+froze the default runner as SHA-256
+`96eb84abba18ad1ace9e5db1374192f14b5d07e7fdd70d606495d1b9abc6a19d`.
+Both TPC-H Q13 and Q21 completed three INSERT/DELETE/UPDATE transactions, independent
+full SQL/base-table comparison, output-history verification and per-round reopen;
+both are nonempty with changed outputs and strict plans, with no complete-node
+recompute blocker. Q13 executes the Left match-count operator in all three rounds;
+Q21 executes LeftSemi and LeftAnti operators (six node executions in total).
+Every such node records zero snapshot evaluations and zero full keyed scans.
+Q21 records 1507 residual predicate rows and zero matched-pair outputs; actual
+touched count-map copies (948 entries across rounds) remain separately visible.
+These counters certify these operator operations, not total source/storage work.
+
+The shell initially failed before starting the runner because the sandbox could
+not create a mount marker on the full /tmp filesystem. The scoped retry ran with
+TMPDIR and all new outputs under the project target; no unrelated files were
+removed. Its command, runner and both child commands ultimately exited 0.
+
+Commands use `OPTD_SQL_BENCH_QUERY_MODE=relational_core` with separately recorded
+original/executed SQL identities and outer presentation removal. Q13 uses the
+repository TPC-H manifest; Q21 uses the unchanged SQL in
+`/tmp/optd-tpch-repository-sql-dbgen122-sf01/manifest.json` (60175 lineitems,
+15000 orders, 100 suppliers) and retains its 600-second query deadline. Each
+profile has independent database/MV state. Source implementation hashes and
+the frozen binary were rechecked unchanged after execution. Artifacts:
+`target/roadmap-r04a-default-live-20261031/`; exact commands, input identities,
+work audit and report hashes are in its `*-command.json`, `source-identity.json`,
+`unified-work.json` and `report-hashes.json`. Driver log:
+`target/roadmap-r04a-default-witness-20261031.log`.
+
+Private rustdoc and the final mdBook build exited 0. These two directed witnesses
+do not constitute a fresh 121-query matrix, standard-scale certification or
+controlled performance comparison; both performance and end-to-end delta-work
+qualification remain false. Existing complete checkpoint payloads, source reads,
+recovery/bootstrap and touched-bucket copies remain R07/R08/R10 work.
+
+**R04a verified:** all seven orientations, residual/null-safe predicates, signed
+two-sided changes, independent bag/schema/prefix oracles, failure/discard/stale
+isolation, default SQL retry/reopen/history, work-scope regressions and both feature
+gates are qualified. Ledger: **13/31 verified, 18 pending**. Next owner is this
+task, R04b; the local `81c512f` admission design already records an independently
+reproduced UNKNOWN-sensitive NOT IN/disjunction wrong answer. Full mark truth
+state and global NULL-aware dependency maintenance remain unimplemented. No push.

@@ -8,6 +8,9 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use optd_incremental_sql::planner::IncrementalOptimizer;
 use optd_incremental_sql::SqlView;
 
+#[path = "match_count_sql/database.rs"]
+mod database;
+
 fn batch(rows: &[(Option<i64>, Option<i64>)]) -> RecordBatch {
     RecordBatch::try_new(
         Arc::new(Schema::new(vec![
@@ -45,7 +48,7 @@ fn tables() -> BTreeMap<String, RecordBatch> {
 }
 
 #[tokio::test]
-async fn pure_outer_semi_anti_plans_use_explicit_match_counts_when_enabled() {
+async fn pure_outer_semi_anti_plans_use_explicit_match_counts_by_default() {
     for kind in [
         "LEFT",
         "RIGHT",
@@ -61,10 +64,7 @@ async fn pure_outer_semi_anti_plans_use_explicit_match_counts_when_enabled() {
             "a.k=b.k AND a.v=b.v",
         ] {
             let sql = format!("SELECT * FROM a {kind} JOIN b ON {condition}");
-            let optimizer = IncrementalOptimizer::default()
-                .with_match_count_joins()
-                .unwrap()
-                .require_incremental();
+            let optimizer = IncrementalOptimizer::default().require_incremental();
             let view = SqlView::new_with_optimizer(&sql, tables(), optimizer)
                 .await
                 .unwrap();
@@ -125,10 +125,27 @@ const KINDS: [&str; 7] = [
 ];
 
 fn optimizer() -> IncrementalOptimizer {
-    IncrementalOptimizer::default()
+    IncrementalOptimizer::default().require_incremental()
+}
+
+#[test]
+fn ensuring_match_counts_is_idempotent_and_can_restore_a_removed_builtin() {
+    let optimizer = IncrementalOptimizer::default()
         .with_match_count_joins()
         .unwrap()
-        .require_incremental()
+        .with_match_count_joins()
+        .unwrap()
+        .without_rule("builtin.match_count_join")
+        .unwrap();
+    assert!(optimizer
+        .clone()
+        .without_rule("builtin.match_count_join")
+        .is_err());
+    optimizer
+        .with_match_count_joins()
+        .unwrap()
+        .without_rule("builtin.match_count_join")
+        .unwrap();
 }
 fn add(rows: &mut Rows, row: Vec<Option<i64>>, weight: i64) {
     let next = rows.get(&row).copied().unwrap_or_default() + weight;
@@ -639,7 +656,7 @@ async fn physical_verifier_rejects_forged_match_operator_state_and_token() {
 }
 
 #[tokio::test]
-async fn residual_outer_semi_anti_plans_use_match_counts_when_enabled() {
+async fn residual_outer_semi_anti_plans_use_match_counts_by_default() {
     for kind in KINDS {
         let sql = format!("SELECT * FROM a {kind} JOIN b ON a.k=b.k AND a.v<b.v");
         let view = SqlView::new_with_optimizer(&sql, tables(), optimizer())

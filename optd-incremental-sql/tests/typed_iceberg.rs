@@ -1367,9 +1367,15 @@ async fn strict_keyed_join_and_partition_window_refresh_real_endpoints_after_reo
     use optd_incremental_sql::Strategy;
 
     let _activity = PROCESS_ACTIVITY.enter();
-    for query in [
-        "SELECT o.id, l.id AS lid, l.amount FROM orders o FULL JOIN lineitems l ON o.id=l.id",
-        "SELECT id, amount, SUM(amount) OVER (PARTITION BY id) AS total FROM lineitems",
+    for (query, strategy) in [
+        (
+            "SELECT o.id, l.id AS lid, l.amount FROM orders o FULL JOIN lineitems l ON o.id=l.id",
+            Strategy::MatchCountDelta,
+        ),
+        (
+            "SELECT id, amount, SUM(amount) OVER (PARTITION BY id) AS total FROM lineitems",
+            Strategy::KeyedRecompute,
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("catalog");
@@ -1395,7 +1401,7 @@ async fn strict_keyed_join_and_partition_window_refresh_real_endpoints_after_reo
             .view()
             .strategies()
             .iter()
-            .any(|n| n.strategy == Strategy::KeyedRecompute));
+            .any(|n| n.strategy == strategy));
         append(&catalog, "lineitems", &[row(2, 250)]).await;
         let first = heads(&root).await;
         let IcebergRefresh::Committed { sql_stats, .. } =
