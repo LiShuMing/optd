@@ -1204,3 +1204,7 @@ qualified through SQL CREATE MV/identified retry/history or original-query-direc
 TPC witnesses. Complete residual/all-type/default-rollout acceptance before marking
 R04a verified. No storage format, dependency or toolchain change. Local commit only;
 no push. Overall ledger remains 12/31 verified, R04a in_progress, 18 pending.
+
+R04a pure-equijoin implementation: `1733c03` (local). Next slice is the reviewed
+residual count-state transition in match-count design §12; it retains opt-in
+selection, strict NULL-aware refusal and the existing scoped alternative.

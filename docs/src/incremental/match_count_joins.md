@@ -224,3 +224,39 @@ this opt-in physical operation yet. SQL CREATE MV/identified retry/output-histor
 and original-query-directed witnesses must be rerun after residual qualification
 and default selection. R04a stays in_progress; no full-TPC or performance acceptance
 is claimed. Final gate commands/results are recorded in ROADMAP.md.
+
+## 12. Residual slice: state and transition review
+
+Extend the opt-in algorithm to qualified deterministic equijoins with residuals.
+`IndexAlgorithm::MatchCounts` still declares the complete original operator. At
+bootstrap derive a physical Boolean expression against the combined qualified
+input schema, plus two persistent directories of per-key full-row match-count
+maps. Pure equijoins retain cardinality-only state. No new persisted format is
+introduced. Reopen reconstructs the derived counts, including zero-count rows.
+
+For each stage, copy only touched count maps. Evaluate changed-distinct-row times
+fixed-peer-distinct-row residual candidates in batches of at most 1024 rows; keep
+multiplicities outside predicate arrays. SQL TRUE is the only match. Accumulate
+peer count changes across the entire stage before emitting zero crossings. Own
+changed rows use their computed fixed-peer match count, then retain/remove their
+entry according to final own multiplicity. Unchanged own rows keep their counts;
+fixed peers receive the accumulated count delta. Removed buckets lose their count
+map. Stage 0 produces A-after counts vs B-before and B-before counts vs A-after;
+stage 1 produces both final count directories. Check cached counts against computed
+counts for existing changed rows, and reject negative/overflowed counts.
+
+The physical operation mutates only the private prepared candidate. Evaluation or
+arithmetic errors discard the candidate without installing input or count state.
+Record actual residual candidates/rows, count writes, zero crossings, count-map
+entry copies and persistent count-directory path copies. Refresh counters exclude
+bootstrap pair evaluation, source/cache IO and storage; recovery remains a rebuild.
+Keep the opt-in API until SQL/default-rollout acceptance. Preserve strict NULL-aware
+refusal and typed key admission. Reject forged operator/state/version bindings.
+
+Source review: existing persistent directories share untouched roots, Bag full-row
+identity is exact, and DataFusion's public create_physical_expr/evaluate/into_array
+APIs provide SQL Boolean/null semantics without copying dependency implementation.
+Add a RED residual-plan test, independent integer/NULL residual oracle, randomized
+two-sided signed replay, zero crossings/cancellation and hot/untouched scope tests,
+then both feature gates. Final strategy diagnostics must report any actually executed
+snapshot evaluations even when a custom plan also contains match maintenance.
