@@ -199,3 +199,33 @@ Keep the ordinary scope regression; add fixed-delta growing-untouched NULL-safe
 partition checks. Replace only the newly qualified direct NULL-safe refusal case
 with exact oracle tests; retain computed NULL-safe, range and row-changing scope
 refusals. Full R04b/R06/numerical/performance gates remain independent.
+
+## 11. Share identical membership bindings within one row-preserving boundary
+
+**Status:** accepted optimization design · 2026-10-31 after row-preservation and
+scope review. Implement and qualify after the correlation policy slices.
+
+A Projection may observe both `e IN S` and `e NOT IN S`, or repeat the same IN.
+Generating separately named helper relations duplicates count/member states and
+propagates one truth change through another equivalent membership's joins.
+Maintain a node-local map keyed by the complete typed InSubquery with negation
+canonicalized to false, including compared expression, subquery plan and scope
+metadata. Bind the positive truth once and apply NOT separately for each caller.
+
+All generated joins preserve every original input row exactly once: members are
+unique per full comparison key and flags are unique per dependency key. Before a
+Filter evaluates its final predicate, these joins only append helper columns;
+original scalar values and multiplicities stay unchanged. Original immutability
+checking excludes call-count-sensitive SQL functions. Therefore reusing the same
+bound truth within that one input boundary is sound. Never reuse bindings across
+Projection/Filter nodes, different compared expressions/plans or nested scopes.
+Map iteration order is never observable; only keyed lookup and insertion occur.
+
+Expansion limits count actual distinct bindings; input/alias/node bounds remain
+mandatory. Replace the former 65-identical-expression overflow witness with 65
+*distinct* subqueries, and separately prove 65 identical IN/NOT IN observations
+share one member/flag binding with exact output schemas and signed results.
+Retain independent ordinary/mixed-correlation truth, SQL/recovery and refusal tests.
+Measure operator state/plan counts and actual peer visits before/after at fixed
+changed partition and increasing untouched input; this is planning/operator work
+evidence, not elapsed-time or end-to-end performance qualification.
