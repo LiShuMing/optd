@@ -36,7 +36,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | verified |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
-| R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | pending |
+| R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | in_progress |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | pending |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | pending |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
@@ -390,8 +390,8 @@ updates, including window output mutation; empty/canceled candidates copy zero.
 512 accumulator entries copied for one changed key among 256 (bound 36), exit 101,
 `target/roadmap-r02c-red-20261031.log`. An initial test borrow typo failed compilation,
 retained separately as `target/roadmap-r02c-test-compile-20261031.log`. After the
-implementation, focused tests passed (exit 0): 55 unit cases including four directory
-cases in `target/roadmap-r02c-green-fixed-20261031.log` plus the later full gate;
+implementation, focused tests passed (exit 0): unit directory cases in `target/roadmap-r02c-green-fixed-20261031.log`
+plus the later full gate;
 13 refresh, one multi-family scaling and three SQL table-block cases in
 `target/roadmap-r02c-focused-final-20261031.log`. The earlier unit log contains 54
 cases before the additional clone-boundary test; final complete gates include 55.
