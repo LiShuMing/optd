@@ -556,3 +556,66 @@ This is a local-only implementation increment following design commit `25f6afe`.
 **R02d remains in progress**: duplicate leaf weights still expand eagerly, and SQL
 provider demand/leaf attribution must be completed. R03 onward, full qualification,
 checkpoint/durable operator-state work and the rest of the ledger remain pending.
+
+
+### R02d — demand-only maintained graph leaves
+
+Design commit: `d35fb0b`,
+[demand-only graph leaves](docs/src/incremental/lazy_relation_leaves.md).
+Graph relation bootstrap/replacement selects lazy leaf caches; SQL table bootstrap
+retains its existing eager policy. Each graph leaf retains exact weighted rows and
+precomputed volume, validates its distinct-row boundary using the shared revision
+converter, and expands only at an actual snapshot/root demand. Full original
+physical batches still preserve bootstrap/replacement ordering. Required root
+contents are finalized during prepare. SQL batch/no-op comparison failures now
+propagate through typed Results; SQL read/write behavior and persisted formats
+are unchanged.
+
+Separate current diagnostics record update-time graph map work (`caches`),
+distinct-row identity/boundary batches (`leaf_validation`), actual expanded leaf
+misses (`demanded_leaves`) and full concatenations (`complete_caches`). The boxed
+extension keeps existing public Iceberg enum field types/sizes unchanged. No new
+mandatory fields are added to deserialized historical work records. Temporary
+scalar/sort allocations and source expression expansion retain their exclusions.
+
+**Verified regression:** before implementation, COUNT's constant-projection
+regression failed its zero-update-expansion assertion with 1541 rows at the first
+1024-row size; log `target/roadmap-r02d-leaf-red-20261031.log`. Afterward the test
+passes for 1024/8192 rows, asserting zero update-time expansion, one required root
+leaf row, bounded distinct validation and equality with independent full SQL.
+Fixed SUM output at those sizes measures **0/0 update-time expanded rows**,
+**514/514 distinct leaf-validation rows**, **1/1 demanded leaf rows** and one root
+concatenation. Source history copying remains 1/1 and directory copies 9/13.
+Log: `target/roadmap-r02d-leaf-measurements-20261031.log`. Work is bounded here by
+fixed leaf entries/required output, not a general end-to-end performance claim.
+
+Nine row-block unit cases pass, including two new cache-sharing/demand cases.
+Existing randomized multiset, dictionary/float identity, budget/fallback, bulk
+key-move and zero-column cases now exercise both eager/lazy policies. SQL target
+block-work expectations remain unchanged. Complete default/Iceberg tests cover
+ordered/limited plans, hidden-key sequence changes, window peers, custom rules,
+concurrent/stale/failed candidates, retry/reopen and process-death recovery.
+
+Using the R01a Rust 1.95.0 locked offline wrapper/target/TMPDIR,
+`bash scripts/agent-check.sh sql` exited 0: format and both Clippy configurations,
+**210 default passed / 2 ignored**, **224 Iceberg passed / 3 ignored**. Log:
+`target/roadmap-r02d-leaf-gates-20261031.log`. The private-rustdoc command from R01a,
+mdBook and 38 report-tool tests exited 0; logs:
+`target/roadmap-r02d-leaf-rustdoc-20261031.log`,
+`target/roadmap-r02d-leaf-docs-20261031.log`,
+`target/roadmap-r02d-leaf-tools-20261031.log`.
+
+After feature jobs ended, explicitly built the default benchmark example, froze its
+binary in fresh `target/roadmap-r02d-leaf-live-20261031/`, and ran TPC-H Q1/TPC-DS Q1
+in isolated SQL database roots. Both pass strict planning, three DML rounds,
+independent SQL, reopen and output history. Binary hashes agree before/after each
+execution; source HEAD/diff/row-block/Cargo.lock and report/audit identities are
+preserved with exact commands. Logs:
+`target/roadmap-r02d-leaf-bench-build-20261031.log` and
+`target/roadmap-r02d-leaf-witness-20261031.log`. These remain two small witnesses;
+full TPC and both performance/end-to-end delta-work qualification flags stay false.
+
+Implementation is local-only. **R02d remains in progress**: SQL table leaves and
+providers are eager and no-op comparison still consumes eager batches. The next
+stage must make table/provider demand explicit and measured before R02d can be
+verified. All other pending roadmap acceptance criteria remain required.

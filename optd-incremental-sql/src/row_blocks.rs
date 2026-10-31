@@ -12,7 +12,10 @@ use datafusion::common::ScalarValue;
 use crate::bag::{self, Bag};
 use crate::error::invalid;
 use crate::state_directory::StateDirectory;
-use crate::work::{RowBlockWork, RowBootstrapWork, RowMaterializationWork, RowUpdateWork};
+use crate::work::{
+    RelationWork, RowBlockWork, RowBootstrapWork, RowEncodingWork, RowMaterializationWork,
+    RowUpdateWork,
+};
 use crate::{Error, Result};
 
 /// Bound historical distinct-entry copying; expanded duplicate rows may be larger.
@@ -25,11 +28,33 @@ enum RowOrder {
     SingleLeaf,
 }
 
-/// Shared positive row state and its already ordered scan batch.
+/// SQL targets retain their eager contract until measured lazy providers are ready.
+#[derive(Clone, Copy)]
+enum LeafCachePolicy {
+    OnUpdate,
+    OnDemand,
+}
+
+/// Shared weighted row state; a graph consumer alone demands its expanded cache.
 struct RowBlock {
     rows: Bag,
-    batch: RecordBatch,
+    batch: Mutex<Option<RecordBatch>>,
+    row_count: usize,
     scalar_bytes: usize,
+}
+
+/// Leaf construction separates identity encoding from actual Arrow expansion.
+struct BlockBuild {
+    key: Vec<u8>,
+    block: RowBlock,
+    materialization: RelationWork,
+    validation: RowEncodingWork,
+}
+
+/// Ordered shared scan batches and work actually performed to obtain them.
+struct LeafBatches {
+    batches: Vec<RecordBatch>,
+    work: RelationWork,
 }
 
 /// Contents of one immutable positive revision, shared across candidate clones.
@@ -39,6 +64,7 @@ struct RowSnapshot {
     row_count: usize,
     scalar_bytes: usize,
     order: RowOrder,
+    leaf_policy: LeafCachePolicy,
     // Flatten only at consumers that require one batch. No lock crosses await.
     flat: Mutex<Option<RecordBatch>>,
 }
@@ -51,12 +77,14 @@ pub(crate) struct RowBlocks(Arc<RowSnapshot>);
 pub(crate) struct RowMaterialization {
     pub(crate) batch: RecordBatch,
     pub(crate) work: RowMaterializationWork,
+    pub(crate) leaf_work: RelationWork,
 }
 
 /// Imported leaves and the actual conversion work used to build them.
 pub(crate) struct RowBootstrap {
     pub(crate) rows: RowBlocks,
     pub(crate) work: RowBootstrapWork,
+    pub(crate) leaf_validation: RowEncodingWork,
 }
 
 /// A candidate positive revision and its actual leaf-update work.
@@ -68,6 +96,15 @@ pub(crate) struct RowUpdate {
 impl RowBlocks {
     /// Bootstrap once from an imported/created batch; later statements use leaves.
     pub(crate) fn from_batch(batch: RecordBatch) -> Result<RowBootstrap> {
+        Self::bootstrap(batch, LeafCachePolicy::OnUpdate)
+    }
+
+    /// Graph consumers propagate weighted deltas without expanding updated leaves.
+    pub(crate) fn from_relation_batch(batch: RecordBatch) -> Result<RowBootstrap> {
+        Self::bootstrap(batch, LeafCachePolicy::OnDemand)
+    }
+
+    fn bootstrap(batch: RecordBatch, leaf_policy: LeafCachePolicy) -> Result<RowBootstrap> {
         let rows = Bag::from_batch(&batch)?;
         let volume = rows.materialization_volume()?;
         let mut work = RowBootstrapWork {
@@ -96,27 +133,31 @@ impl RowBlocks {
             row_count: volume.rows,
             scalar_bytes: volume.scalar_bytes,
             order,
+            leaf_policy,
             flat: Mutex::new(Some(batch)),
         };
+        let mut leaf_validation = RowEncodingWork::default();
         for leaf in rows.split(BLOCK_ENTRIES)? {
-            let (key, block) = make_block(leaf, &snapshot.order)?;
+            let built = make_block(leaf, &snapshot.order, snapshot.leaf_policy)?;
             work.leaf_materializations = work
                 .leaf_materializations
-                .checked_add(1)
+                .checked_add(built.materialization.materializations as u64)
                 .ok_or(Error::Overflow)?;
             work.materialized_rows = work
                 .materialized_rows
-                .checked_add(block.batch.num_rows() as u64)
+                .checked_add(built.materialization.materialized_rows as u64)
                 .ok_or(Error::Overflow)?;
             work.materialized_array_bytes = work
                 .materialized_array_bytes
-                .checked_add(block.batch.get_array_memory_size() as u64)
+                .checked_add(built.materialization.materialized_array_bytes as u64)
                 .ok_or(Error::Overflow)?;
-            snapshot.blocks.insert(key, Arc::new(block));
+            leaf_validation.absorb(&built.validation)?;
+            snapshot.blocks.insert(built.key, Arc::new(built.block));
         }
         Ok(RowBootstrap {
             rows: Self(Arc::new(snapshot)),
             work,
+            leaf_validation,
         })
     }
 
@@ -124,9 +165,11 @@ impl RowBlocks {
     pub(crate) fn materialize_recorded(
         &self,
         work: &mut RowMaterializationWork,
+        leaf_work: &mut RelationWork,
     ) -> Result<RecordBatch> {
         let result = self.materialize()?;
         work.absorb(&result.work)?;
+        leaf_work.absorb(&result.leaf_work)?;
         Ok(result.batch)
     }
 
@@ -140,12 +183,37 @@ impl RowBlocks {
         self.0.schema.fields().len()
     }
 
-    /// MemTable consumes shared ordered leaves, without concatenating the table.
-    pub(crate) fn batches(&self) -> Vec<RecordBatch> {
+    /// SQL MemTables consume their eager leaves; propagate any cache/conversion error.
+    /// Graph callers use recorded complete-demand boundaries instead.
+    pub(crate) fn batches(&self) -> Result<Vec<RecordBatch>> {
+        Ok(self.leaf_batches()?.batches)
+    }
+
+    fn leaf_batches(&self) -> Result<LeafBatches> {
+        let mut result = LeafBatches {
+            batches: Vec::new(),
+            work: RelationWork::default(),
+        };
         if self.0.blocks.is_empty() {
-            return vec![RecordBatch::new_empty(self.schema())];
+            result.batches.push(RecordBatch::new_empty(self.schema()));
         }
-        self.0.blocks.values().map(|b| b.batch.clone()).collect()
+        for block in self.0.blocks.values() {
+            let mut cache = block
+                .batch
+                .lock()
+                .map_err(|_| invalid("row leaf cache poisoned"))?;
+            let batch = match cache.as_ref() {
+                Some(batch) => batch.clone(),
+                None => {
+                    let batch = block.rows.to_batch()?;
+                    result.work.record_materialization(&batch)?;
+                    *cache = Some(batch.clone());
+                    batch
+                }
+            };
+            result.batches.push(batch);
+        }
+        Ok(result)
     }
 
     /// Cache one concatenation per immutable revision, including empty revisions.
@@ -159,9 +227,11 @@ impl RowBlocks {
             return Ok(RowMaterialization {
                 batch: batch.clone(),
                 work: RowMaterializationWork::default(),
+                leaf_work: RelationWork::default(),
             });
         }
-        let batch = concat_batches(&self.schema(), &self.batches())?;
+        let leaves = self.leaf_batches()?;
+        let batch = concat_batches(&self.schema(), &leaves.batches)?;
         let result = RowMaterialization {
             work: RowMaterializationWork {
                 rows: batch.num_rows() as u64,
@@ -169,23 +239,24 @@ impl RowBlocks {
                 misses: 1,
             },
             batch: batch.clone(),
+            leaf_work: leaves.work,
         };
         *cache = Some(batch);
         Ok(result)
     }
 
     /// Pointer equality fast-path; ordered slice equality preserves no-op reuse.
-    pub(crate) fn same_contents(&self, other: &Self) -> bool {
+    pub(crate) fn same_contents(&self, other: &Self) -> Result<bool> {
         if Arc::ptr_eq(&self.0, &other.0) {
-            return true;
+            return Ok(true);
         }
         if self.schema() != other.schema() || self.num_rows() != other.num_rows() {
-            return false;
+            return Ok(false);
         }
         // Splits may leave different leaf boundaries after a canceled transaction.
         // Compare ordered shared slices without a complete concatenation.
-        let left = self.batches();
-        let right = other.batches();
+        let left = self.batches()?;
+        let right = other.batches()?;
         let (mut li, mut ri, mut lo, mut ro) = (0, 0, 0, 0);
         while li < left.len() && ri < right.len() {
             let length = (left[li].num_rows() - lo).min(right[ri].num_rows() - ro);
@@ -193,7 +264,7 @@ impl RowBlocks {
                 &left[li].slice(lo, length),
                 &right[ri].slice(ro, length),
             ) {
-                return false;
+                return Ok(false);
             }
             lo += length;
             ro += length;
@@ -206,7 +277,7 @@ impl RowBlocks {
                 ro = 0;
             }
         }
-        li == left.len() && ri == right.len()
+        Ok(li == left.len() && ri == right.len())
     }
 
     /// Apply each touched leaf once. All mutation belongs to a private candidate.
@@ -235,6 +306,7 @@ impl RowBlocks {
             row_count: self.num_rows(),
             scalar_bytes: self.0.scalar_bytes,
             order: self.0.order.clone(),
+            leaf_policy: self.0.leaf_policy,
             flat: Mutex::new(None),
         };
         let mut work = RowUpdateWork::default();
@@ -296,9 +368,14 @@ impl RowBlocks {
                     .ok_or(Error::Overflow)?;
             }
             for leaf in leaves {
-                let (key, block) = make_block(leaf, &next.order)?;
-                work.delta_update.record_materialization(&block.batch)?;
-                if next.blocks.insert(key, Arc::new(block)).is_some() {
+                let built = make_block(leaf, &next.order, next.leaf_policy)?;
+                work.delta_update.absorb(&built.materialization)?;
+                work.leaf_validation.absorb(&built.validation)?;
+                if next
+                    .blocks
+                    .insert(built.key, Arc::new(built.block))
+                    .is_some()
+                {
                     return Err(invalid("table leaf boundary collision"));
                 }
             }
@@ -342,7 +419,7 @@ fn prepare_block(
             .ok_or(Error::Overflow)?;
         next.row_count = next
             .row_count
-            .checked_sub(old.batch.num_rows())
+            .checked_sub(old.row_count)
             .ok_or(Error::Overflow)?;
         next.scalar_bytes = next
             .scalar_bytes
@@ -364,28 +441,45 @@ fn prepare_block(
     Ok(after)
 }
 
-/// Materialize sorted leaf contents; its first encoded row defines its directory key.
-fn make_block(rows: Bag, order: &RowOrder) -> Result<(Vec<u8>, RowBlock)> {
+/// Preflight exact identity before publication, expanding only eager SQL leaves.
+fn make_block(rows: Bag, order: &RowOrder, policy: LeafCachePolicy) -> Result<BlockBuild> {
     let volume = rows.materialization_volume()?;
-    let batch = rows.to_batch()?;
+    let mut materialization = RelationWork::default();
+    let mut validation = RowEncodingWork::default();
+    let (boundary_batch, cached) = match policy {
+        LeafCachePolicy::OnUpdate => {
+            let batch = rows.to_batch()?;
+            materialization.record_materialization(&batch)?;
+            (batch.clone(), Some(batch))
+        }
+        LeafCachePolicy::OnDemand => {
+            // Bag retains its exact sort-encoding tie checks without expanding weights.
+            let batch = rows.distinct_batch()?;
+            validation.record(&batch)?;
+            (batch, None)
+        }
+    };
     let key = match order {
         RowOrder::SingleLeaf => Vec::new(),
         RowOrder::Encoded(converter) => {
-            let encoded = converter.convert_columns(batch.columns())?;
-            if batch.num_rows() == 0 {
+            let encoded = converter.convert_columns(boundary_batch.columns())?;
+            if boundary_batch.num_rows() == 0 {
                 return Err(invalid("empty table leaf"));
             }
             encoded.row(0).as_ref().to_vec()
         }
     };
-    Ok((
+    Ok(BlockBuild {
         key,
-        RowBlock {
+        block: RowBlock {
             rows,
-            batch,
+            batch: Mutex::new(cached),
+            row_count: volume.rows,
             scalar_bytes: volume.scalar_bytes,
         },
-    ))
+        materialization,
+        validation,
+    })
 }
 
 #[cfg(test)]
@@ -434,7 +528,7 @@ mod tests {
             &input
         ));
         let again = before.apply(&delta)?;
-        assert!(again.rows.same_contents(&after.rows));
+        assert!(again.rows.same_contents(&after.rows)?);
         assert!(before
             .apply(&Bag::from_weighted(&ints(vec![Some(0)]), &[-2])?)
             .is_err());
@@ -462,7 +556,7 @@ mod tests {
             .apply(&Bag::from_weighted(&ints(vec![Some(-1)]), &[-1])?)?
             .rows;
         assert_eq!(canceled.0.blocks.len(), 2);
-        assert!(before.same_contents(&canceled));
+        assert!(before.same_contents(&canceled)?);
         assert!(canceled.0.flat.lock().unwrap().is_none());
         assert_eq!(canceled.materialize()?.work.misses, 1);
         assert_eq!(canceled.clone().materialize()?.work.misses, 0);
@@ -471,110 +565,114 @@ mod tests {
 
     #[test]
     fn float_bits_and_dictionary_values_survive_independent_source_encodings() -> Result<()> {
-        let schema = Arc::new(Schema::new(vec![Field::new("f", DataType::Float64, true)]));
-        let make = |v: Vec<Option<f64>>| {
-            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Float64Array::from(v))])
-        };
-        let input = make(vec![
-            Some(0.0),
-            Some(-0.0),
-            Some(f64::from_bits(0x7ff8_0000_0000_0001)),
-            Some(f64::from_bits(0x7ff8_0000_0000_0002)),
-            None,
-        ])?;
-        let before = RowBlocks::from_batch(input.clone())?.rows;
-        let delta = Bag::from_weighted(
-            &make(vec![
+        for policy in [LeafCachePolicy::OnUpdate, LeafCachePolicy::OnDemand] {
+            let schema = Arc::new(Schema::new(vec![Field::new("f", DataType::Float64, true)]));
+            let make = |v: Vec<Option<f64>>| {
+                RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(Float64Array::from(v))])
+            };
+            let input = make(vec![
+                Some(0.0),
+                Some(-0.0),
                 Some(f64::from_bits(0x7ff8_0000_0000_0001)),
-                Some(f64::from_bits(0x7ff8_0000_0000_0003)),
-            ])?,
-            &[-1, 1],
-        )?;
-        assert_eq!(
-            Bag::from_batch(&before.apply(&delta)?.rows.materialize()?.batch)?,
-            Bag::from_batch(&input)?.add(&delta)?
-        );
+                Some(f64::from_bits(0x7ff8_0000_0000_0002)),
+                None,
+            ])?;
+            let before = RowBlocks::bootstrap(input.clone(), policy)?.rows;
+            let delta = Bag::from_weighted(
+                &make(vec![
+                    Some(f64::from_bits(0x7ff8_0000_0000_0001)),
+                    Some(f64::from_bits(0x7ff8_0000_0000_0003)),
+                ])?,
+                &[-1, 1],
+            )?;
+            assert_eq!(
+                Bag::from_batch(&before.apply(&delta)?.rows.materialize()?.batch)?,
+                Bag::from_batch(&input)?.add(&delta)?
+            );
 
-        let dict_schema = Arc::new(Schema::new(vec![Field::new(
-            "s",
-            DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8)),
-            true,
-        )]));
-        let dictionary = |values: Vec<String>| -> Result<RecordBatch> {
-            let mut builder = StringDictionaryBuilder::<Int16Type>::new();
-            for value in values {
-                builder.append(value)?;
-            }
-            Ok(RecordBatch::try_new(
-                Arc::clone(&dict_schema),
-                vec![Arc::new(builder.finish())],
-            )?)
-        };
-        let input = dictionary((0..600).map(|i| format!("v{i:04}")).collect())?;
-        let before = RowBlocks::from_batch(input.clone())?.rows;
-        // The delta's independent dictionary assigns different numeric keys to values.
-        let delta =
-            Bag::from_weighted(&dictionary(vec!["v0500".into(), "v0600".into()])?, &[-1, 1])?;
-        assert_eq!(
-            Bag::from_batch(&before.apply(&delta)?.rows.materialize()?.batch)?,
-            Bag::from_batch(&input)?.add(&delta)?
-        );
+            let dict_schema = Arc::new(Schema::new(vec![Field::new(
+                "s",
+                DataType::Dictionary(Box::new(DataType::Int16), Box::new(DataType::Utf8)),
+                true,
+            )]));
+            let dictionary = |values: Vec<String>| -> Result<RecordBatch> {
+                let mut builder = StringDictionaryBuilder::<Int16Type>::new();
+                for value in values {
+                    builder.append(value)?;
+                }
+                Ok(RecordBatch::try_new(
+                    Arc::clone(&dict_schema),
+                    vec![Arc::new(builder.finish())],
+                )?)
+            };
+            let input = dictionary((0..600).map(|i| format!("v{i:04}")).collect())?;
+            let before = RowBlocks::bootstrap(input.clone(), policy)?.rows;
+            // The delta's independent dictionary assigns different numeric keys to values.
+            let delta =
+                Bag::from_weighted(&dictionary(vec!["v0500".into(), "v0600".into()])?, &[-1, 1])?;
+            assert_eq!(
+                Bag::from_batch(&before.apply(&delta)?.rows.materialize()?.batch)?,
+                Bag::from_batch(&input)?.add(&delta)?
+            );
+        }
         Ok(())
     }
 
     #[test]
     fn singleton_branch_checks_final_state_and_global_budgets_before_expansion() -> Result<()> {
-        let mut before = RowBlocks::from_batch(ints(vec![Some(1)]))?.rows;
-        // Exercise the fallback independently of Arrow's current supported-type list.
-        let snapshot = Arc::get_mut(&mut before.0).unwrap();
-        snapshot.order = RowOrder::SingleLeaf;
-        let key = snapshot.blocks.first_key_value().unwrap().0.clone();
-        let block = snapshot.blocks.remove(&key).unwrap();
-        snapshot.blocks.insert(Vec::new(), block);
-        let delta = Bag::from_weighted(&ints(vec![Some(1), Some(2)]), &[-1, 1])?;
-        let after = before.apply(&delta)?.rows;
-        assert_eq!(
-            Bag::from_batch(&after.materialize()?.batch)?,
-            Bag::from_batch(&ints(vec![Some(2)]))?
-        );
-        let empty = after
-            .apply(&Bag::from_weighted(&ints(vec![Some(2)]), &[-1])?)?
-            .rows;
-        assert_eq!(empty.num_rows(), 0);
-        assert_eq!(empty.materialize()?.batch.schema(), before.schema());
+        for policy in [LeafCachePolicy::OnUpdate, LeafCachePolicy::OnDemand] {
+            let mut before = RowBlocks::bootstrap(ints(vec![Some(1)]), policy)?.rows;
+            // Exercise the fallback independently of Arrow's current supported-type list.
+            let snapshot = Arc::get_mut(&mut before.0).unwrap();
+            snapshot.order = RowOrder::SingleLeaf;
+            let key = snapshot.blocks.first_key_value().unwrap().0.clone();
+            let block = snapshot.blocks.remove(&key).unwrap();
+            snapshot.blocks.insert(Vec::new(), block);
+            let delta = Bag::from_weighted(&ints(vec![Some(1), Some(2)]), &[-1, 1])?;
+            let after = before.apply(&delta)?.rows;
+            assert_eq!(
+                Bag::from_batch(&after.materialize()?.batch)?,
+                Bag::from_batch(&ints(vec![Some(2)]))?
+            );
+            let empty = after
+                .apply(&Bag::from_weighted(&ints(vec![Some(2)]), &[-1])?)?
+                .rows;
+            assert_eq!(empty.num_rows(), 0);
+            assert_eq!(empty.materialize()?.batch.schema(), before.schema());
 
-        let before = RowBlocks::from_batch(ints((0..512).map(Some).collect()))?.rows;
-        let too_many = Bag::from_weighted(
-            &ints(vec![Some(0)]),
-            &[(crate::MAX_MATERIALIZED_ROWS - 256) as i64],
-        )?;
-        assert!(before.apply(&too_many).is_err());
-        assert_eq!(before.num_rows(), 512);
-        let wide_schema = Arc::new(Schema::new(
-            (0..32)
-                .map(|i| Field::new(format!("c{i}"), DataType::Int64, false))
-                .collect::<Vec<_>>(),
-        ));
-        let wide = RecordBatch::try_new(
-            wide_schema,
-            (0..32)
-                .map(|_| {
-                    Arc::new(Int64Array::from_iter_values(0..512))
-                        as datafusion::arrow::array::ArrayRef
-                })
-                .collect(),
-        )?;
-        let wide_table = RowBlocks::from_batch(wide.clone())?.rows;
-        let too_wide = Bag::from_weighted(
-            &wide.slice(0, 1),
-            &[(crate::MAX_MATERIALIZED_ROWS / 2) as i64],
-        )?;
-        assert!(wide_table.apply(&too_wide).is_err());
-        assert_eq!(wide_table.num_rows(), 512);
-        let input = ints(vec![Some(0)]);
-        assert!(before
-            .apply(&Bag::from_weighted(&input, &[i64::MAX])?)
-            .is_err());
+            let before = RowBlocks::bootstrap(ints((0..512).map(Some).collect()), policy)?.rows;
+            let too_many = Bag::from_weighted(
+                &ints(vec![Some(0)]),
+                &[(crate::MAX_MATERIALIZED_ROWS - 256) as i64],
+            )?;
+            assert!(before.apply(&too_many).is_err());
+            assert_eq!(before.num_rows(), 512);
+            let wide_schema = Arc::new(Schema::new(
+                (0..32)
+                    .map(|i| Field::new(format!("c{i}"), DataType::Int64, false))
+                    .collect::<Vec<_>>(),
+            ));
+            let wide = RecordBatch::try_new(
+                wide_schema,
+                (0..32)
+                    .map(|_| {
+                        Arc::new(Int64Array::from_iter_values(0..512))
+                            as datafusion::arrow::array::ArrayRef
+                    })
+                    .collect(),
+            )?;
+            let wide_table = RowBlocks::bootstrap(wide.clone(), policy)?.rows;
+            let too_wide = Bag::from_weighted(
+                &wide.slice(0, 1),
+                &[(crate::MAX_MATERIALIZED_ROWS / 2) as i64],
+            )?;
+            assert!(wide_table.apply(&too_wide).is_err());
+            assert_eq!(wide_table.num_rows(), 512);
+            let input = ints(vec![Some(0)]);
+            assert!(before
+                .apply(&Bag::from_weighted(&input, &[i64::MAX])?)
+                .is_err());
+        }
         Ok(())
     }
 }
@@ -596,86 +694,91 @@ mod randomized_tests {
     #[test]
     fn deterministic_mixed_updates_and_discarded_candidates_match_an_independent_multiset(
     ) -> Result<()> {
-        let mut model = (0..1024)
-            .map(|k| (Some(k), 1usize))
-            .collect::<BTreeMap<_, _>>();
-        let mut current = RowBlocks::from_batch(batch((0..1024).map(Some).collect()))?.rows;
-        let old = current.clone();
-        let mut seed = 0x7a92c66du64;
-        for round in 0usize..300 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-            let old_key = *model.keys().nth((seed as usize) % model.len()).unwrap();
-            let new_key = if seed.is_multiple_of(11) {
-                None
-            } else {
-                Some(((seed >> 24) % 1600) as i64 - 100)
-            };
-            let delta = Bag::from_weighted(&batch(vec![old_key, new_key]), &[-1, 1])?;
-            let candidate = current.apply(&delta)?;
-            if !round.is_multiple_of(5) {
-                let remaining = model.get_mut(&old_key).unwrap();
-                *remaining -= 1;
-                if *remaining == 0 {
-                    model.remove(&old_key);
+        for policy in [LeafCachePolicy::OnUpdate, LeafCachePolicy::OnDemand] {
+            let mut model = (0..1024)
+                .map(|k| (Some(k), 1usize))
+                .collect::<BTreeMap<_, _>>();
+            let mut current =
+                RowBlocks::bootstrap(batch((0..1024).map(Some).collect()), policy)?.rows;
+            let old = current.clone();
+            let mut seed = 0x7a92c66du64;
+            for round in 0usize..300 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let old_key = *model.keys().nth((seed as usize) % model.len()).unwrap();
+                let new_key = if seed.is_multiple_of(11) {
+                    None
+                } else {
+                    Some(((seed >> 24) % 1600) as i64 - 100)
+                };
+                let delta = Bag::from_weighted(&batch(vec![old_key, new_key]), &[-1, 1])?;
+                let candidate = current.apply(&delta)?;
+                if !round.is_multiple_of(5) {
+                    let remaining = model.get_mut(&old_key).unwrap();
+                    *remaining -= 1;
+                    if *remaining == 0 {
+                        model.remove(&old_key);
+                    }
+                    *model.entry(new_key).or_default() += 1;
+                    current = candidate.rows;
                 }
-                *model.entry(new_key).or_default() += 1;
-                current = candidate.rows;
+                if round.is_multiple_of(17) {
+                    let expected = batch(
+                        model
+                            .iter()
+                            .flat_map(|(key, count)| std::iter::repeat_n(*key, *count))
+                            .collect(),
+                    );
+                    assert!(
+                        crate::store::batches_equal(&current.materialize()?.batch, &expected),
+                        "round {round}"
+                    );
+                    assert!(current
+                        .0
+                        .blocks
+                        .values()
+                        .all(|leaf| leaf.rows.len() <= BLOCK_ENTRIES));
+                }
             }
-            if round.is_multiple_of(17) {
-                let expected = batch(
-                    model
-                        .iter()
-                        .flat_map(|(key, count)| std::iter::repeat_n(*key, *count))
-                        .collect(),
-                );
-                assert!(
-                    crate::store::batches_equal(&current.materialize()?.batch, &expected),
-                    "round {round}"
-                );
-                assert!(current
-                    .0
-                    .blocks
-                    .values()
-                    .all(|leaf| leaf.rows.len() <= BLOCK_ENTRIES));
-            }
+            let expected = batch(
+                model
+                    .iter()
+                    .flat_map(|(key, count)| std::iter::repeat_n(*key, *count))
+                    .collect(),
+            );
+            assert!(crate::store::batches_equal(
+                &current.materialize()?.batch,
+                &expected
+            ));
+            assert!(crate::store::batches_equal(
+                &old.materialize()?.batch,
+                &batch((0..1024).map(Some).collect())
+            ));
         }
-        let expected = batch(
-            model
-                .iter()
-                .flat_map(|(key, count)| std::iter::repeat_n(*key, *count))
-                .collect(),
-        );
-        assert!(crate::store::batches_equal(
-            &current.materialize()?.batch,
-            &expected
-        ));
-        assert!(crate::store::batches_equal(
-            &old.materialize()?.batch,
-            &batch((0..1024).map(Some).collect())
-        ));
         Ok(())
     }
 
     #[test]
     fn bulk_key_moves_encode_multiple_batches_and_check_only_the_final_endpoint() -> Result<()> {
-        let before = RowBlocks::from_batch(batch((0..2048).map(Some).collect()))?.rows;
-        let changes = batch(
-            (0..2048)
-                .map(Some)
-                .chain((10000..12048).map(Some))
-                .collect(),
-        );
-        let weights = std::iter::repeat_n(-1, 2048)
-            .chain(std::iter::repeat_n(1, 2048))
-            .collect::<Vec<_>>();
-        let delta = Bag::from_weighted(&changes, &weights)?;
-        let after = before.apply(&delta)?;
-        assert_eq!(after.work.block_update.delta_key_rows, 4096);
-        assert!(crate::store::batches_equal(
-            &after.rows.materialize()?.batch,
-            &batch((10000..12048).map(Some).collect())
-        ));
-        assert_eq!(before.num_rows(), 2048);
+        for policy in [LeafCachePolicy::OnUpdate, LeafCachePolicy::OnDemand] {
+            let before = RowBlocks::bootstrap(batch((0..2048).map(Some).collect()), policy)?.rows;
+            let changes = batch(
+                (0..2048)
+                    .map(Some)
+                    .chain((10000..12048).map(Some))
+                    .collect(),
+            );
+            let weights = std::iter::repeat_n(-1, 2048)
+                .chain(std::iter::repeat_n(1, 2048))
+                .collect::<Vec<_>>();
+            let delta = Bag::from_weighted(&changes, &weights)?;
+            let after = before.apply(&delta)?;
+            assert_eq!(after.work.block_update.delta_key_rows, 4096);
+            assert!(crate::store::batches_equal(
+                &after.rows.materialize()?.batch,
+                &batch((10000..12048).map(Some).collect())
+            ));
+            assert_eq!(before.num_rows(), 2048);
+        }
         Ok(())
     }
 }
@@ -688,17 +791,95 @@ mod zero_column_tests {
 
     #[test]
     fn zero_columns_preserve_multiplicity_through_replacement_and_flattening() -> Result<()> {
-        let batch = RecordBatch::try_new_with_options(
-            Arc::new(Schema::empty()),
-            Vec::new(),
-            &RecordBatchOptions::new().with_row_count(Some(3)),
-        )?;
-        let before = RowBlocks::from_batch(batch.clone())?.rows;
-        let delta = Bag::from_weighted(&batch.slice(0, 1), &[-1])?;
-        let after = before.apply(&delta)?.rows;
-        assert_eq!(after.num_rows(), 2);
-        assert_eq!(after.materialize()?.batch.num_rows(), 2);
-        assert_eq!(before.materialize()?.batch.num_rows(), 3);
+        for policy in [LeafCachePolicy::OnUpdate, LeafCachePolicy::OnDemand] {
+            let batch = RecordBatch::try_new_with_options(
+                Arc::new(Schema::empty()),
+                Vec::new(),
+                &RecordBatchOptions::new().with_row_count(Some(3)),
+            )?;
+            let before = RowBlocks::bootstrap(batch.clone(), policy)?.rows;
+            let delta = Bag::from_weighted(&batch.slice(0, 1), &[-1])?;
+            let after = before.apply(&delta)?.rows;
+            assert_eq!(after.num_rows(), 2);
+            assert_eq!(after.materialize()?.batch.num_rows(), 2);
+            assert_eq!(before.materialize()?.batch.num_rows(), 3);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lazy_leaf_tests {
+    use super::*;
+    use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+    fn batch(values: Vec<i64>) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)])),
+            vec![Arc::new(Int64Array::from(values))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn duplicate_weights_expand_only_on_demand_and_repeated_reads_share_the_cache() -> Result<()> {
+        for n in [1024, 8192] {
+            let imported = RowBlocks::from_relation_batch(batch(vec![7; n]))?;
+            assert_eq!(imported.work.leaf_materializations, 0);
+            assert_eq!(imported.leaf_validation.rows, 1);
+            let before = imported.rows;
+            let delta = Bag::from_batch(&batch(vec![7]))?;
+            let candidate = before.apply(&delta)?;
+            assert_eq!(candidate.work.delta_update.materialized_rows, 0);
+            assert_eq!(candidate.work.leaf_validation.rows, 1);
+            assert!(candidate
+                .rows
+                .0
+                .blocks
+                .values()
+                .all(|b| b.batch.lock().unwrap().is_none()));
+            let demanded = candidate.rows.materialize()?;
+            assert_eq!(demanded.batch.num_rows(), n + 1);
+            assert_eq!(demanded.leaf_work.materializations, 1);
+            assert_eq!(demanded.leaf_work.materialized_rows, n + 1);
+            assert_eq!(demanded.work.misses, 1);
+            let again = candidate.rows.clone().materialize()?;
+            assert_eq!(again.leaf_work, RelationWork::default());
+            assert_eq!(again.work.misses, 0);
+            assert_eq!(before.materialize()?.batch.num_rows(), n);
+            assert!(before
+                .0
+                .blocks
+                .values()
+                .all(|b| b.batch.lock().unwrap().is_none()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn complete_demand_reuses_unchanged_leaf_caches_and_counts_only_missing_leaves() -> Result<()> {
+        let before = RowBlocks::from_relation_batch(batch((0..1024).collect()))?.rows;
+        let initial = before.leaf_batches()?;
+        assert_eq!(initial.work.materialized_rows, 1024);
+        assert_eq!(before.leaf_batches()?.work.materializations, 0);
+        let delta = Bag::from_batch(&batch(vec![1]))?;
+        let candidate = before.apply(&delta)?;
+        assert_eq!(candidate.work.delta_update.materialized_rows, 0);
+        let demand = candidate.rows.materialize()?;
+        assert_eq!(demand.leaf_work.materialized_rows, 257);
+        assert_eq!(demand.leaf_work.materializations, 1);
+        assert_eq!(demand.work.rows, 1025);
+        assert_eq!(
+            Bag::from_batch(&demand.batch)?,
+            Bag::from_batch(&before.materialize()?.batch)?.add(&delta)?
+        );
+        assert_eq!(before.num_rows(), 1024);
+        let key = before.0.blocks.keys().last().unwrap();
+        assert!(Arc::ptr_eq(
+            before.0.blocks.get(key).unwrap(),
+            candidate.rows.0.blocks.get(key).unwrap()
+        ));
         Ok(())
     }
 }

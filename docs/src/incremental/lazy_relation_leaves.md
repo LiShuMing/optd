@@ -1,6 +1,6 @@
 # Demand-only maintained relation leaves
 
-**Status:** accepted · 2026-10-31; implementation pending
+**Status:** accepted · 2026-10-31; graph-leaf stage implemented and locally verified
 **Scope:** R02d graph-leaf stage after source-sharing commit `1f4e775`.
 SQL table/provider laziness and complete R02d acceptance remain later stages.
 
@@ -89,3 +89,30 @@ SQL policy prevents shifting selector/export conversion out of existing counters
 Fallible propagation avoids suppressing future cache errors. Distinct-row encoding
 preserves pre-publication admission while removing duplicate-weight expansion.
 This is local design/source review, not independent implementation verification.
+
+## 9. Observed implementation evidence
+
+`RowBlocks::from_relation_batch` now selects demand-only graph leaf caches; SQL
+`from_batch` retains eager table leaves. Updated graph leaves store weighted Bags,
+volume and distinct-row boundary validation. `RowMaterialization` returns named
+complete-cache and leaf-miss work. Refresh diagnostics distinguish update-time
+`caches`, `leaf_validation`, `demanded_leaves` and `complete_caches`. Old mandatory
+serialized work shapes are unchanged. SQL batch/contents comparison errors now
+propagate through typed Results instead of being suppressed.
+
+At fixed SUM output and one inserted duplicate, 1024/8192 inputs produce 0/0
+update-time expanded rows, 514/514 distinct leaf-validation rows and 1/1 demanded
+leaf output rows plus one root concatenation. The COUNT constant-projection
+regression failed before implementation (1541 update-time expanded rows at the
+first size) and now asserts zero update-time expansion at both sizes, one demanded
+output row, bounded validation and independent full SQL equality.
+
+Nine row-block unit cases pass, including dual-policy randomized/identity/budget/
+zero-column cases and two dedicated lazy-cache/demand-sharing cases. Full local
+gates pass: 210 default tests (2 ignored), 224 Iceberg tests (3 ignored), fmt and
+both Clippy configurations. Private rustdoc, mdBook and 38 report-tool tests pass.
+Frozen default-binary TPC-H Q1/TPC-DS Q1 each pass strict planning, three SQL DML
+rounds, independent SQL, reopen and delta replay; source/binary/report identities
+are in `target/roadmap-r02d-leaf-live-20261031`. ROADMAP records exact commands,
+logs and exclusions. This milestone does not complete SQL table/provider laziness,
+R02d, full TPC coverage or controlled performance qualification.

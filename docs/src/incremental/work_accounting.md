@@ -90,3 +90,21 @@ at its own boundary; do not estimate copies from touched-key counts. Bootstrap
 and physical subexpression batches remain excluded explicitly. The consolidation
 review identified schema validation and intermediate overflow as invariants even
 for batches whose net change cancels; both require regression coverage.
+
+
+## Current boundary mapping after R02d partial delivery
+
+The preceding R01a/R02a baseline descriptions are historical. Shared raw sources
+now count rebuilt exact hash-collision bucket maps in `sources`, with consolidated
+updates/probes/path copies/complete Bag misses in `source_state`. Graph `caches`
+counts changed-leaf map copies and update-time expansion (now zero on delta graph
+updates). `leaf_validation` counts distinct-row boundary batches;
+`demanded_leaves` counts actual expanded graph leaf cache misses; `complete_caches`
+counts complete snapshot/root concatenations. Complete physical replacement
+collection remains `replacement_bootstrap`. These JSON fields share one internal
+boxed diagnostics allocation, preserving public enum sizes and historical absence.
+
+See [raw-source state](raw_source_state.md) and [lazy graph leaves](lazy_relation_leaves.md)
+for current contracts and ROADMAP for verified evidence. SQL table providers remain
+eager; their work, source physical-expression expansion, checkpoint/export and
+allocator/device IO must not be inferred from graph cache counters.

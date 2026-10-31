@@ -382,12 +382,13 @@ impl DatabaseStore {
             };
         let mut tables = BTreeMap::new();
         for (n, t) in &next.tables {
-            let reusable = self
-                .snapshot
-                .tables
-                .get(n)
-                .filter(|old| old.id == t.id && old.rows.same_contents(&t.rows))
-                .and_then(|_| self.manifest.as_ref()?.tables.get(n));
+            let reusable = match self.snapshot.tables.get(n) {
+                Some(old) if old.id == t.id && old.rows.same_contents(&t.rows)? => self
+                    .manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.tables.get(n)),
+                _ => None,
+            };
             let data = match reusable {
                 Some(old) => {
                     self.work.payload(

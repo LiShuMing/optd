@@ -38,7 +38,9 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use metrics::AccumulatorWork;
 pub use planner::Strategy;
-pub use work::{CacheRelationWork, RefreshWork, RelationWork, SourceStateWork, StateCopyWork};
+pub use work::{
+    CacheRelationWork, RefreshWork, RelationWork, RowEncodingWork, SourceStateWork, StateCopyWork,
+};
 
 #[cfg(all(test, feature = "iceberg"))]
 mod dependency_contract {

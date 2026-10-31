@@ -646,12 +646,17 @@ impl SqlView {
                 keyed_work = result.keyed_work;
                 group_work = result.group_work;
                 let replacement = if let Some(batch) = result.replacement {
-                    let imported = RowBlocks::from_batch(batch)?;
+                    let imported = RowBlocks::from_relation_batch(batch)?;
                     stats
                         .work
                         .cache_work
                         .replacement_bootstrap
                         .absorb(&imported.work)?;
+                    stats
+                        .work
+                        .cache_work
+                        .leaf_validation
+                        .absorb(&imported.leaf_validation)?;
                     Some(Relation {
                         rows: imported.rows,
                     })
@@ -667,6 +672,11 @@ impl SqlView {
                     None => {
                         let update = self.states[id].rows.apply(&delta)?;
                         stats.work.caches.absorb(&update.work.delta_update)?;
+                        stats
+                            .work
+                            .cache_work
+                            .leaf_validation
+                            .absorb(&update.work.leaf_validation)?;
                         stats
                             .work
                             .cache_work
@@ -687,12 +697,14 @@ impl SqlView {
                 });
             }
             let changed_sequence = if node.ordered {
-                let after = states[id]
-                    .rows
-                    .materialize_recorded(&mut stats.work.cache_work.complete_caches)?;
-                let before = self.states[id]
-                    .rows
-                    .materialize_recorded(&mut stats.work.cache_work.complete_caches)?;
+                let after = states[id].rows.materialize_recorded(
+                    &mut stats.work.cache_work.complete_caches,
+                    &mut stats.work.cache_work.demanded_leaves,
+                )?;
+                let before = self.states[id].rows.materialize_recorded(
+                    &mut stats.work.cache_work.complete_caches,
+                    &mut stats.work.cache_work.demanded_leaves,
+                )?;
                 after != before
             } else {
                 false
@@ -708,7 +720,10 @@ impl SqlView {
             .last()
             .ok_or_else(|| Error::Invalid("empty graph".into()))?
             .rows
-            .materialize_recorded(&mut stats.work.cache_work.complete_caches)?;
+            .materialize_recorded(
+                &mut stats.work.cache_work.complete_caches,
+                &mut stats.work.cache_work.demanded_leaves,
+            )?;
         Ok(PreparedSqlRefresh {
             owner: self.owner,
             before: self.epoch,

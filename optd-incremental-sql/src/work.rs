@@ -112,6 +112,11 @@ pub struct RefreshWork {
 /// Actual maintained relation update, demand and replacement boundaries.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CacheRelationWork {
+    /// Actual graph leaf expansions demanded by complete snapshots/root outputs.
+    pub demanded_leaves: RelationWork,
+    /// Distinct-row Arrow batches used for lazy graph leaf identity/boundary checks.
+    /// Temporary scalar/sort allocations inside Bag conversion remain excluded.
+    pub leaf_validation: RowEncodingWork,
     /// Raw-source validation, shared updates and demanded complete Bag collection.
     /// Kept in this existing boxed group to preserve public refresh-enum sizes.
     pub source_state: SourceStateWork,
@@ -121,6 +126,31 @@ pub struct CacheRelationWork {
     pub complete_caches: RowMaterializationWork,
     /// Arrow collection and leaf bootstrap for complete physical replacements.
     pub replacement_bootstrap: RowBootstrapWork,
+}
+
+/// Distinct-row validation/encoding at a retained graph leaf, without weight expansion.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct RowEncodingWork {
+    /// Successful distinct leaf boundary batches encoded.
+    pub batches: usize,
+    /// Distinct complete rows in those batches, independent of multiplicity.
+    pub rows: usize,
+    /// Arrow buffer sizes of the distinct-row boundary batches.
+    pub array_bytes: usize,
+}
+impl RowEncodingWork {
+    /// Record the actual distinct Arrow batch; internal temporary allocations are excluded.
+    pub(crate) fn record(&mut self, batch: &RecordBatch) -> Result<()> {
+        add(&mut self.batches, 1)?;
+        add(&mut self.rows, batch.num_rows())?;
+        add(&mut self.array_bytes, batch.get_array_memory_size())
+    }
+    /// Merge independently observed leaf validation boundaries.
+    pub(crate) fn absorb(&mut self, other: &Self) -> Result<()> {
+        add(&mut self.batches, other.batches)?;
+        add(&mut self.rows, other.rows)?;
+        add(&mut self.array_bytes, other.array_bytes)
+    }
 }
 
 /// Actual weighted source work, excluding bootstrap and external snapshot/export IO.
@@ -233,6 +263,7 @@ pub struct RowBootstrapWork {
 pub(crate) struct RowUpdateWork {
     pub(crate) delta_update: RelationWork,
     pub(crate) block_update: RowBlockWork,
+    pub(crate) leaf_validation: RowEncodingWork,
 }
 
 impl RelationWork {

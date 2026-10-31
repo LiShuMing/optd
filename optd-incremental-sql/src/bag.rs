@@ -389,6 +389,12 @@ impl Bag {
         materialize(self.schema(), &self.sorted_entries()?, true)
     }
 
+    /// Validate canonical row identity and encode each distinct row exactly once.
+    /// Positive leaf admission uses this without expanding duplicate multiplicities.
+    pub(crate) fn distinct_batch(&self) -> Result<RecordBatch> {
+        materialize(self.schema(), &self.sorted_entries()?, false)
+    }
+
     /// Encode one distinct row per change and append the signed Int64 weight.
     pub(crate) fn weighted_batch(&self) -> Result<RecordBatch> {
         let entries = self.sorted_entries()?;

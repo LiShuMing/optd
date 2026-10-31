@@ -268,12 +268,14 @@ pub(crate) async fn run(
             }
             Operation::SnapshotRead { input, version, .. } => {
                 Value::Relation(RelationValue::new(match version {
-                    SnapshotVersion::Before => bindings.before[*input]
-                        .rows
-                        .materialize_recorded(&mut refresh_work.cache_work.complete_caches)?,
-                    SnapshotVersion::After => bindings.after[*input]
-                        .rows
-                        .materialize_recorded(&mut refresh_work.cache_work.complete_caches)?,
+                    SnapshotVersion::Before => bindings.before[*input].rows.materialize_recorded(
+                        &mut refresh_work.cache_work.complete_caches,
+                        &mut refresh_work.cache_work.demanded_leaves,
+                    )?,
+                    SnapshotVersion::After => bindings.after[*input].rows.materialize_recorded(
+                        &mut refresh_work.cache_work.complete_caches,
+                        &mut refresh_work.cache_work.demanded_leaves,
+                    )?,
                 })?)
             }
             Operation::SourceRead { name, delta, .. } => {
@@ -536,7 +538,7 @@ pub(crate) struct Relation {
 impl Relation {
     pub(crate) fn new(batch: RecordBatch) -> Result<Self> {
         Ok(Self {
-            rows: RowBlocks::from_batch(batch)?.rows,
+            rows: RowBlocks::from_relation_batch(batch)?.rows,
         })
     }
 }

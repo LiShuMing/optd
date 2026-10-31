@@ -86,7 +86,7 @@ pub(super) fn context(snapshot: &DatabaseSnapshot, scope: RelationScope) -> Resu
     for (name, t) in &snapshot.tables {
         ctx.register_table(
             TableReference::bare(name.as_str()),
-            Arc::new(MemTable::try_new(t.rows.schema(), vec![t.rows.batches()])?),
+            Arc::new(MemTable::try_new(t.rows.schema(), vec![t.rows.batches()?])?),
         )?;
     }
     if scope == RelationScope::AllRelations {

@@ -46,21 +46,23 @@ impl MeasuredSelector {
         let context =
             SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
         let counter = Arc::new(SourceCounter::default());
-        for (name, schema, batches) in snapshot
-            .tables
-            .iter()
-            .map(|(n, t)| (n, t.rows.schema(), t.rows.batches()))
-            .chain(
-                snapshot
-                    .views
-                    .iter()
-                    .map(|(n, v)| (n, v.output.schema(), vec![v.output.clone()])),
-            )
-        {
+        for (name, table) in &snapshot.tables {
             context.register_table(
                 name.as_str(),
                 Arc::new(CountedTable {
-                    input: MemTable::try_new(schema, vec![batches])?,
+                    input: MemTable::try_new(table.rows.schema(), vec![table.rows.batches()?])?,
+                    counter: Arc::clone(&counter),
+                }),
+            )?;
+        }
+        for (name, view) in &snapshot.views {
+            context.register_table(
+                name.as_str(),
+                Arc::new(CountedTable {
+                    input: MemTable::try_new(
+                        view.output.schema(),
+                        vec![vec![view.output.clone()]],
+                    )?,
                     counter: Arc::clone(&counter),
                 }),
             )?;

@@ -1,6 +1,6 @@
 # Chunked maintained relations and lazy complete caches
 
-**Status:** accepted · 2026-10-31; maintained-node and raw-source sharing stages delivered; lazy leaves pending
+**Status:** accepted · 2026-10-31; maintained-node/source sharing and lazy graph leaves delivered; SQL leaf demand pending
 **Scope:** ROADMAP R02d. Reuse immutable row blocks for positive raw sources and
 operator relations; keep signed transient changes as Bags. No persisted format,
 rule admission, ordering, numeric-contract or dependency change.
@@ -140,3 +140,11 @@ Its new source-update counter preserves R02a's one-update-per-source contract;
 `sources.map_rebuilds` now measures actual bucket maps. Stage-one descriptions of
 complete raw-source rebuilds above are historical. Deferred duplicate-leaf expansion
 and SQL-provider laziness remain outstanding; R02d is still in progress.
+
+The [demand-only graph leaf stage](lazy_relation_leaves.md) now removes eager
+expansion from maintained graph updates, including COUNT's high-weight constant
+projection. It retains exact distinct-row boundary validation and separately
+records actual demanded leaf batches and complete concatenations. SQL table leaves
+and providers still use their measured eager contract; their lazy scan and weighted
+no-op comparison remain the final R02d stage. Earlier eager-graph descriptions are
+historical milestone evidence, not the current graph implementation.

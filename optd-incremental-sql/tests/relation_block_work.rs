@@ -51,10 +51,9 @@ async fn fixed_delta_and_fixed_root_output_copy_only_touched_cache_leaves() {
             work.caches.old_row_entries_copied <= 3 * 256 + 1,
             "n={n} {work:?}"
         );
-        assert!(
-            work.caches.materialized_rows <= 3 * 257 + 1,
-            "n={n} {work:?}"
-        );
+        assert!(work.caches.materialized_rows == 0, "n={n} {work:?}");
+        assert_eq!(work.cache_work.demanded_leaves.materialized_rows, 1);
+        assert!(work.cache_work.leaf_validation.rows <= 3 * 257 + 1);
         assert_eq!(work.cache_work.complete_caches.rows, 1);
         assert_eq!(work.cache_work.complete_caches.misses, 1);
         eprintln!("cache-block-work n={n} {work:?}");
@@ -100,7 +99,7 @@ async fn unread_raw_sources_keep_their_existing_nonmaterialized_weight_contract(
 }
 
 #[tokio::test]
-async fn stage_one_exposes_remaining_eager_duplicate_leaf_expansion() {
+async fn count_constant_projection_keeps_duplicate_leaf_weights_unexpanded() {
     let sql = "SELECT COUNT(*) AS n FROM t WHERE v>=0";
     for n in [1024, 8192] {
         let view = SqlView::new_with_optimizer(
@@ -118,9 +117,19 @@ async fn stage_one_exposes_remaining_eager_duplicate_leaf_expansion() {
             }])
             .await
             .unwrap();
-        // The optimizer projects a constant below COUNT. One distinct entry has
-        // n duplicates, whose eager leaf expansion remains an explicit R02d gate.
-        assert!(candidate.stats().work.caches.materialized_rows > n);
+        // The optimizer projects a constant below COUNT. Delta-only consumers
+        // must retain its high weight without expanding historical duplicates.
+        assert_eq!(candidate.stats().work.caches.materialized_rows, 0);
+        assert_eq!(
+            candidate
+                .stats()
+                .work
+                .cache_work
+                .demanded_leaves
+                .materialized_rows,
+            1
+        );
+        assert!(candidate.stats().work.cache_work.leaf_validation.rows <= 2 * 257 + 2);
         assert_eq!(candidate.stats().work.cache_work.complete_caches.rows, 1);
         let ctx = SessionContext::new();
         ctx.register_batch(

@@ -86,7 +86,7 @@ async fn check_oracle(
 }
 
 #[tokio::test]
-async fn fixed_delta_separates_full_sources_leaf_updates_and_required_root_output() {
+async fn fixed_delta_separates_source_buckets_leaf_updates_and_required_root_output() {
     let sql = "SELECT k, v FROM t";
     for n in [32, 256] {
         let maintained = view(sql, tables(n)).await;
@@ -100,18 +100,17 @@ async fn fixed_delta_separates_full_sources_leaf_updates_and_required_root_outpu
         assert_eq!(work.cache_work.source_state.updates, 1);
         assert_eq!(work.sources.materializations, 0);
         assert!(work.caches.map_rebuilds > 0);
-        // A touched leaf can split into two new caches at the 256-entry boundary.
-        assert!(work.caches.materializations >= work.caches.map_rebuilds);
-        assert!(work.caches.materializations <= 2 * work.caches.map_rebuilds);
+        // Leaf updates retain weights; only the required root expands its leaves.
+        assert_eq!(work.caches.materializations, 0);
+        assert!(work.cache_work.demanded_leaves.materializations > 0);
         assert_eq!(
             work.caches.old_row_entries_copied,
             n * work.caches.map_rebuilds
         );
-        assert_eq!(
-            work.caches.materialized_rows,
-            (n + 1) * work.caches.map_rebuilds
-        );
-        assert!(work.caches.materialized_array_bytes > 0);
+        assert_eq!(work.caches.materialized_rows, 0);
+        assert_eq!(work.caches.materialized_array_bytes, 0);
+        assert_eq!(work.cache_work.demanded_leaves.materialized_rows, n + 1);
+        assert!(work.cache_work.demanded_leaves.materialized_array_bytes > 0);
         assert_eq!(work.cache_work.complete_caches.rows, (n + 1) as u64);
         assert_eq!(work.cache_work.complete_caches.misses, 1);
         let mut expected = rows(n);
@@ -139,10 +138,9 @@ async fn copied_distinct_entries_and_expanded_materialized_rows_use_different_un
     let work = &candidate.stats().work;
     assert_eq!(work.sources.old_row_entries_copied, 1);
     assert_eq!(work.caches.old_row_entries_copied, work.caches.map_rebuilds);
-    assert_eq!(
-        work.caches.materialized_rows,
-        9 * work.caches.materializations
-    );
+    assert_eq!(work.caches.materialized_rows, 0);
+    assert_eq!(work.cache_work.demanded_leaves.materialized_rows, 9);
+    assert_eq!(work.cache_work.demanded_leaves.materializations, 1);
     check_oracle(
         sql,
         &candidate,
