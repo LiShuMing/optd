@@ -76,6 +76,20 @@ impl<V> StateDirectory<V> {
         None
     }
 
+    /// Compare payloads only when keys have the same tree alignment.
+    /// Shared subtrees require no traversal or payload calls. A shape mismatch is
+    /// inconclusive: callers with coarser logical identities must use an exact fallback.
+    pub(crate) fn aligned_values_equal(
+        &self,
+        other: &Self,
+        mut equal: impl FnMut(&V, &V) -> bool,
+    ) -> Option<bool> {
+        if !same_key_shape(&self.root, &other.root) {
+            return None;
+        }
+        Some(same_aligned_values(&self.root, &other.root, &mut equal))
+    }
+
     /// Inclusive predecessor used to locate a table leaf without a directory scan.
     pub(crate) fn predecessor(&self, key: &[u8]) -> Option<(&Vec<u8>, &V)> {
         let mut cursor = self.root.as_deref();
@@ -141,6 +155,38 @@ impl<V: Clone> FromIterator<(Vec<u8>, V)> for StateDirectory<V> {
             result.insert(key, value);
         }
         result
+    }
+}
+
+/// Alignment is proven before a payload difference can imply logical inequality.
+fn same_key_shape<V>(left: &Link<V>, right: &Link<V>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) if Arc::ptr_eq(left, right) => true,
+        (Some(left), Some(right)) => {
+            left.key == right.key
+                && same_key_shape(&left.left, &right.left)
+                && same_key_shape(&left.right, &right.right)
+        }
+        _ => false,
+    }
+}
+
+/// Called only after complete key alignment; shared immutable branches are exact.
+fn same_aligned_values<V>(
+    left: &Link<V>,
+    right: &Link<V>,
+    equal: &mut impl FnMut(&V, &V) -> bool,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) if Arc::ptr_eq(left, right) => true,
+        (Some(left), Some(right)) => {
+            equal(&left.value, &right.value)
+                && same_aligned_values(&left.left, &right.left, equal)
+                && same_aligned_values(&left.right, &right.right, equal)
+        }
+        _ => false,
     }
 }
 
@@ -452,5 +498,53 @@ mod tests {
         next.insert(key(1), Arc::new(2));
         assert!(matches!(next.copied_entries(), Err(Error::Overflow)));
         assert_eq!(**before.get(&key(1)).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod aligned_comparison_tests {
+    use super::*;
+
+    #[test]
+    fn shared_paths_skip_payload_work_and_shape_changes_are_inconclusive() {
+        let before = (0..4096u64)
+            .map(|k| (k.to_be_bytes().to_vec(), k))
+            .collect::<StateDirectory<_>>();
+        let mut calls = 0usize;
+        assert_eq!(
+            before.aligned_values_equal(&before.clone(), |a, b| {
+                calls += 1;
+                a == b
+            }),
+            Some(true)
+        );
+        assert_eq!(calls, 0);
+        let mut equal_revision = before.clone();
+        equal_revision.insert(2048u64.to_be_bytes().to_vec(), 2048);
+        assert_eq!(
+            before.aligned_values_equal(&equal_revision, |a, b| {
+                calls += 1;
+                a == b
+            }),
+            Some(true)
+        );
+        assert!(calls <= 3 * 4096usize.ilog2() as usize);
+        let mut changed = before.clone();
+        changed.insert(2048u64.to_be_bytes().to_vec(), 99);
+        assert_eq!(
+            before.aligned_values_equal(&changed, |a, b| a == b),
+            Some(false)
+        );
+        let mut different_keys = before.clone();
+        different_keys.insert(5000u64.to_be_bytes().to_vec(), 5000);
+        assert_eq!(
+            before.aligned_values_equal(&different_keys, |a, b| a == b),
+            None
+        );
+        let empty = StateDirectory::<u64>::new();
+        assert_eq!(
+            empty.aligned_values_equal(&empty, |a, b| a == b),
+            Some(true)
+        );
     }
 }

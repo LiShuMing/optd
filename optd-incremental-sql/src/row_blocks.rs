@@ -11,7 +11,7 @@ use datafusion::common::ScalarValue;
 
 use crate::bag::{self, Bag};
 use crate::error::invalid;
-use crate::state_directory::StateDirectory;
+use crate::state_directory::{DirectoryIter, StateDirectory};
 use crate::work::{
     RelationWork, RowBlockWork, RowBootstrapWork, RowEncodingWork, RowMaterializationWork,
     RowUpdateWork,
@@ -245,7 +245,8 @@ impl RowBlocks {
         Ok(result)
     }
 
-    /// Pointer equality fast-path; ordered slice equality preserves no-op reuse.
+    /// Compare exact weighted contents, skipping shared aligned directory subtrees.
+    /// Different split boundaries use a bounded-leaf iterator, never expanded Arrow rows.
     pub(crate) fn same_contents(&self, other: &Self) -> Result<bool> {
         if Arc::ptr_eq(&self.0, &other.0) {
             return Ok(true);
@@ -253,31 +254,22 @@ impl RowBlocks {
         if self.schema() != other.schema() || self.num_rows() != other.num_rows() {
             return Ok(false);
         }
-        // Splits may leave different leaf boundaries after a canceled transaction.
-        // Compare ordered shared slices without a complete concatenation.
-        let left = self.batches()?;
-        let right = other.batches()?;
-        let (mut li, mut ri, mut lo, mut ro) = (0, 0, 0, 0);
-        while li < left.len() && ri < right.len() {
-            let length = (left[li].num_rows() - lo).min(right[ri].num_rows() - ro);
-            if !crate::store::batches_equal(
-                &left[li].slice(lo, length),
-                &right[ri].slice(ro, length),
-            ) {
-                return Ok(false);
-            }
-            lo += length;
-            ro += length;
-            if lo == left[li].num_rows() {
-                li += 1;
-                lo = 0;
-            }
-            if ro == right[ri].num_rows() {
-                ri += 1;
-                ro = 0;
+        if let Some(equal) = self.0.blocks.aligned_values_equal(&other.0.blocks, |a, b| {
+            Arc::ptr_eq(a, b) || a.rows == b.rows
+        }) {
+            return Ok(equal);
+        }
+        // Splits can change boundaries without changing the complete relation.
+        // At most two leaf reference vectors are live; duplicate weights stay scalar.
+        let mut left = WeightedRows::new(&self.0.blocks);
+        let mut right = WeightedRows::new(&other.0.blocks);
+        loop {
+            match (left.next_row()?, right.next_row()?) {
+                (None, None) => return Ok(true),
+                (Some(left), Some(right)) if left == right => {}
+                _ => return Ok(false),
             }
         }
-        Ok(li == left.len() && ri == right.len())
     }
 
     /// Apply each touched leaf once. All mutation belongs to a private candidate.
@@ -392,6 +384,31 @@ impl RowBlocks {
             rows: Self(Arc::new(next)),
             work,
         })
+    }
+}
+
+/// Borrow canonical distinct rows while retaining at most one leaf's references.
+struct WeightedRows<'a> {
+    blocks: DirectoryIter<'a, Arc<RowBlock>>,
+    entries: std::vec::IntoIter<bag::Entry<'a>>,
+}
+impl<'a> WeightedRows<'a> {
+    fn new(blocks: &'a StateDirectory<Arc<RowBlock>>) -> Self {
+        Self {
+            blocks: blocks.iter(),
+            entries: Vec::new().into_iter(),
+        }
+    }
+    fn next_row(&mut self) -> Result<Option<bag::Entry<'a>>> {
+        loop {
+            if let Some(entry) = self.entries.next() {
+                return Ok(Some(entry));
+            }
+            let Some((_, block)) = self.blocks.next() else {
+                return Ok(None);
+            };
+            self.entries = block.rows.sorted_entries()?.into_iter();
+        }
     }
 }
 
@@ -880,6 +897,121 @@ mod lazy_leaf_tests {
             before.0.blocks.get(key).unwrap(),
             candidate.rows.0.blocks.get(key).unwrap()
         ));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod weighted_comparison_tests {
+    use super::*;
+    use datafusion::arrow::array::Int64Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+    fn batch(values: Vec<i64>) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)])),
+            vec![Arc::new(Int64Array::from(values))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mixed_weighted_revisions_compare_with_an_independent_integer_map() -> Result<()> {
+        let values = (0..1024)
+            .chain(std::iter::repeat_n(7, 5000))
+            .collect::<Vec<_>>();
+        let mut model = BTreeMap::<i64, i64>::new();
+        for value in &values {
+            *model.entry(*value).or_default() += 1;
+        }
+        let mut current = RowBlocks::from_relation_batch(batch(values))?.rows;
+        let mut retained = vec![(current.clone(), model.clone())];
+        let mut seed = 8171u64;
+        for step in 0usize..240 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let old_key = *model.keys().nth(seed as usize % model.len()).unwrap();
+            let new_key = (seed >> 24) as i64 % 2048 - 128;
+            let delta = Bag::from_weighted(&batch(vec![old_key, new_key]), &[-1, 1])?;
+            let candidate = current.apply(&delta)?.rows;
+            let mut next = model.clone();
+            let remaining = next.get_mut(&old_key).unwrap();
+            *remaining -= 1;
+            if *remaining == 0 {
+                next.remove(&old_key);
+            }
+            *next.entry(new_key).or_default() += 1;
+            for (old, expected) in &retained {
+                assert_eq!(old.same_contents(&candidate)?, expected == &next);
+                assert!(old
+                    .0
+                    .blocks
+                    .values()
+                    .all(|b| b.batch.lock().unwrap().is_none()));
+            }
+            if step.is_multiple_of(7) {
+                let inserted = current
+                    .apply(&Bag::from_batch(&batch(vec![-10000 - step as i64]))?)?
+                    .rows;
+                let canceled = inserted
+                    .apply(&Bag::from_weighted(
+                        &batch(vec![-10000 - step as i64]),
+                        &[-1],
+                    )?)?
+                    .rows;
+                assert!(current.same_contents(&canceled)?);
+                assert!(canceled
+                    .0
+                    .blocks
+                    .values()
+                    .all(|b| b.batch.lock().unwrap().is_none()));
+            }
+            assert!(candidate
+                .0
+                .blocks
+                .values()
+                .all(|b| b.batch.lock().unwrap().is_none()));
+            if !step.is_multiple_of(5) {
+                current = candidate;
+                model = next;
+            }
+            if step.is_multiple_of(37) {
+                retained.push((current.clone(), model.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn equality_across_different_leaf_splits_never_expands_duplicate_weights() -> Result<()> {
+        let input = (0..256).chain(std::iter::repeat_n(7, 8192)).collect();
+        let before = RowBlocks::from_relation_batch(batch(input))?.rows;
+        let delta = Bag::from_batch(&batch(vec![-1]))?;
+        let split = before.apply(&delta)?.rows;
+        let canceled = split
+            .apply(&Bag::from_weighted(&batch(vec![-1]), &[-1])?)?
+            .rows;
+        assert_ne!(before.0.blocks.len(), canceled.0.blocks.len());
+        assert!(before.same_contents(&canceled)?);
+        assert!(before
+            .0
+            .blocks
+            .values()
+            .all(|b| b.batch.lock().unwrap().is_none()));
+        assert!(canceled
+            .0
+            .blocks
+            .values()
+            .all(|b| b.batch.lock().unwrap().is_none()));
+        assert!(canceled.0.flat.lock().unwrap().is_none());
+        let moved = before
+            .apply(&Bag::from_weighted(&batch(vec![42, 1000]), &[-1, 1])?)?
+            .rows;
+        assert!(!before.same_contents(&moved)?);
+        assert!(moved
+            .0
+            .blocks
+            .values()
+            .all(|b| b.batch.lock().unwrap().is_none()));
         Ok(())
     }
 }

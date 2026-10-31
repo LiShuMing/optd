@@ -626,3 +626,58 @@ accepted locally before implementation. It specifies weighted comparison and net
 root restoration, maintained NULL metadata, fetch-aware range cursors, optional
 SELECT/DML/store demand diagnostics, and complete regression/gate requirements.
 Implementation and R02d completion remain pending; this design is not a new PASS.
+
+
+### R02d — exact weighted comparison and canceled-root reuse
+
+First implementation increment of design commit `4001396`,
+[lazy SQL table scans](docs/src/incremental/sql_table_leaf_demand.md).
+`RowBlocks::same_contents` compares exact weighted rows without requesting Arrow
+batches. Aligned persistent directories skip shared subtrees; an inconclusive shape
+mismatch uses bounded-leaf canonical row iteration across different split boundaries.
+The fallback can visit an unchanged distinct-row prefix; comparison CPU work remains
+outside current counters. No general changed-key/logarithmic bound is claimed.
+
+`TransactionWorkspace` lazily retains the first row root per touched table. A
+consolidated net-zero delta restores that original revision, including its directory
+and complete cache, while retaining all actual statement work and preserving other
+tables' writes. This avoids a complete comparison/flatten merely to recognize a
+canceled transaction. No persisted/diagnostic format, dependency or rule change.
+
+**Verified RED/green regressions:** before the implementation, equal weighted tables
+with different splits filled expanded Arrow leaf caches, and a canceled INSERT /
+DELETE table root required a new complete flatten (miss=1 rather than 0). Both
+focused commands exited 101; logs:
+`target/roadmap-r02d-table-reuse-compare-red-20261031.log`,
+`target/roadmap-r02d-table-reuse-root-red-20261031.log`. Both now pass. New coverage
+includes 240 deterministic updates against an independent integer weighted map,
+retained/discarded roots, repeated canceled splits and a directory payload-call
+oracle proving shared paths skip payload comparisons. A dual-table SQL transaction
+cancels one table and changes the other: the original 512-row payload is reused,
+only the other table's two-row payload is written, and reopen/full SQL/output
+history remain correct. Existing retry/concurrency/failure/crash cases also pass.
+
+Using the R01a Rust 1.95.0 locked offline wrapper/target/TMPDIR,
+`bash scripts/agent-check.sh sql` exited 0: fmt, both Clippy configurations,
+**215 default tests passed / 2 ignored**, **229 Iceberg passed / 3 ignored**.
+Log: `target/roadmap-r02d-table-reuse-gates-20261031.log`. The R01a private-rustdoc
+command exited 0, log `target/roadmap-r02d-table-reuse-rustdoc-20261031.log`.
+mdBook exited 0, log `target/roadmap-r02d-table-reuse-docs-20261031.log`.
+No report-tool schema changed, so its 38 unit tests were not repeated in this
+increment; their last fresh result is the preceding graph-leaf milestone.
+
+After all feature jobs ended, explicitly rebuilt the default benchmark example and
+froze a runner in fresh `target/roadmap-r02d-table-reuse-live-20261031/`.
+TPC-H Q1 / TPC-DS Q1 each pass strict planning, three SQL DML rounds, independent
+full SQL, reopen and output-log replay. Numeric work audit passes; exact commands,
+source/diff/workspace/directory/row-block/Cargo.lock and binary/report identities are
+preserved. Runner hashes agree before/after each execution. Build/run logs:
+`target/roadmap-r02d-table-reuse-bench-build-20261031.log`,
+`target/roadmap-r02d-table-reuse-witness-20261031.log`.
+Only two small witnesses ran; full-TPC and performance/end-to-end qualification
+remain incomplete and their flags stay false.
+
+Implementation is local-only. **R02d remains in progress**. Next implement maintained
+NULL metadata, projected weighted range conversion, fetch-aware SQL table streams
+and optional selector/SELECT/store leaf-demand work as specified by the accepted
+design. SQL production tables and providers are still eager at this milestone.

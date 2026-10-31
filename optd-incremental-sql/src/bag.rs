@@ -22,7 +22,7 @@ pub(crate) const MAX_MATERIALIZED_BYTES: usize = 256 * 1024 * 1024;
 /// Bound each temporary lookup-encoding batch, independent of signed delta size.
 const MAX_KEY_ENCODING_ROWS: usize = 1024;
 
-type Entry<'a> = (&'a Vec<ScalarValue>, i64);
+pub(crate) type Entry<'a> = (&'a Vec<ScalarValue>, i64);
 
 /// A schema-bound signed multiset, retaining DataFusion scalar identity exactly.
 ///
@@ -450,7 +450,9 @@ impl Bag {
         Self::from_batch(positive)?.difference(&Self::from_batch(negative)?)
     }
 
-    fn sorted_entries(&self) -> Result<Vec<Entry<'_>>> {
+    /// Borrow canonical distinct entries without expanding multiplicities.
+    /// Leaf callers bound cardinality before allocating this ordered reference vector.
+    pub(crate) fn sorted_entries(&self) -> Result<Vec<Entry<'_>>> {
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(self.len())

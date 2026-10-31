@@ -159,3 +159,40 @@ async fn split_key_moves_duplicates_nulls_and_failed_transactions_preserve_endpo
         0
     );
 }
+
+#[tokio::test]
+async fn canceled_table_changes_and_other_table_writes_publish_one_exact_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let mut db = seeded(root.path(), 512).await;
+    db.execute_script("CREATE TABLE u(k BIGINT,v BIGINT); INSERT INTO u VALUES (0,0); CREATE MATERIALIZED VIEW mt AS SELECT SUM(v) AS s FROM t; CREATE MATERIALIZED VIEW mu AS SELECT SUM(v) AS s FROM u;").await.unwrap();
+    let before = db.store_work().unwrap();
+    db.execute_script("BEGIN; INSERT INTO t VALUES (-1,7); INSERT INTO u VALUES (99,99); DELETE FROM t WHERE k=-1;").await.unwrap();
+    let report = db.execute("COMMIT").await.unwrap().commit.unwrap();
+    assert_eq!(report.dml.len(), 3);
+    assert!(!report.maintenance.contains_key("mt"));
+    assert!(report.maintenance.contains_key("mu"));
+    let storage = db.store_work().unwrap().since(&before).unwrap();
+    assert_eq!(storage.tables.reused.rows, 512);
+    assert_eq!(storage.tables.written.rows, 2);
+    assert_eq!(storage.table_materialization.as_ref().unwrap().rows, 2);
+    let epoch = db.epoch();
+    drop(db);
+    let mut db = SqlSession::open(root.path()).await.unwrap();
+    assert_eq!(db.epoch(), epoch);
+    assert_eq!(
+        display_rows(
+            &db.execute("SELECT COUNT(*),SUM(v) FROM t")
+                .await
+                .unwrap()
+                .rows
+                .unwrap()
+        )
+        .unwrap(),
+        vec![vec!["512".to_owned(), "130816".to_owned()]]
+    );
+    assert_eq!(
+        display_rows(&db.execute("SELECT s FROM mu").await.unwrap().rows.unwrap()).unwrap(),
+        vec![vec!["99".to_owned()]]
+    );
+    db.verify_output_history().unwrap();
+}

@@ -1,6 +1,6 @@
 # Lazy SQL table scans and weighted table comparison
 
-**Status:** accepted · 2026-10-31; implementation pending
+**Status:** accepted · 2026-10-31; weighted comparison/root-reuse increment verified; provider/range stages pending
 **Scope:** Final R02d SQL table/provider stage after graph-leaf commit `d31e71a`.
 Checkpoint payload formats, native source ingestion and durable operator states
 remain R07/R08. No rule-admission, numeric-contract or dependency changes.
@@ -166,3 +166,31 @@ acceptance. An owned successor cursor and fetch-aware physical source avoid that
 boundary error. Returning optional named diagnostics protects historical absence;
 physical byte statistics must stay unknown until an actual batch exists. This is
 local source/design review, not independent implementation or performance evidence.
+
+## 9. Weighted comparison and cancellation increment
+
+Table equality now skips shared aligned directory subtrees and compares exact Bag
+payloads. Different tree/split shapes use an ordered distinct-entry iterator holding
+at most two bounded leaf reference vectors; it never fills an Arrow leaf/full cache
+or expands duplicate weights. Shape mismatch is inconclusive, not inequality. The
+exact fallback may still visit an unchanged distinct-row prefix; no universal
+logarithmic/changed-key comparison bound or comparison-CPU measurement is claimed.
+
+TransactionWorkspace retains the original row root only for tables it touches and
+restores it when consolidated signed changes become empty. This preserves table
+identity, statement snapshots and statement work while making canceled final tables
+share the committed revision. Two RED regressions established the previous eager
+comparison's cache fills and canceled candidate's unnecessary flattening miss.
+Both pass after implementation. A 240-step independent weighted-map oracle with
+retained/discarded revisions and a dual-table COMMIT/reopen/history case also pass.
+
+The local default/Iceberg gate passes 215/229 tests (2/3 ignored), formatting and
+both Clippy configurations. Private rustdoc and mdBook pass. Fresh frozen-binary
+TPC-H Q1/TPC-DS Q1 strict three-round SQL/reopen/output-log witnesses pass; exact
+commands and identities are in ROADMAP and
+`target/roadmap-r02d-table-reuse-live-20261031`. This increment adds no diagnostic
+schema, so report-tool tests were not rerun; the live numeric work audit passed.
+
+SQL tables/providers remain eager. NULL metadata, projected range conversion,
+fetch-aware streaming and scan/export diagnostic extensions above are still
+pending, as is complete R02d acceptance and the rest of the roadmap.
