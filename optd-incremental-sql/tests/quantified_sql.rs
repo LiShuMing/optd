@@ -41,19 +41,18 @@ fn assert_truth_refusal(error: &optd_incremental_sql::Error) {
 }
 
 #[tokio::test]
-async fn observed_unknown_quantified_contexts_refuse_instead_of_returning_wrong_rows() {
+async fn unqualified_correlated_truth_refuses_instead_of_returning_wrong_rows() {
     let root = tempfile::tempdir().unwrap();
     let mut db = seeded(root.path()).await;
     let epoch = db.epoch();
     let current = std::fs::read(root.path().join("CURRENT")).unwrap();
     for sql in [
-        "SELECT k FROM a WHERE k=9 OR k NOT IN (SELECT k FROM b)",
-        "SELECT k FROM a WHERE NOT (k=9 OR k IN (SELECT k FROM b))",
-        "SELECT k FROM a WHERE (k IN (SELECT k FROM b)) IS FALSE",
-        "SELECT k FROM a WHERE (k IN (SELECT k FROM b)) = FALSE",
-        "SELECT k,k IN (SELECT k FROM b) AS membership FROM a",
-        "SELECT k FROM a WHERE CASE WHEN k IN (SELECT k FROM b) THEN FALSE ELSE TRUE END",
         "SELECT k FROM a WHERE k=9 OR k NOT IN (SELECT b.k FROM b WHERE b.k>=a.k)",
+        "SELECT k FROM a WHERE NOT (k=9 OR k IN (SELECT b.k FROM b WHERE b.k>=a.k))",
+        "SELECT k FROM a WHERE (k IN (SELECT b.k FROM b WHERE b.k>=a.k)) IS FALSE",
+        "SELECT k FROM a WHERE (k IN (SELECT b.k FROM b WHERE b.k>=a.k)) = FALSE",
+        "SELECT k,k IN (SELECT b.k FROM b WHERE b.k>=a.k) AS membership FROM a",
+        "SELECT k FROM a WHERE CASE WHEN k IN (SELECT b.k FROM b WHERE b.k>=a.k) THEN FALSE ELSE TRUE END",
     ] {
         let error = db
             .execute(sql)
@@ -128,9 +127,9 @@ async fn unsafe_dml_preserves_current_sources_and_does_not_claim_the_request_id(
     let root = tempfile::tempdir().unwrap();
     let mut db = seeded(root.path()).await;
     for (round, sql) in [
-        "INSERT INTO target SELECT k FROM a WHERE k=9 OR k NOT IN (SELECT k FROM b)",
-        "DELETE FROM a WHERE k=9 OR k NOT IN (SELECT k FROM b)",
-        "UPDATE a SET k=9 WHERE k=9 OR k NOT IN (SELECT k FROM b)",
+        "INSERT INTO target SELECT k FROM a WHERE k=9 OR k NOT IN (SELECT b.k FROM b WHERE b.k>=a.k)",
+        "DELETE FROM a WHERE k=9 OR k NOT IN (SELECT b.k FROM b WHERE b.k>=a.k)",
+        "UPDATE a SET k=9 WHERE k=9 OR k NOT IN (SELECT b.k FROM b WHERE b.k>=a.k)",
     ]
     .into_iter()
     .enumerate()
@@ -173,7 +172,7 @@ async fn unsafe_dml_preserves_current_sources_and_does_not_claim_the_request_id(
 async fn preflight_and_create_refuse_observed_quantified_truth_before_publication() {
     let root = tempfile::tempdir().unwrap();
     let mut db = seeded(root.path()).await;
-    let query = "SELECT k FROM a WHERE k=9 OR k NOT IN (SELECT k FROM b)";
+    let query = "SELECT k FROM a WHERE k=9 OR k NOT IN (SELECT b.k FROM b WHERE b.k>=a.k)";
     let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Int64, true)]));
     let error = SqlView::preflight(
         query,

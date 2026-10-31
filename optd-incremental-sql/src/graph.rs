@@ -8,6 +8,7 @@ use std::collections::HashMap;
 mod grouping_sets;
 mod quantified;
 pub(crate) use grouping_sets::normalize as normalize_grouping_sets;
+pub(crate) use quantified::normalize as normalize_quantified_truth;
 pub(crate) use quantified::validate as validate_quantified_subqueries;
 
 #[derive(Clone)]

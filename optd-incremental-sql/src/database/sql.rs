@@ -140,10 +140,12 @@ fn immutable(plan: &LogicalPlan) -> Result<()> {
     Ok(())
 }
 
-/// Keep quantified truth and immutability checks before any selector collection.
-pub(super) fn validate_query(plan: &LogicalPlan) -> Result<()> {
-    crate::graph::validate_quantified_subqueries(plan)?;
-    immutable(plan)
+/// Check original volatility before lowering quantified truth for every SQL path.
+pub(super) fn prepare_query(plan: LogicalPlan) -> Result<LogicalPlan> {
+    immutable(&plan)?;
+    let plan = crate::graph::normalize_quantified_truth(plan)?;
+    crate::graph::validate_quantified_subqueries(&plan)?;
+    Ok(plan)
 }
 
 pub(super) async fn plan_query(ctx: &SessionContext, query: &str) -> Result<LogicalPlan> {
@@ -152,8 +154,7 @@ pub(super) async fn plan_query(ctx: &SessionContext, query: &str) -> Result<Logi
         return Err(invalid("expected a read-only query"));
     }
     let plan = ctx.state().create_logical_plan(query).await?;
-    validate_query(&plan)?;
-    Ok(plan)
+    prepare_query(plan)
 }
 
 pub(super) async fn collect(ctx: &SessionContext, plan: LogicalPlan) -> Result<RecordBatch> {

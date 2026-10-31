@@ -235,3 +235,22 @@ R04b remains in_progress. The section-9 guard still rejects observable quantifie
 UNKNOWN; Boolean mark qualification does not supply missing truth information or
 prove global/correlated NULL dependencies. The next design must preserve that
 provenance before decorrelation and represent its global/partition impact in R06.
+
+## 12. Observable uncorrelated truth relation rollout
+
+The typed normalizer specified in `quantified_truth_normalization.md` now lowers
+qualified uncorrelated observed IN/NOT IN in Projection/Filter into ordinary
+member/count/flag relations and CASE before this document's admission guard.
+This supersedes blanket refusal for that exact fragment in the earlier historical
+sections. The guard remains mandatory for unqualified contexts; Boolean mark
+kernels retain their two-valued contract and qualified positive-filter path.
+Original volatility checking precedes normalization in both compiler and SQL
+binding, including direct INSERT SELECT input preparation.
+
+Independent tests cover SQL UNKNOWN truth, empty comparison inputs, duplicate
+counts, global first/last NULL transitions and signed two-source prefixes. SQL
+writes/retries/reopen/history, schema metadata/nullability and candidate failure
+are qualified. Default/Iceberg suites pass 311/325 tests (2/3 ignored); an initial
+test-only Clippy error and its passing follow-up are retained in ROADMAP.md.
+These are uncorrelated semantic/scope witnesses, not correlated/global dependency
+contract completion or fresh full-TPC/performance certification. R04b/R06 stay open.

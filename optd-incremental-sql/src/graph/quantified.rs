@@ -8,6 +8,9 @@ use crate::Result;
 
 const MAX_EXPRESSION_NODES: usize = 65_536;
 
+mod truth_relations;
+pub(crate) use truth_relations::normalize;
+
 /// Only the conjunctive spine retains the existing NULL-aware anti-join path.
 #[derive(Clone, Copy)]
 enum FilterContext {

@@ -194,8 +194,7 @@ impl<'a> DmlCompiler<'a> {
         let LogicalPlan::Dml(dml) = plan else {
             return Err(invalid("expected a typed INSERT plan"));
         };
-        let input = dml.input.as_ref().clone();
-        sql::validate_query(&input)?;
+        let input = sql::prepare_query(dml.input.as_ref().clone())?;
         sql::reject_mv_reads(snapshot, &input, mode)?;
         let selected = self.selector.collect(input.clone()).await?;
         let new = sql::typed(&selected.batch, original.rows.schema())?;

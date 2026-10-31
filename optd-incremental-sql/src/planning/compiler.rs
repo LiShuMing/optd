@@ -63,7 +63,6 @@ pub(crate) async fn compile(
     optimizer: &IncrementalOptimizer,
 ) -> Result<Compilation> {
     let analyzed = ctx.state().create_logical_plan(sql).await?;
-    graph::validate_quantified_subqueries(&analyzed)?;
     // Check before optimization can fold a stable function into a literal.
     analyzed.apply_with_subqueries(|plan| {
         for expression in plan.expressions() {
@@ -80,6 +79,8 @@ pub(crate) async fn compile(
         }
         Ok(TreeNodeRecursion::Continue)
     })?;
+    let analyzed = graph::normalize_quantified_truth(analyzed)?;
+    graph::validate_quantified_subqueries(&analyzed)?;
     let logical = graph::normalize_grouping_sets(graph::normalize_distinct(
         ctx.state().optimize(&analyzed)?,
     )?)?;

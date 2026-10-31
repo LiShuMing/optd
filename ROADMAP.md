@@ -1546,3 +1546,61 @@ R04b Boolean slice is committed locally as `af81593`. Next claimed prerequisite:
 a reviewed typed transformer before decorrelation. Start observed uncorrelated
 truth, then correlated partition/global dependency contracts; R04b and R06 remain
 open until their full acceptance. No task scope or success criterion is reduced.
+
+### R04b — uncorrelated observable three-valued truth relations
+
+Design `quantified_truth_normalization.md` committed before implementation as
+`0297904`; nonnullable proof and reviewed correlated follow-on are `94b9fd8`.
+The internal `quantified.truth_relations@1` normalization runs before Boolean
+provenance is erased. It emits typed distinct-member aggregates, exact COUNT
+flags, equijoins and nullable CASE. Existing Optd rules exclusively own state and
+delta execution. Both-nonnullable comparison operands omit the global flags
+branch by proof. Original SQL immutability is checked before transformation;
+SELECT, CREATE/preflight, UPDATE/DELETE selectors and INSERT SELECT share entry.
+Input/expansion/name bounds and exact output width/type/nullability/qualifier/
+metadata restoration fail before publication. No dependency, toolchain or format
+changes. Unsupported correlation/type/scope still refuses explicitly.
+
+RED `target/roadmap-r04b-truth-relations-red-20261031.log` exits 101: projected IN
+and negative disjunction encounter the old guard. GREEN new independent tests
+cover six observed contexts over **192 signed two-source epochs**, including
+first/last NULL and empty transitions, duplicate count cancellation, every delta
+prefix, discarded/stale candidates and failed expression isolation. Eight SQL
+write rounds maintain six views with independent truth bags, atomic transactions,
+identified retry, per-round reopen and output-history checks. INSERT SELECT and
+DML selector truth, nested Boolean membership, alias collisions, exact nullable/
+nonnullable metadata schemas, immutable-function and expansion refusals pass.
+Former uncorrelated refusal assertions are replaced with exact independent truth
+checks; correlated non-equality refusal/publication/request protections remain.
+
+At 8/512 untouched keys duplicate value/NULL count changes emit no joined delta
+and visit no match peers. Removing/adding the final/first NULL changes exactly
+`2*(untouched-1)` weighted full rows, including unchanged comparison keys; this is
+an intentionally global dependency, not evidence of comparison-key locality.
+Strict plans contain no OperatorRecompute; concrete global joins do not complete
+R06's reusable dependency descriptors or end-to-end delta-work qualification.
+
+**Observed gates:** R01a Rust-1.95 wrapper with
+`CARGO_TARGET_DIR=/home/admin/xwork/optd/target/roadmap-20261031` and its `tmp/`:
+`bash scripts/agent-check.sh sql` runs all tests: **311 default / 325 Iceberg pass,
+2/3 existing ignored**, both test commands exit 0. The initial wrapper exits 1
+only for default Clippy `needless_range_loop` in the new test, retained in
+`target/roadmap-r04b-truth-relations-gates-20261031.log`. Replacing indexing with
+checked `get` preserves the sequence; default all-target Clippy `-D warnings`
+then exits 0 (`...-lint-followup-20261031.log`). Iceberg all-target Clippy exits 0
+in the original wrapper. Both test binaries were compiled after the correction;
+no failed/skipped test is promoted to success. Private Iceberg rustdoc with
+warnings denied exits 0 (`...-rustdoc-20261031.log`). Final format, mdBook and
+report-tool results are recorded below before committing this slice.
+
+R04b remains **in_progress**, R06 pending: correlated partition truth, reusable
+impact descriptors and Q35 floating AVG qualification remain. No new full-TPC,
+standard-scale, source-ingestion or controlled performance acceptance is claimed.
+Ledger stays **13/31 verified, 1 in_progress, 17 pending**. Local only, no push.
+Owner requested another hour at 2026-10-31 10:55:07 UTC; stop iteration by
+11:55:07 UTC and report the final state without reducing outstanding scope.
+
+Uncorrelated slice final format and `git diff --check` exit 0; mdBook exits 0
+(`target/roadmap-r04b-truth-relations-docs-20261031.log`). `agent-check.sh sql-tools`
+exits 0 with pinned source/schema identities and **46 report-tool tests**
+(`...-tools-20261031.log`). All owned verification sessions are terminal.
