@@ -1135,3 +1135,9 @@ Local repair commit is titled `Reject unsound key scopes for NULL-aware anti joi
 no push. **R04a remains in_progress:** its new match-count algorithm and residual
 maintenance are still pending. R06 must separately maintain the global NULL/empty
 transitions rather than silently broaden ordinary equality keys.
+
+
+R04a next physical slice follows match_count_joins.md §10: opt-in pure-equijoin
+match-count rule and explicit MaintainMatchJoin over existing indexed bucket
+cardinalities, before residual support/default rollout. No algorithm code is yet
+implemented at this checkpoint; R04a remains in_progress.

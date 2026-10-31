@@ -170,3 +170,22 @@ and mdBook. Logs use `target/roadmap-r04a-null-aware-*20261031.log`.
 No new match-count algorithm, full TPC or controlled performance is claimed.
 R04a remains in progress and globally incremental NULL-aware anti joins remain
 explicit R06 work. This boundary must also guard the future match-count rule.
+
+
+## 10. Initial physical rollout: pure equijoin match counts
+
+Implement the first physical slice as an opt-in registered transformer through
+IncrementalOptimizer::with_match_count_joins(). Pure equijoins (including null-safe
+keys) use the existing indexed bucket row cardinalities as their match counts;
+no extra engine state-slot vector or persisted state is needed. The selected
+frontend compiles to an explicit MaintainMatchJoin operation between one shared
+PrepareIndex and CompleteIndex, using StateSpec::Keyed. Retain consolidated
+per-key changes in its candidate; never reconstruct the delta by diffing full
+untouched buckets. Record actual emitted pair/membership and peer-row work.
+
+The first slice admits no residual filter and no null_aware flag. Those queries
+retain their existing qualified scoped algorithms (or explicit global refusal).
+This API registers a concrete physical alternative, not a semantic opt-out. Keep
+it opt-in until residual support and the complete R04a acceptance matrix qualify
+default selection; no default coverage/performance claim follows from this slice.
+Add its RED plan test before implementation. R04a stays in_progress throughout.
