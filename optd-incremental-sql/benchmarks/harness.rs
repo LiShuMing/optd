@@ -347,7 +347,7 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
             verify_delta(&previous, &expected.rows, &delta).map_err(|error| format!("compare_delta_{stage}: {error}"))?;
             view.acknowledge(candidate)?;
             equal(&view.contents()?, &expected.rows).map_err(|error| format!("compare_result_{stage}: {error}"))?;
-            Ok((expected.rows.clone(), json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),"oracle_schema":expected.schema,"signed_delta_rows":delta.num_rows(),"stats":strategy,"sql_stats":sql_stats})))
+            Ok((expected.rows.clone(), json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),"oracle_schema":expected.schema,"signed_delta_rows":delta.num_rows(),"stats":strategy,"sql_stats":sql_stats,"storage_work":null,"recovery_work":null,"source_work":null,"affected_scope_qualified":null,"performance_qualified":false})))
         }
         .await;
         match result {

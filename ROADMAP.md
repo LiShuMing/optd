@@ -32,7 +32,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R01a | P0 | Refresh work accounting: state-directory copies, relation rebuilds and materialization | Actual operation-boundary counters distinguish rows, entries and Arrow bytes; fixed-delta tests expose current scale costs; explicit scope exclusions | verified |
 | R01b | P0 | SQL selector and DML work accounting | Measure consumed source batches/rows separately from available relation rows; report target rebuild and delta generation | verified |
 | R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | verified |
-| R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | pending |
+| R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | verified |
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | pending |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | pending |
@@ -242,8 +242,78 @@ Read volumes describe decoded file lengths; hash passes are separately counted.
 Current whole-payload writes and history scans remain visible costs. Local commit
 only; no publication is included.
 
+### R01d — unified work reporting
+
+Design: [unified SQL and benchmark reports](docs/src/incremental/unified_work_reports.md).
+The SQL CLI separates current execution diagnostics from original retry receipts,
+command-local storage from successful open recovery, and unavailable SELECT/CREATE
+bootstrap internals from measured zero. SQL benchmark rounds capture transaction
+storage, pre-reopen verification, recovery and post-reopen verification separately.
+Typed/Iceberg benchmark rounds retain explicit unknown storage/recovery fields.
+Checked `StoreWork::since` produces same-session intervals and rejects underflow.
+
+The work audit accepts typed refresh stats and SQL commit maintenance, includes
+source/cache rebuild/materialization, state copies, selector/target work, storage
+and recovery. Preserve per-domain measured/unknown round counts and observed partial
+sums. Original replay receipts are never summed as fresh execution. Plan blockers,
+semantic status and scope/performance qualification remain independent; a missing
+plan does not discard otherwise measured work. Reject negative, boolean and
+noninteger measurements, contradictory blockers and incomplete round lists.
+
+**Verified regression:** initial work-audit tests against the old implementation
+exited 1 (10 executed, 1 failure, 3 errors; includes duplicated inherited checks
+subsequently removed), log `target/roadmap-r01d-red-python-20261031.log`.
+The final complete Python tool suite exited 0 (38 tests), log
+`target/roadmap-r01d-tools-20261031.log`:
+`python3 -m unittest discover -s optd-incremental-sql/benchmarks/tools -p 'test_*.py'`.
+Rust focused CLI and benchmark tests exited 0 (7 passed, 1 full-matrix test ignored),
+log `target/roadmap-r01d-green-rust-20261031.log`. They check real CLI request/retry,
+reopen/history attribution and an independent wide SQL three-mutation script.
+A unit test checks every serialized StoreWork counter, zero intervals and underflow.
+
+**Verified gates:** R01a environment/wrapper and project target/TMPDIR with
+`bash scripts/agent-check.sh sql` exited 0: formatting, both Clippy configurations,
+183 default tests (2 ignored), 197 Iceberg tests (3 ignored). Log
+`target/roadmap-r01d-gates-20261031.log`. Private rustdoc with warnings denied and
+mdBook also exited 0; logs `target/roadmap-r01d-rustdoc-20261031.log` and
+`target/roadmap-r01d-docs-20261031.log`. Existing ignored cases remain unexecuted.
+
+**Verified actual reports:** built `--example benchmark_sql_database` with the
+R01a locked/offline environment (exit 0), log
+`target/roadmap-r01d-benchmark-build-20261031.log`. Binary SHA-256:
+`6dd9878634ad1d78ea6e13ed6c085a76cfd1f4bc5514c8210b8c552fb851ea5d`.
+It was built from working-tree R01d changes over `51cfb0f`, not an unchanged older
+committed binary. Execute each with `OPTD_SQL_BENCH_QUERY_MODE=relational_core`,
+`OPTD_SQL_BENCH_QUERY_TIMEOUT_SECS=180`, a distinct fresh
+`OPTD_SQL_BENCH_DATABASE_ROOT=target/roadmap-r01d-live-20261031/<suite>-q1`, and
+`timeout --signal=TERM --kill-after=5s 240s target/roadmap-20261031/debug/examples/benchmark_sql_database <manifest> <report> 1`:
+
+* TPC-H manifest `optd-incremental-sql/benchmarks/tpch/manifest.json`, report
+  `target/roadmap-r01d-live-20261031/tpch-q1.json`, SHA-256
+  `a72736b3150931717730000f61dd243c38bf5a2eea6cefd1cea6a2558360c4d7`.
+* TPC-DS witness manifest `/tmp/optd-efficiency-tpcds-core-20261030/q01/fixture/manifest.json`,
+  report `target/roadmap-r01d-live-20261031/tpcds-q1.json`, SHA-256
+  `64c13b98bfad8a9b9f751af745ff9b2832f95b2655d8736c10b9ad9c3411c118`.
+
+Both processes exited 0, strict plans passed, all three INSERT/DELETE/UPDATE rounds
+compared independent base-table/MV endpoints, replayed output history and reopened
+successfully. Actual report audit via `summarize_incremental_work.py` exited 0;
+exact argument array (including generated aggregate SHA-256 identities) is
+`target/roadmap-r01d-live-20261031/audit-command.json`, output `unified-work.json`,
+log `audit.log` in the same directory. `work-audit.json` records binary/report identities.
+The three-round TPC-H case records 18013 transaction table rows written, 12009
+selector source rows and 18013 reconstruction dependency rows; corresponding
+TPC-DS witness counts are 10, 8 and 10. These count distinct operation boundaries,
+not one additive IO or complexity total.
+
+Only these two current-binary queries were rerun, with different fixture scales.
+`relational_core` remains distinct from original SQL, unavailable source acquisition
+remains unknown, and `performance_qualified=false`/scope unknown are preserved.
+No full TPC matrix, allocator/device-IO measurement or controlled performance claim.
+Implementation is local-only.
+
 ### Next increment
 
-R01d: expose separate command/transaction, verification and recovery work in SQL
-and benchmark outputs, extending the structured work audit without manufacturing
-zeros for unavailable legacy measurements or reexecuting work to obtain counters.
+R02b: review the immutable transaction-table block design, implement bounded
+changed-leaf updates and snapshot binding, and prove statement work separately
+from remaining directory copying and full checkpoint materialization.

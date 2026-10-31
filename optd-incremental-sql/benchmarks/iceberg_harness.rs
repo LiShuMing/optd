@@ -429,7 +429,8 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         rounds.push(json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),
             "oracle_schema":expected.schema,"signed_delta_rows":checkpoint.snapshot.delta.num_rows(),
             "stats":format!("{sql_stats:?}"),"sql_stats":sql_stats,"source_work":work_json(&source_work),"committed_epoch":epoch,
-            "source_vector":target,"source_vector_sha256":checkpoint.vector.digest()?,"strict_reopen_verified":true}));
+            "source_vector":target,"source_vector_sha256":checkpoint.vector.digest()?,"strict_reopen_verified":true,
+            "storage_work":null,"recovery_work":null,"affected_scope_qualified":null,"performance_qualified":false}));
         previous = expected.rows;
     }
     drop(view);

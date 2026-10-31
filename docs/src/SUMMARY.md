@@ -52,6 +52,7 @@
   - [Work Accounting and Source Consolidation](./incremental/work_accounting.md)
   - [SQL DML Work Accounting](./incremental/dml_work_accounting.md)
   - [Database storage and recovery work](incremental/store_work_accounting.md)
+  - [Unified SQL and benchmark work reports](incremental/unified_work_reports.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)

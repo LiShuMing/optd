@@ -13,11 +13,106 @@ import json
 from pathlib import Path
 
 
+def numeric_leaves(value, prefix, work):
+    """Sum measured numeric boundaries without inventing values for absent fields."""
+    if not isinstance(value, dict):
+        raise ValueError("structured work must contain nonnegative integers")
+    for field, count in value.items():
+        name = f"{prefix}.{field}"
+        if isinstance(count, dict):
+            numeric_leaves(count, name, work)
+        elif type(count) is int and count >= 0:
+            work[name] += count
+        else:
+            raise ValueError("work counters must be nonnegative integers")
+
+
+def node_work(node, work):
+    for prefix in ["accumulator_work", "group_work", "keyed_work"]:
+        values = node.get(prefix)
+        if values is None:
+            continue
+        if not isinstance(values, dict):
+            raise ValueError("structured node work must contain nonnegative integers")
+        scalar = {k: v for k, v in values.items() if k != "scope" and not isinstance(v, list)}
+        numeric_leaves(scalar, prefix, work)
+        for field, values_ in values.items():
+            if not isinstance(values_, list):
+                continue
+            for count in values_:
+                if type(count) is not int or count < 0:
+                    raise ValueError("work counters must be nonnegative integers")
+            work[f"{prefix}.{field}"] += sum(values_)
+        if prefix == "keyed_work":
+            work["keyed_work.snapshot_input_rows"] += sum(values["snapshot_input_rows_before"]) + sum(values["snapshot_input_rows_after"])
+
+
+def round_work(round_, work, domains, require_sql_work=True):
+    """Database verification/reopen work has separate attribution from writes."""
+    def domain(name, known):
+        domains[name]["measured_rounds" if known else "unknown_rounds"] += 1
+
+    replayed = round_.get("replayed", False)
+    if type(replayed) is not bool:
+        raise ValueError("replayed must be a boolean")
+    report = round_.get("commit")
+    if replayed:
+        stats = []  # The receipt's original work is not current execution.
+    elif "sql_stats" in round_:
+        stats = [round_["sql_stats"]]
+    elif "commit" in round_:
+        if report is not None and (not isinstance(report, dict) or not isinstance(report.get("maintenance"), dict) or not isinstance(report.get("dml"), list)):
+            raise ValueError("qualified report lacks structured actual SQL work")
+        stats = list(report["maintenance"].values()) if report is not None else []
+    elif require_sql_work:
+        raise ValueError("qualified report lacks structured actual SQL work")
+    else:
+        stats = None
+    for stat in stats or []:
+        if not isinstance(stat, dict) or not isinstance(stat.get("nodes"), list):
+            raise ValueError("qualified report lacks structured actual SQL work")
+        for node in stat["nodes"]:
+            node_work(node, work)
+        if stat.get("work") is not None:
+            numeric_leaves(stat["work"], "refresh_work", work)
+    domain("operators", stats is not None)
+    domain("refresh_orchestration", stats is not None and all(stat.get("work") is not None for stat in stats))
+
+    dml_known = "commit" in round_
+    if dml_known and not replayed and report is not None:
+        for statement in report["dml"]:
+            logical = {k: statement[k] for k in ["affected_rows", "source_relation_rows", "net_changed_rows"] if k in statement}
+            numeric_leaves(logical, "dml.logical", work)
+            if statement.get("execution") is None:
+                dml_known = False
+            else:
+                numeric_leaves(statement["execution"], "dml.execution", work)
+    domain("dml", dml_known)
+    for name, field in [
+        ("source_acquisition", "source_work"),
+        ("storage", "storage_work"),
+        ("verification_before_reopen", "verification_store_work_before_reopen"),
+        ("recovery", "recovery_work"),
+        ("verification_after_reopen", "verification_store_work_after_reopen"),
+    ]:
+        value = round_.get(field)
+        domain(name, value is not None)
+        if value is not None:
+            numeric_leaves(value, field, work)
+
+
+def empty_domains():
+    return {name: {"measured_rounds": 0, "unknown_rounds": 0} for name in [
+        "operators", "refresh_orchestration", "dml", "source_acquisition", "storage",
+        "verification_before_reopen", "recovery", "verification_after_reopen"]}
+
+
 def audit(aggregate):
     queries = []
     strategies = Counter()
     blocker_rules = Counter()
     totals = Counter()
+    total_domains = empty_domains()
     for query in aggregate["queries"]:
         selected = query.get("selected_complete_profile")
         if not query.get("with_pass") or not selected:
@@ -31,47 +126,33 @@ def audit(aggregate):
         if verification["status"] != "pass" or verification.get("completed_rounds") != 3:
             raise ValueError("selected semantic witness is not a complete passing profile")
         qualification = verification.get("plan_qualification")
-        if qualification is None:
-            queries.append({"query_id": query["query_id"], "semantic_pass": True,
-                            "strict_plan_eligible": None, "complete_recompute_blockers": None})
-            continue
-        planned = qualification["planned_nodes"]
+        planned = qualification["planned_nodes"] if qualification is not None else []
         actual_blockers = {n["id"] for n in planned if n["strategy"] == "OperatorRecompute"}
-        blockers = qualification["complete_recompute_blockers"]
-        if (len({b["id"] for b in blockers}) != len(blockers) or
-                {b["id"] for b in blockers} != actual_blockers or
-                qualification["strict_plan_eligible"] != (not actual_blockers)):
-            raise ValueError("planned blockers and strict eligibility contradict each other")
-        strategies.update({node["strategy"] for node in planned})
-        blocker_rules.update({node["rule"]["name"] for node in blockers})
+        blockers = qualification["complete_recompute_blockers"] if qualification is not None else None
+        if qualification is not None:
+            if (len({n["id"] for n in planned}) != len(planned) or
+                    len({b["id"] for b in blockers}) != len(blockers) or
+                    {b["id"] for b in blockers} != actual_blockers or
+                    type(qualification["strict_plan_eligible"]) is not bool or
+                    qualification["strict_plan_eligible"] != (not actual_blockers)):
+                raise ValueError("planned blockers and strict eligibility contradict each other")
+            strategies.update({node["strategy"] for node in planned})
+            blocker_rules.update({node["rule"]["name"] for node in blockers})
+        if len(verification["rounds"]) != 3:
+            raise ValueError("a complete witness requires three rounds")
         work = Counter()
+        domains = empty_domains()
         for round_ in verification["rounds"]:
-            if "sql_stats" not in round_:
-                raise ValueError("qualified report lacks structured actual SQL work")
-            for node in round_["sql_stats"]["nodes"]:
-                for prefix, fields in [
-                    ("accumulator_work", ["delta_input_rows", "historical_input_rows"]),
-                    ("group_work", ["aggregate_input_rows", "touched_groups"]),
-                    ("keyed_work", ["touched_keys", "full_input_scans", "cached_before_output_rows"]),
-                ]:
-                    values = node.get(prefix)
-                    if values:
-                        for field in fields:
-                            count = values[field]
-                            if type(count) is not int or count < 0:
-                                raise ValueError("work counters must be nonnegative integers")
-                            work[f"{prefix}.{field}"] += count
-                keyed = node.get("keyed_work")
-                if keyed:
-                    work["keyed_work.snapshot_input_rows"] += sum(keyed["snapshot_input_rows_before"]) + sum(keyed["snapshot_input_rows_after"])
-            for field, count in round_.get("source_work", {}).items():
-                work[f"source_work.{field}"] += count
+            round_work(round_, work, domains, require_sql_work=qualification is not None)
+        for name, counts in domains.items():
+            for field, count in counts.items():
+                total_domains[name][field] += count
         totals.update(work)
         queries.append({"query_id": query["query_id"], "semantic_pass": True,
-                        "strict_plan_eligible": not actual_blockers,
+                        "strict_plan_eligible": not actual_blockers if qualification is not None else None,
                         "complete_recompute_blockers": blockers,
                         "strategies": sorted({n["strategy"] for n in planned}),
-                        "observed_work": dict(work)})
+                        "observed_work": dict(work), "work_domains": domains})
     return {"suite": aggregate["suite"], "query_mode": aggregate.get("query_mode", "original"),
             "source_backend": aggregate["source_backend"], "queries": queries,
             "counts": {"total": len(queries),
@@ -80,9 +161,9 @@ def audit(aggregate):
                        "complete_recompute": sum(q["strict_plan_eligible"] is False for q in queries),
                        "plan_qualification_unknown": sum(q["strict_plan_eligible"] is None for q in queries)},
             "queries_with_strategy": dict(strategies), "queries_with_blocking_rule": dict(blocker_rules),
-            "observed_work": dict(totals), "performance_qualified": False,
+            "observed_work": dict(totals), "work_domains": total_domains, "performance_qualified": False,
             "end_to_end_delta_work_qualified": False,
-            "counter_scope": "actual_operator_local_work_plus_separate_source_acquisition; full cache copies/materialization/checkpoint costs excluded"}
+            "counter_scope": "observed_partial_sums_by_operation_boundary; source_acquisition, refresh_work, DML, transaction_storage, verification_and_recovery_separate; missing_domains_unknown; allocator_and_physical_device_IO_unmeasured"}
 
 
 def main():

@@ -272,16 +272,30 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         let body = statements.join(";\n");
         script.push_str(&format!("BEGIN;\n{body};\nCOMMIT;\n"));
         fs::write(root.join("input.sql"), &script)?;
+        let storage_before = db.store_work()?;
         let report = execute_batch(&mut db, &statements)
             .await
             .map_err(|e| format!("{stage}: {e}"))?;
+        let storage_after = db.store_work()?;
+        let storage_work = storage_after.since(&storage_before)?;
         let expected = verify(&mut db, sql, &current).await?;
+        let verification_before = db.store_work()?.since(&storage_after)?;
         nonempty |= expected.num_rows() > 0;
         output_changed |= bag(&previous)? != bag(&expected)?;
         drop(db);
         db = SqlSession::open(root.join("warehouse")).await?;
+        let recovery_work = db.recovery_work().clone();
+        let reopened = db.store_work()?;
         verify(&mut db, sql, &current).await?;
-        rounds.push(json!({"stage":stage,"status":"pass","output_rows":expected.num_rows(),"commit":report,"reopen_verified":true,"base_tables_verified":true,"output_history_verified":true}));
+        let verification_after = db.store_work()?.since(&reopened)?;
+        rounds.push(
+            json!({"stage":stage,"status":"pass","output_rows":expected.num_rows(),"commit":report,
+            "storage_work":storage_work,"recovery_work":recovery_work,
+            "verification_store_work_before_reopen":verification_before,
+            "verification_store_work_after_reopen":verification_after,
+            "source_work":null,"affected_scope_qualified":null,"performance_qualified":false,
+            "reopen_verified":true,"base_tables_verified":true,"output_history_verified":true}),
+        );
         previous = expected;
     }
     Ok(
@@ -356,6 +370,30 @@ mod tests {
         .await?;
         assert_eq!(result["status"], "pass");
         assert_eq!(result["completed_rounds"], 3);
+        for round in result["rounds"].as_array().ok_or("rounds")? {
+            assert_eq!(round["storage_work"]["manifest_writes"]["files"], 1);
+            assert_eq!(round["storage_work"]["tables"]["read"]["files"], 0);
+            assert_eq!(round["recovery_work"]["rebuilt_views"], 1);
+            assert!(
+                round["verification_store_work_before_reopen"]["manifest_reads"]["files"]
+                    .as_u64()
+                    .ok_or("manifest read count")?
+                    > 0
+            );
+            assert!(
+                round["verification_store_work_after_reopen"]["tables"]["read"]["files"]
+                    .as_u64()
+                    .ok_or("table read count")?
+                    > 0
+            );
+            assert_eq!(round["source_work"], Value::Null);
+            assert_eq!(round["performance_qualified"], false);
+            assert!(round["commit"]["dml"]
+                .as_array()
+                .ok_or("DML work")?
+                .iter()
+                .all(|w| w["execution"].is_object()));
+        }
         // Initial data is published once, independently of INSERT chunking.
         assert_eq!(result["bootstrap_epoch"], 3);
         let script = fs::read_to_string(result["sql_script"].as_str().ok_or("script path")?)?;

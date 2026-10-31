@@ -19,6 +19,13 @@ pub struct FileWork {
 }
 
 impl FileWork {
+    fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            files: subtract(self.files, before.files)?,
+            bytes: subtract(self.bytes, before.bytes)?,
+        })
+    }
+
     fn record(&mut self, bytes: u64) -> Result<()> {
         add(&mut self.files, 1)?;
         add(&mut self.bytes, bytes)
@@ -37,6 +44,14 @@ pub struct PayloadWork {
 }
 
 impl PayloadWork {
+    fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            files: subtract(self.files, before.files)?,
+            bytes: subtract(self.bytes, before.bytes)?,
+            rows: subtract(self.rows, before.rows)?,
+        })
+    }
+
     fn record(&mut self, bytes: u64, rows: usize) -> Result<()> {
         add(&mut self.files, 1)?;
         add(&mut self.bytes, bytes)?;
@@ -56,6 +71,16 @@ pub struct PayloadIoWork {
     pub written: PayloadWork,
     /// Existing payload descriptors retained without reading or writing the file.
     pub reused: PayloadWork,
+}
+
+impl PayloadIoWork {
+    fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            read: self.read.since(&before.read)?,
+            written: self.written.since(&before.written)?,
+            reused: self.reused.since(&before.reused)?,
+        })
+    }
 }
 
 /// Cumulative, host-local SQL database work since this session began opening.
@@ -87,6 +112,27 @@ pub struct StoreWork {
     pub history_traversals: u64,
     /// Validated manifest visits inside those traversals.
     pub manifests_visited: u64,
+}
+
+impl StoreWork {
+    /// Completed operations between two snapshots from the same session.
+    ///
+    /// The caller must supply an earlier snapshot from this session; counters
+    /// contain no session identity. Reject decreasing counters instead of wrapping.
+    pub fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            pointer_reads: self.pointer_reads.since(&before.pointer_reads)?,
+            pointer_writes: self.pointer_writes.since(&before.pointer_writes)?,
+            manifest_reads: self.manifest_reads.since(&before.manifest_reads)?,
+            manifest_writes: self.manifest_writes.since(&before.manifest_writes)?,
+            checksum_reads: self.checksum_reads.since(&before.checksum_reads)?,
+            tables: self.tables.since(&before.tables)?,
+            view_outputs: self.view_outputs.since(&before.view_outputs)?,
+            output_deltas: self.output_deltas.since(&before.output_deltas)?,
+            history_traversals: subtract(self.history_traversals, before.history_traversals)?,
+            manifests_visited: subtract(self.manifests_visited, before.manifests_visited)?,
+        })
+    }
 }
 
 /// Successful SQL open work, immutable for the lifetime of the session.
@@ -227,6 +273,12 @@ impl StoreWorkCounter {
     }
 }
 
+fn subtract(after: u64, before: u64) -> Result<u64> {
+    after.checked_sub(before).ok_or_else(|| {
+        invalid("store work counters decreased; snapshots must come from the same session in order")
+    })
+}
+
 fn add(counter: &mut u64, amount: u64) -> Result<()> {
     *counter = counter.checked_add(amount).ok_or(Error::Overflow)?;
     Ok(())
@@ -251,5 +303,39 @@ mod tests {
             Err(Error::Overflow)
         ));
         assert_eq!(counter.snapshot().unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn uniform(value: &mut Value, count: u64) {
+        match value {
+            Value::Object(fields) => {
+                for value in fields.values_mut() {
+                    uniform(value, count);
+                }
+            }
+            Value::Number(_) => *value = Value::from(count),
+            _ => panic!("work fields must be numeric objects"),
+        }
+    }
+
+    #[test]
+    fn intervals_cover_every_serialized_counter_and_reject_reverse_order() {
+        let mut value = serde_json::to_value(StoreWork::default()).unwrap();
+        uniform(&mut value, 3);
+        let after: StoreWork = serde_json::from_value(value.clone()).unwrap();
+        uniform(&mut value, 1);
+        let before: StoreWork = serde_json::from_value(value.clone()).unwrap();
+        uniform(&mut value, 2);
+        assert_eq!(
+            serde_json::to_value(after.since(&before).unwrap()).unwrap(),
+            value
+        );
+        assert!(before.since(&after).is_err());
+        assert_eq!(after.since(&after).unwrap(), StoreWork::default());
     }
 }
