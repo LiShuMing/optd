@@ -331,6 +331,9 @@ fn match_join_frontend_admits_residuals_but_refuses_inner_and_null_aware_operato
     };
     for (kind, residual, null_aware, eligible) in [
         (JoinType::Full, None, false, true),
+        (JoinType::LeftMark, None, false, true),
+        (JoinType::RightMark, Some(lit(true)), false, true),
+        (JoinType::LeftMark, None, true, false),
         (JoinType::Inner, None, false, false),
         (JoinType::Left, Some(lit(true)), false, true),
         (JoinType::LeftAnti, None, true, false),

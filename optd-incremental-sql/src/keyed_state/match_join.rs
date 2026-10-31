@@ -26,6 +26,8 @@ enum Membership {
     None,
     Matched,
     Unmatched,
+    // Preserved row always exists; its nonnullable flag follows match positivity.
+    Mark,
 }
 impl Membership {
     fn visible(self, matched: bool) -> bool {
@@ -33,6 +35,7 @@ impl Membership {
             Self::None => false,
             Self::Matched => matched,
             Self::Unmatched => !matched,
+            Self::Mark => true,
         }
     }
 }
@@ -57,6 +60,7 @@ impl Output {
     }
     fn membership(&self, side: usize) -> Membership {
         match (self.kind, side) {
+            (JoinType::LeftMark, 0) | (JoinType::RightMark, 1) => Membership::Mark,
             (JoinType::LeftSemi, 0) | (JoinType::RightSemi, 1) => Membership::Matched,
             (JoinType::Left | JoinType::LeftAnti | JoinType::Full, 0)
             | (JoinType::Right | JoinType::RightAnti | JoinType::Full, 1) => Membership::Unmatched,
@@ -92,8 +96,12 @@ impl Output {
         }
         Ok(())
     }
-    fn own(&mut self, side: usize, row: &[ScalarValue], weight: i64) -> Result<()> {
-        let output = if !self.outer() {
+    fn own(&mut self, side: usize, row: &[ScalarValue], weight: i64, matched: bool) -> Result<()> {
+        let output = if matches!(self.membership(side), Membership::Mark) {
+            let mut output = row.to_vec();
+            output.push(ScalarValue::Boolean(Some(matched)));
+            output
+        } else if !self.outer() {
             row.to_vec()
         } else if side == 0 {
             [row, &self.nulls[1]].concat()
@@ -101,6 +109,36 @@ impl Output {
             [&self.nulls[0], row].concat()
         };
         self.emit(output, weight)
+    }
+
+    /// Replace a preserved mark flag, or adjust semi/anti/outer membership.
+    /// The peer multiplicity is independent of how many changed rows matched it.
+    fn crossing(
+        &mut self,
+        side: usize,
+        row: &[ScalarValue],
+        count: i64,
+        before: bool,
+        after: bool,
+    ) -> Result<()> {
+        let membership = self.membership(side);
+        if matches!(membership, Membership::Mark) {
+            self.own(
+                side,
+                row,
+                count.checked_neg().ok_or(Error::Overflow)?,
+                before,
+            )?;
+            self.own(side, row, count, after)
+        } else {
+            let sign = i64::from(membership.visible(after)) - i64::from(membership.visible(before));
+            self.own(
+                side,
+                row,
+                count.checked_mul(sign).ok_or(Error::Overflow)?,
+                after,
+            )
+        }
     }
 
     /// Apply one side's net changes. `peer` stays fixed throughout this stage.
@@ -126,7 +164,7 @@ impl Output {
                 .checked_add(1)
                 .ok_or(Error::Overflow)?;
             if own_membership.visible(peer_matched) {
-                self.own(side, row, weight)?;
+                self.own(side, row, weight, peer_matched)?;
             }
             if self.outer() {
                 if let Some(peer) = peer {
@@ -160,9 +198,7 @@ impl Output {
                 .checked_add(1)
                 .ok_or(Error::Overflow)?;
             let peer_membership = self.membership(1 - side);
-            let weight = i64::from(peer_membership.visible(after))
-                - i64::from(peer_membership.visible(before));
-            if weight != 0 {
+            if !matches!(peer_membership, Membership::None) {
                 if let Some(peer) = peer {
                     for (row, count) in peer.bag.entries() {
                         self.work.peer_entries_visited = self
@@ -170,11 +206,7 @@ impl Output {
                             .peer_entries_visited
                             .checked_add(1)
                             .ok_or(Error::Overflow)?;
-                        self.own(
-                            1 - side,
-                            row,
-                            count.checked_mul(weight).ok_or(Error::Overflow)?,
-                        )?;
+                        self.crossing(1 - side, row, count, before, after)?;
                     }
                 }
             }
@@ -295,3 +327,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod boolean_tests;

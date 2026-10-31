@@ -1467,3 +1467,75 @@ Boolean mark-count transitions, designed in mark_joins.md section 10 after revie
 of typed schemas and existing prepared/count state. Separate rule identity and
 explicit flag replacement preserve the optimizer/execution boundary. R04b remains
 in_progress until three-valued/correlated and directed-query gates all qualify.
+
+### R04b — Boolean mark-count physical slice
+
+Design: mark_joins.md section 10, committed locally as `c071721` before code.
+RED strict EXISTS/disjunction plan selected `builtin.non_inner_join_recompute`
+and was rejected; log `target/roadmap-r04b-boolean-mark-red-20261031.log` (exit 101,
+0 passed/1 failed). The new separately registered `builtin.boolean_mark_join@1`
+(priority 20) declares `Maintenance::MatchJoin`; the seven-orientation outer rule
+retains its version-2 identity. Both lower into existing bound Optd index/count
+operations. Physical output policy appends preserved-row Boolean flags and emits
+negative old/positive new rows at zero crossings; pure and residual algorithms
+share that transition. NULL-aware and UNKNOWN-sensitive admission stay enforced.
+
+**Verified:** actual typed LeftMark/RightMark kernels preserve field order and a
+nonnullable Boolean mark. Independent nested-loop signed-bag oracles pass 384
+raw typed epochs across both orientations, ordinary/null-safe/composite keys and
+residuals, plus 192 SQL EXISTS/NOT EXISTS/positive-IN/residual epochs. Every signed
+prefix is exact; discarded/stale candidates remain isolated. A second-stage
+residual division failure leaves committed inputs/counts intact. Removing only
+the new mark rule retains the independently checked scoped alternative. Growing
+untouched input from 8 to 2048 keys at fixed pure hot-key delta records zero
+unchanged peer visits, zero crossings/output contributions and one copied bucket
+entry. This is operator scope evidence, not end-to-end delta complexity.
+
+SQL session qualification adds four query modes × eight actual write rounds,
+including key moves, NULL/duplicates, first/last/empty matches, identified retry,
+atomic two-source transactions, per-round reopen and output history. Raw result
+bags match independent truth tables; aggregate/window consumers match fresh full
+SQL and exact schemas. The original 21 outer/semi/anti tests remain green.
+
+**Complete gates:** R01a wrapper/target/TMPDIR with
+`bash scripts/agent-check.sh sql` exits 0: format, both all-targets Clippy modes,
+**301 default / 315 Iceberg passed**, 2/3 existing ignored. Log
+`target/roadmap-r04b-boolean-gates-20261031.log`. Private Iceberg rustdoc with
+warnings denied and `--document-private-items` exits 0, log
+`target/roadmap-r04b-boolean-rustdoc-20261031.log`. `agent-check.sh sql-tools`
+exits 0: pinned source/schema verification and 46 report tests, log
+`target/roadmap-r04b-boolean-tools-20261031.log`. No ignored full-TPC/large-Q21
+qualification is promoted to current success.
+
+**Fresh directed SQL witnesses:** unchanged repository Q10/Q45 SQL under
+`relational_core` each pass strict planning and three actual nonempty
+INSERT/DELETE/UPDATE commits, fresh independent full SQL/base-table comparisons,
+per-round reopen/history and nonempty/change checks. Q10 executes six mark nodes,
+Q45 three; every executed mark records zero snapshot evaluations/full keyed scans.
+Runner SHA256 `6daa0dcc3a45e5c82488e37dcdcff3621a47c8cd899b2227fac5b63ed62a31df`;
+implementation and frozen runner hashes stay unchanged throughout execution.
+Final artifacts `target/roadmap-r04b-boolean-final-live-20261031/`; driver
+`target/roadmap-r04b-boolean-final-witness-20261031.py`, unified work audit and
+report hashes retained. Q35's separate fresh preflight selects two Boolean mark
+rules but still refuses its floating-output AVG; no bootstrap/round executes.
+`target/roadmap-r04b-boolean-q35-20261031/summary.json` lists that remaining blocker.
+
+Preserve the first `target/roadmap-r04b-boolean-live-20261031/` attempt: both engine
+reports passed three stages, but the artifact driver failed because UPDATE had
+no statements after DELETE emptied the original one-row fixtures (`commit=null`).
+That was not actual UPDATE execution. The final fixtures are derived in a fresh
+project artifact directory from the original directed manifests: two distinct
+full-row images per populated table let exact-row DELETE retain a row for UPDATE.
+Generator, parent manifest/table identities, changed columns and hashes are in
+`target/roadmap-r04b-boolean-extended-fixtures-20261031.py` and its output directory.
+No original input, SQL, schema, oracle or expected result was changed. These remain
+explicit non-dsdgen semantic witnesses, not standard-scale or performance evidence.
+
+R04b remains in_progress. Boolean marks do not implement observable UNKNOWN,
+NULL-aware global/correlated dependency propagation, or Q35's numerical aggregates.
+Ledger remains 13/31 verified, R04b in_progress, 17 pending. Next prerequisite is
+three-valued quantified normalization plus explicit R06 dependency scope; proposed
+notes are in `target/roadmap-r04b-three-valued-next-20261031.md`. Local only; no push.
+
+Final Boolean-slice mdBook build and `git diff --check` both exited 0; book log:
+`target/roadmap-r04b-boolean-docs-20261031.log`.

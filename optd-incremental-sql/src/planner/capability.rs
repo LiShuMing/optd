@@ -34,6 +34,8 @@ pub(crate) fn key_expressions(
                         | JoinType::RightSemi
                         | JoinType::LeftAnti
                         | JoinType::RightAnti
+                        | JoinType::LeftMark
+                        | JoinType::RightMark
                 ) =>
         {
             vec![

@@ -206,3 +206,32 @@ identified retry, atomic multi-source writes, reopen/history. Re-run both featur
 gates and fresh frozen Q10/Q45 witnesses; retain Q35 numerical blockers. Keep
 UNKNOWN-sensitive SQL refused and no-equikey/global joins explicit. Record every
 remaining gate without promoting this slice to full R04b or performance acceptance.
+
+## 11. Boolean physical slice: observed qualification
+
+The independent version-1 Boolean mark rule now lowers qualified LeftMark/RightMark
+through explicit Optd match-count state operations. Preserved row multiplicities
+remain independent of pair counts. A zero crossing replaces the old Boolean row
+with the new Boolean row; residual and pure paths share that output policy.
+
+Typed kernels and independent bags pass 384 raw signed epochs across both mark
+orientations and four key/predicate modes, plus 192 SQL membership epochs. SQL
+retry/atomic writes/reopen/history, discarded/stale candidates and second-stage
+failure are covered; fixed-delta/growing-untouched pure-key tests read zero
+preserved peers without zero crossings. Existing outer/semi/anti oracles still pass.
+Default/Iceberg complete gates pass 301/315 tests (2/3 ignored), both lint modes,
+format, private rustdoc and 46 report-tool tests. ROADMAP.md retains exact commands,
+RED and driver-failure evidence and all scope exclusions.
+
+Fresh Q10/Q45 directed SQL witnesses pass three actual nonempty write commits
+including UPDATE, strict planning, independent full comparisons and reopen/history.
+The original one-row fixture attempt had a no-op UPDATE stage; stronger separately
+identified two-image fixtures retain a row after exact-row DELETE. SQL and schema
+are unchanged. Frozen code/binary identities and unified work reports are retained.
+Q35 now plans both mark nodes incrementally but remains refused by its independent
+floating AVG qualification gate. No full-TPC or controlled performance is claimed.
+
+R04b remains in_progress. The section-9 guard still rejects observable quantified
+UNKNOWN; Boolean mark qualification does not supply missing truth information or
+prove global/correlated NULL dependencies. The next design must preserve that
+provenance before decorrelation and represent its global/partition impact in R06.

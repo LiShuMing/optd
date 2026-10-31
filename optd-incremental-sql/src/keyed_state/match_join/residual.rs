@@ -240,7 +240,7 @@ impl ResidualState {
                         return Err(invalid("cached own match count differs from fixed peers"));
                     }
                     if output.membership(side).visible(own_count > 0) {
-                        output.own(side, row, weight)?;
+                        output.own(side, row, weight, own_count > 0)?;
                     }
                     if after.inputs[side]
                         .get(key)
@@ -275,19 +275,12 @@ impl ResidualState {
                             .zero_crossings
                             .checked_add(1)
                             .ok_or(Error::Overflow)?;
-                        let membership = output.membership(1 - side);
-                        let sign = i64::from(membership.visible(new > 0))
-                            - i64::from(membership.visible(*old > 0));
-                        if sign != 0 {
+                        if !matches!(output.membership(1 - side), super::Membership::None) {
                             let weight = peer
                                 .ok_or_else(|| invalid("missing crossing peer bucket"))?
                                 .bag
                                 .weight(&row);
-                            output.own(
-                                1 - side,
-                                &row,
-                                sign.checked_mul(weight).ok_or(Error::Overflow)?,
-                            )?;
+                            output.crossing(1 - side, &row, weight, *old > 0, new > 0)?;
                         }
                     }
                     *old = new;

@@ -17,7 +17,7 @@ pub enum Strategy {
     NativeDelta,
     /// Propagate signed changes using indexed affected-key peer snapshots.
     IndexedDelta,
-    /// Maintain outer/semi/anti membership through indexed match-count transitions.
+    /// Maintain join membership or Boolean marks through indexed match-count transitions.
     MatchCountDelta,
     /// Update retractable aggregate state using only inserted/deleted rows.
     AccumulatorDelta,

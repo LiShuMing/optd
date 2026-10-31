@@ -26,6 +26,7 @@ enum Builtin {
     AggregateRecompute,
     KeyedJoin,
     MatchCountJoin,
+    BooleanMarkJoin,
     PartitionedWindow,
     NonInnerJoinRecompute,
     WindowRecompute,
@@ -51,6 +52,7 @@ pub(super) fn builtins() -> Vec<Arc<dyn IncrementalRule>> {
         Builtin::AggregateRecompute,
         Builtin::KeyedJoin,
         Builtin::MatchCountJoin,
+        Builtin::BooleanMarkJoin,
         Builtin::PartitionedWindow,
         Builtin::NonInnerJoinRecompute,
         Builtin::WindowRecompute,
@@ -93,6 +95,7 @@ impl IncrementalRule for Builtin {
             Self::AggregateRecompute => "builtin.aggregate_recompute",
             Self::KeyedJoin => "builtin.keyed_join",
             Self::MatchCountJoin => "builtin.match_count_join",
+            Self::BooleanMarkJoin => "builtin.boolean_mark_join",
             Self::PartitionedWindow => "builtin.partitioned_window",
             Self::NonInnerJoinRecompute => "builtin.non_inner_join_recompute",
             Self::WindowRecompute => "builtin.window_recompute",
@@ -105,7 +108,7 @@ impl IncrementalRule for Builtin {
     fn priority(&self) -> i32 {
         if matches!(self, Self::OrderedRecompute) {
             100
-        } else if matches!(self, Self::MatchCountJoin) {
+        } else if matches!(self, Self::MatchCountJoin | Self::BooleanMarkJoin) {
             20
         } else if matches!(self, Self::Accumulator) {
             10
@@ -154,7 +157,14 @@ impl IncrementalRule for Builtin {
             Self::AggregateRecompute => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && !context.group_eligible()
             }
-            Self::MatchCountJoin => super::capability::match_join_eligible(context)?,
+            Self::MatchCountJoin => {
+                matches!(plan, LogicalPlan::Join(join) if !matches!(join.join_type, JoinType::LeftMark | JoinType::RightMark))
+                    && super::capability::match_join_eligible(context)?
+            }
+            Self::BooleanMarkJoin => {
+                matches!(plan, LogicalPlan::Join(join) if matches!(join.join_type, JoinType::LeftMark | JoinType::RightMark))
+                    && super::capability::match_join_eligible(context)?
+            }
             Self::KeyedJoin => {
                 matches!(plan, LogicalPlan::Join(join) if join.join_type != JoinType::Inner)
                     && context.supports_key_scope(KeyScope::JoinKeys)?
@@ -176,6 +186,7 @@ impl IncrementalRule for Builtin {
 
     fn rewrite(&self, context: &RuleContext<'_>) -> Result<RuleRewrite> {
         let (maintenance, reason) = match self {
+            Self::BooleanMarkJoin => (Maintenance::MatchJoin, "maintain Boolean preserved-row marks from indexed match counts; replace old/new flags at zero crossings"),
             Self::MatchCountJoin => (Maintenance::MatchJoin, "maintain equijoin match counts using delta-left/before-right then after-left/delta-right; peer membership changes only at zero crossings"),
             Self::Accumulator => (Maintenance::Accumulate, "update qualified builtin aggregate state from insertions/retractions without reading historical group inputs"),
             Self::Constant => (
