@@ -14,6 +14,9 @@ pub(crate) fn key_expressions(
     let expressions = match (scope, plan) {
         (KeyScope::JoinKeys, LogicalPlan::Join(join))
             if !join.on.is_empty()
+                // NOT IN can invalidate unrelated keys when the right input gains
+                // NULL (or changes from empty to nonempty). Key scope is unsound.
+                && !join.null_aware
                 && matches!(
                     join.join_type,
                     JoinType::Inner

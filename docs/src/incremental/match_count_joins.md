@@ -151,3 +151,22 @@ regressions before implementation acceptance. Implement the null-aware scope aud
 and any independently reproduced repair as a separate prerequisite increment;
 then add match-count state/operations. This accepted direction is not completed
 implementation or numerical/performance qualification.
+
+
+## 9. Prerequisite scope repair and observed verification
+
+The independent NOT IN regression reproduced a wrong result: left `(1),(2)`,
+right `(1)`, then insert right NULL. Full SQL returns zero rows; the previous
+changed-key snapshot algorithm retained `(2)`. Key-scope admission now excludes
+Join::null_aware. Strict planning/CREATE refuses with the global dependency reason;
+non-strict explicit recomputation stays correct. Ordinary anti/NOT EXISTS and
+null-safe equijoins retain strict keyed plans.
+
+`ROADMAP.md` records the exact RED/green and final commands. Three SQL integration
+cases and a typed scope-verifier test cover duplicates/NULL/empty transitions,
+discarded candidates and pre-publication refusal. Final default/Iceberg gates
+passed 267/281 tests (2/3 ignored), both Clippy configurations/fmt, private rustdoc
+and mdBook. Logs use `target/roadmap-r04a-null-aware-*20261031.log`.
+No new match-count algorithm, full TPC or controlled performance is claimed.
+R04a remains in progress and globally incremental NULL-aware anti joins remain
+explicit R06 work. This boundary must also guard the future match-count rule.

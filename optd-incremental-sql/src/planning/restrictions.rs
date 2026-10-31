@@ -72,11 +72,15 @@ pub(super) fn details(context: &RuleContext<'_>) -> Result<Vec<String>> {
         }
         LogicalPlan::Join(join) => {
             details.push(format!(
-                "join={:?}, equality_keys={}, qualified affected-key scope={}",
+                "join={:?}, null_aware={}, equality_keys={}, qualified affected-key scope={}",
                 join.join_type,
+                join.null_aware,
                 join.on.len(),
                 context.supports_key_scope(KeyScope::JoinKeys)?
             ));
+            if join.null_aware {
+                details.push("NULL-aware anti join requires a global right-side NULL/empty-input dependency; equality-key closure alone is unsound (R06)".into());
+            }
             for (left, right) in &join.on {
                 details.push(format!(
                     "join key {left}: {:?} / {right}: {:?}",

@@ -292,3 +292,33 @@ async fn one_window_scope_requires_common_nonempty_admitted_partition_keys() -> 
     }
     Ok(())
 }
+
+#[test]
+fn null_aware_anti_join_cannot_declare_only_equal_key_dependencies() -> Result<()> {
+    use super::{KeyScope, SnapshotVersion};
+    use datafusion::logical_expr::JoinType;
+    let base = keyed_join(DataType::Int64, DataType::Int64)?;
+    let LogicalPlan::Join(join) = base else {
+        panic!("builder creates a join");
+    };
+    for null_aware in [false, true] {
+        let plan = LogicalPlan::Join(datafusion::logical_expr::Join::try_new(
+            join.left.clone(),
+            join.right.clone(),
+            join.on.clone(),
+            join.filter.clone(),
+            JoinType::LeftAnti,
+            join.join_constraint,
+            join.null_equality,
+            null_aware,
+        )?);
+        let context = RuleContext::new(2, &plan, &[0, 1], false, false);
+        assert_eq!(context.supports_key_scope(KeyScope::JoinKeys)?, !null_aware);
+        let program = Maintenance::Delta(DeltaExpr::ScopedSnapshot {
+            scope: KeyScope::JoinKeys,
+            version: SnapshotVersion::After,
+        });
+        assert_eq!(verify(&context, &program).is_ok(), !null_aware);
+    }
+    Ok(())
+}

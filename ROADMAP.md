@@ -1092,3 +1092,46 @@ copy/probe/output accounting. Original ordinary anti joins differ from NULL-awar
 anti joins: the latter require a global right-side NULL dependency. Pinned API and
 local source review are complete. First independently audit/repair that scope
 boundary, then implement the match-count algorithm; all acceptance remains pending.
+
+
+#### R04a prerequisite — correct NULL-aware anti-join scope
+
+**Verified wrong-answer RED:** with left keys `(1),(2)` and right `(1)`, NOT IN
+initially returns `(2)`. Inserting a right NULL must invalidate every left key.
+The old keyed Before/After plan touched only the NULL key and incorrectly retained
+one output row; an independent full physical SQL oracle returned zero. The exact
+failed regression and actual keyed Optd plan are retained in
+`target/roadmap-r04a-null-aware-red-20261031.log` (exit 101).
+
+Key-scope admission now excludes the original Join::null_aware flag. The existing
+non-strict rule selects explicit whole-node recomputation, preserving correctness;
+strict planning refuses before source/view initialization or CREATE publication.
+Preflight explains the global right-side NULL/empty-input dependency (R06).
+Ordinary anti joins, NOT EXISTS and NULL-safe equality are distinct cases and
+retain their qualified strict key-scoped plans. This repairs an unsound scope;
+it does not implement a globally incremental NOT IN algorithm or enlarge coverage.
+
+Three integration tests compare independent full SQL/schema through empty/nonempty,
+first/final/duplicate NULL changes, duplicate and NULL left rows, discarded and
+repeated candidates. Strict CREATE leaves epoch, CURRENT bytes, catalog and every
+store counter unchanged. A valid typed direct-plan unit test proves a custom
+ScopedSnapshot expression cannot bypass the null-aware scope guard. The focused
+command using R01a wrapper/target/TMPDIR with `cargo +1.95.0 test --offline --locked
+-p optd-incremental-sql --lib --test null_aware_anti_sql --test plan_preflight
+--test incremental_plans` exited 0; log
+`target/roadmap-r04a-null-aware-green-20261031.log`.
+
+**Verified final gates:** R01a wrapper and project target/TMPDIR with
+`bash scripts/agent-check.sh sql` exited 0: fmt, both Clippy configurations,
+**267 default passed / 2 ignored**, **281 Iceberg passed / 3 ignored**, including
+SQL DML, existing join/window scope, durable history and process-death recovery.
+Log: `target/roadmap-r04a-null-aware-gates-20261031.log`. Warnings-denied private
+rustdoc exited 0, log `target/roadmap-r04a-null-aware-rustdoc-20261031.log`.
+mdBook exited 0, log `target/roadmap-r04a-null-aware-docs-20261031.log`.
+Report tools were unchanged by this prerequisite; R09c's 44 tests remain separate
+evidence. No fresh full TPC matrix or controlled performance comparison was run.
+
+Local repair commit is titled `Reject unsound key scopes for NULL-aware anti joins`;
+no push. **R04a remains in_progress:** its new match-count algorithm and residual
+maintenance are still pending. R06 must separately maintain the global NULL/empty
+transitions rather than silently broaden ordinary equality keys.
