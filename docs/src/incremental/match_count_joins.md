@@ -293,3 +293,41 @@ The RED residual-plan regression selected the former scoped rule. Current gate
 commands/results and local implementation identity are recorded in ROADMAP.md.
 Default SQL session selection, identified request/history acceptance and directed
 TPC witnesses remain the next rollout slice; R04a remains in_progress.
+
+## 14. Default registry and SQL migration design
+
+Accepted · 2026-10-31 after local registry, SQL restore/CREATE/preflight and durable
+format review. The residual opt-in slice is committed as `f6a1af7`; its tests
+establish algorithm semantics but do not establish the default SQL path.
+
+Register `builtin.match_count_join` version 2 in the default builtins at its existing
+priority 20. Qualified outer/semi/anti joins select it ahead of the priority-zero
+scoped alternative. Keep `builtin.keyed_join` registered and removable independently
+for R09a. Inner joins, windows and NULL-aware anti admission retain their contracts.
+`with_match_count_joins()` becomes an idempotent ensure operation: preserve an
+already registered stable identity, otherwise register the builtin. Ordinary
+`with_rule()` continues rejecting duplicate identities. No executor-side SQL name
+selection and no new SQL configuration, dependency or durable format are needed.
+
+Existing plans are reconstructed on open with the current default registry, so SQL
+CREATE, preflight and reopen all select the same new physical algorithm. Derived
+counts are rebuilt from committed source endpoints; no old serialized operator
+state is interpreted as a count state. If predicate bootstrap fails, opening fails
+without publishing a new epoch. Retry receipts and committed output remain intact.
+
+Preserve explicit coverage of the scoped alternative: tests whose purpose is its
+plan expansion, snapshot work or diagnostics remove only the new rule. Semantic
+default tests assert the new physical operation and measured work; tests removing
+all qualified join algorithms remove both alternatives explicitly. Do not change
+SQL, oracle results or scope assertions merely to accommodate a failing algorithm.
+
+Acceptance adds RED default-plan and idempotent-registry tests before the change;
+all seven SQL join orientations across ordinary/null-safe/residual predicates;
+INSERT/DELETE/UPDATE including key moves and NULL/duplicate first/last matches;
+two-source atomic identified transactions and retries; per-round reopen; independent
+nested-loop result and every durable signed-output prefix; downstream aggregate and
+partitioned window consumers. Inspect selected physical steps and runtime counters
+to prove no scoped snapshots for the join. Repeat default/Iceberg gates and fresh
+isolated TPC-H Q13/Q21 SQL witnesses (Q21 keeps its established 600-second deadline).
+Witness scale and performance qualification remain separate R10 gates. R04a cannot
+be marked verified until these checks actually complete.
