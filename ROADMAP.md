@@ -33,7 +33,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R01b | P0 | SQL selector and DML work accounting | Measure consumed source batches/rows separately from available relation rows; report target rebuild and delta generation | pending |
 | R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | pending |
 | R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | pending |
-| R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | pending |
+| R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | pending |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | pending |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | pending |
@@ -73,6 +73,8 @@ No new TPC runtime or performance qualification is recorded yet. Historical evid
 `/tmp/optd-sql-database-acceptance-20261031/qualification.json`.
 Keep generated reports outside Git. Commit this owner-requested roadmap; preserve
 pre-existing unrelated Markdown and source changes.
+
+R01a implementation commit: `64e0db7` (local; no push in this increment).
 
 ### R01a — refresh accounting
 
@@ -121,3 +123,52 @@ physical expression materializations and complete replacement-cache collection,
 checkpoints and recovery work are excluded;
 R01b–R01d remain pending. This is diagnostic and semantic evidence, not a measured
 performance improvement or end-to-end delta-complexity qualification.
+
+### R02a — consolidate atomic source changes
+
+Implemented consolidation before source replacement. Every incoming change still
+checks its table name, exact schema and weights. Probing only its incoming rows
+preserves ordered intermediate source overflow checks; consolidated deltas retain
+their own checked arithmetic. Only the final relation must be nonnegative. Apply
+each nonempty net delta once; canceled sources share the committed Bag. No-op
+epochs, candidate isolation and publication formats are unchanged.
+
+**Verified regression:** before the implementation, the R01a wrapper/target/TMPDIR
+and `cargo +1.95.0 test --offline --locked -p optd-incremental-sql --test refresh_work`
+exited 101 (9 passed, 4 failed). The failures expose three source rebuilds instead
+of one, four instead of two for interleaved sources, four instead of one for a
+valid signed-prefix batch, and three instead of zero for extreme cancellation.
+Log: `target/roadmap-r02a-red-20261031.log`.
+
+After implementation the same command exited 0 (13 passed, 0 failed), log
+`target/roadmap-r02a-green-20261031.log`. The added cases use independent complete
+SQL endpoints with growing untouched input, split updates, interleaved outer-join
+inputs, negative intermediate counts, schema/name/weight rejection, final absent
+deletions, source/delta overflow before later cancellation and representable
+`i64::MIN` prefixes that cancel without materialization.
+
+**Verified gates:** same wrapper/target/TMPDIR and `bash scripts/agent-check.sh sql`
+exited 0: formatting, both Clippy configurations, 166 default tests (2 ignored)
+and 180 Iceberg tests (3 ignored), including independent SQL semantics, local
+durability, output replay and process-death recovery. Log:
+`target/roadmap-r02a-gates-20261031.log`. The ignored qualification cases have the
+same explicit exclusions as R01a; no full TPC matrix was rerun.
+
+The R01a private-rustdoc and mdBook commands also exited 0 on this increment;
+logs: `target/roadmap-r02a-rustdoc-20261031.log` and
+`target/roadmap-r02a-docs-20261031.log`. Implementation is the local commit titled
+`Consolidate atomic source changes before rebuilding tables`; no push is included.
+
+Source-map copies still grow with
+the complete source once per nonempty source change; cache rebuilds and state
+directory copies remain. Consolidating staged deltas also has its own work.
+This increment removes repeated complete-source rebuilds; it does not establish
+end-to-end delta complexity or a controlled latency/memory improvement.
+
+### Next increment
+
+R01b: measure SQL selector batches/rows actually consumed, complete target-Bag
+collection/rebuild and target Arrow materialization separately from available
+relation rows. Keep statement snapshots and explicit-transaction read-your-writes;
+retries must retain the original diagnostic rather than claim fresh execution.
+Write its design and operation-boundary tests before implementing the counters.

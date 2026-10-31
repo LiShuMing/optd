@@ -1,6 +1,6 @@
 # Incremental work accounting and source-change consolidation
 
-**Status:** accepted · 2026-10-31; R01a implemented and verified, R02a pending
+**Status:** accepted · 2026-10-31; R01a and R02a implemented and verified
 **Scope:** ROADMAP R01a, R02a and their work-scope regressions. Other end-to-end
 measurements remain explicit follow-ups R01b–R01d.
 

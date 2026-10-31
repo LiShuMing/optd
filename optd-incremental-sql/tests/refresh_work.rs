@@ -292,3 +292,195 @@ async fn sql_commit_and_identified_retry_retain_additive_refresh_work_json() {
     assert_eq!(retry.commit.unwrap().maintenance["m"]["work"], *json);
     reopened.verify_output_history().unwrap();
 }
+
+#[tokio::test]
+async fn split_changes_rebuild_each_source_once_and_cancel_without_rebuilding() {
+    for n in [32, 256] {
+        let sql = "SELECT k, SUM(v) AS total FROM t GROUP BY k";
+        let mut maintained = view(sql, tables(n)).await;
+        let candidate = maintained
+            .prepare(&[
+                change(&[(0, 3)], &[1]),
+                change(&[(1, 10)], &[-1]),
+                change(&[(1, 14)], &[1]),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(candidate.stats().work.sources.map_rebuilds, 1);
+        assert_eq!(candidate.stats().work.sources.old_row_entries_copied, n);
+        let mut expected = rows(n);
+        expected[1] = (1, 14);
+        expected.push((0, 3));
+        check_oracle(
+            sql,
+            &candidate,
+            BTreeMap::from([("t".into(), batch(&expected))]),
+        )
+        .await;
+        maintained.acknowledge(candidate).unwrap();
+
+        // Negative intermediate multiplicities are valid inside an atomic batch.
+        // Cancellation across separate TableChanges must not rebuild a source.
+        let candidate = maintained
+            .prepare(&[
+                change(&[(999, 7)], &[-1]),
+                change(&[(0, 3)], &[2]),
+                change(&[(999, 7)], &[1]),
+                change(&[(0, 3)], &[-2]),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(candidate.stats().work.sources, Default::default());
+        assert_eq!(candidate.stats().work.caches, Default::default());
+        assert!(candidate.stats().nodes.is_empty());
+        assert_eq!(candidate.delta().unwrap().num_rows(), 0);
+        check_oracle(
+            sql,
+            &candidate,
+            BTreeMap::from([("t".into(), batch(&expected))]),
+        )
+        .await;
+        maintained.acknowledge(candidate).unwrap();
+        assert_eq!(maintained.epoch(), 2);
+    }
+}
+
+#[tokio::test]
+async fn interleaved_two_source_changes_share_one_rebuild_per_source() {
+    let n = 24;
+    let sql = "SELECT t.k, t.v, u.v AS uv FROM t LEFT JOIN u ON t.k=u.k";
+    let mut initial = tables(n);
+    initial.insert("u".into(), batch(&rows(n)));
+    let mut maintained = view(sql, initial).await;
+    let for_u = |values: &[(i64, i64)], weights: &[i64]| TableChange {
+        table: "u".into(),
+        ..change(values, weights)
+    };
+    let candidate = maintained
+        .prepare(&[
+            change(&[(0, 0)], &[-1]),
+            for_u(&[(1, 10)], &[-1]),
+            change(&[(0, 5)], &[1]),
+            for_u(&[(1, 17)], &[1]),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(candidate.stats().work.sources.map_rebuilds, 2);
+    assert_eq!(candidate.stats().work.sources.old_row_entries_copied, 2 * n);
+    let mut t = rows(n);
+    t[0] = (0, 5);
+    let mut u = rows(n);
+    u[1] = (1, 17);
+    let expected = BTreeMap::from([("t".into(), batch(&t)), ("u".into(), batch(&u))]);
+    check_oracle(sql, &candidate, expected.clone()).await;
+    maintained.acknowledge(candidate).unwrap();
+    for (name, batch) in maintained.tables().unwrap() {
+        assert_eq!(bag(&batch), bag(&expected[&name]));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_does_not_hide_invalid_schema_names_weights_or_final_deletes() {
+    let maintained = view("SELECT k,v FROM t", tables(3)).await;
+    let wrong_schema = Arc::new(Schema::new(vec![
+        Field::new("other", DataType::Int64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let wrong = |values: &[(i64, i64)], weights: &[i64]| {
+        let input = batch(values);
+        TableChange {
+            table: "t".into(),
+            rows: RecordBatch::try_new(wrong_schema.clone(), input.columns().to_vec()).unwrap(),
+            weights: weights.to_vec(),
+        }
+    };
+    let invalid_batches = [
+        vec![TableChange {
+            table: "missing".into(),
+            ..change(&[], &[])
+        }],
+        vec![wrong(&[], &[])],
+        vec![wrong(&[(1, 10), (1, 10)], &[1, -1])],
+        vec![change(&[(1, 10)], &[])],
+        vec![change(&[(999, 7)], &[-1])],
+        vec![change(&[(1, 10)], &[1]), wrong(&[], &[])],
+    ];
+    for changes in invalid_batches {
+        assert!(maintained.prepare(&changes).await.is_err());
+        assert_eq!(maintained.epoch(), 0);
+        assert_eq!(
+            bag(&maintained.tables().unwrap()["t"]),
+            bag(&batch(&rows(3)))
+        );
+    }
+}
+
+#[tokio::test]
+async fn later_cancellation_cannot_hide_source_or_delta_arithmetic_overflow() {
+    let maintained = view("SELECT k,v FROM t", tables(3)).await;
+    // The first two cases overflow intermediate source weights. The third
+    // overflows the staged delta while intermediate source arithmetic still fits.
+    for weights in [
+        vec![i64::MAX, -i64::MAX],
+        vec![i64::MAX - 1, 1, -i64::MAX],
+        vec![-i64::MAX, -2, i64::MAX, 2],
+    ] {
+        let changes = weights
+            .into_iter()
+            .map(|w| change(&[(1, 10)], &[w]))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            maintained.prepare(&changes).await,
+            Err(optd_incremental_sql::Error::Overflow)
+        ));
+        assert_eq!(maintained.epoch(), 0);
+        assert_eq!(bag(&maintained.contents().unwrap()), bag(&batch(&rows(3))));
+    }
+}
+
+#[tokio::test]
+async fn signed_prefixes_can_be_negative_when_the_final_relation_is_valid() {
+    let sql = "SELECT k,v FROM t";
+    let mut maintained = view(sql, tables(3)).await;
+    let candidate = maintained
+        .prepare(&[
+            change(&[(999, 7)], &[-2]),
+            change(&[(999, 7)], &[3]),
+            change(&[(1, 10)], &[-2]),
+            change(&[(1, 10)], &[1]),
+        ])
+        .await
+        .unwrap();
+    let expected = vec![(0, 0), (2, 20), (999, 7)];
+    check_oracle(
+        sql,
+        &candidate,
+        BTreeMap::from([("t".into(), batch(&expected))]),
+    )
+    .await;
+    assert_eq!(candidate.stats().work.sources.map_rebuilds, 1);
+    maintained.acknowledge(candidate).unwrap();
+    assert_eq!(
+        bag(&maintained.tables().unwrap()["t"]),
+        bag(&batch(&expected))
+    );
+}
+
+#[tokio::test]
+async fn representable_extreme_prefixes_can_cancel_without_materialization() {
+    let mut maintained = view("SELECT k,v FROM t", tables(3)).await;
+    let candidate = maintained
+        .prepare(&[
+            change(&[(999, 7)], &[i64::MIN]),
+            change(&[(999, 7)], &[i64::MAX]),
+            change(&[(999, 7)], &[1]),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(candidate.stats().work.sources, Default::default());
+    assert_eq!(candidate.stats().work.caches, Default::default());
+    assert!(candidate.stats().nodes.is_empty());
+    assert_eq!(bag(candidate.contents()), bag(&batch(&rows(3))));
+    maintained.acknowledge(candidate).unwrap();
+    assert_eq!(maintained.epoch(), 1);
+}

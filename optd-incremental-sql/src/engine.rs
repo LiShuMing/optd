@@ -538,26 +538,33 @@ impl SqlView {
             epoch,
             ..Default::default()
         };
-        let mut tables = self.tables.clone();
         let mut source_deltas = BTreeMap::<String, Bag>::new();
         for change in changes {
-            let old = tables
+            let old = self
+                .tables
                 .get(&change.table)
                 .ok_or_else(|| Error::Invalid(format!("unknown changed table {}", change.table)))?;
             let delta = Bag::from_weighted(&change.rows, &change.weights)?;
-            let next = old.add(&delta)?;
-            if !delta.is_empty() {
-                stats.work.sources.record_rebuild(old.len())?;
-            }
-            let combined = match source_deltas.get(&change.table) {
+            let staged = source_deltas.get(&change.table);
+            old.check_staged_addition(staged, &delta)?;
+            let combined = match staged {
                 Some(previous) => previous.add(&delta)?,
                 None => delta,
             };
             source_deltas.insert(change.table.clone(), combined);
-            tables.insert(change.table.clone(), next);
         }
-        for name in source_deltas.keys() {
-            tables[name].validate_relation()?;
+        let mut tables = self.tables.clone();
+        for (name, delta) in &source_deltas {
+            if delta.is_empty() {
+                continue;
+            }
+            // Every name was bound above; apply the atomic net change once,
+            // sharing the committed source unchanged when the net change is zero.
+            let old = &self.tables[name];
+            let next = old.add(delta)?;
+            next.validate_relation()?;
+            stats.work.sources.record_rebuild(old.len())?;
+            tables.insert(name.clone(), next);
         }
         for state in self.groups.iter().flatten() {
             stats
