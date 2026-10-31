@@ -1,28 +1,28 @@
 //! DataFusion logical operators connected by typed, signed relation changes.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::Column;
 use datafusion::datasource::{provider_as_source, MemTable};
 use datafusion::logical_expr::{
-    Distinct, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan, Volatility,
+    Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan, Volatility,
 };
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::accumulator_state::AccumulatorState;
 use crate::bag::Bag;
 use crate::executor::{self, cache_scan, Bindings, Relation};
+use crate::graph::{self, Node};
 use crate::group_state::{supported_key, GroupState, KeyPolicy};
 use crate::keyed_state::KeyedState;
 use crate::planner::plan::{self, StateSpec};
 use crate::planner::{IncrementalOptimizer, IncrementalPlan, RuleContext, Strategy};
-use crate::store::{CheckpointStore, PublishPoint, Snapshot};
+use crate::store::Snapshot;
 use crate::{Error, Result};
 
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
@@ -40,51 +40,8 @@ pub struct TableChange {
 
 pub use crate::metrics::{GroupWork, KeyedWork, NodeStats, RefreshStats};
 
-#[derive(Clone)]
-struct Node {
-    plan: LogicalPlan,
-    inputs: Vec<usize>,
-    ordered: bool,
-}
-
-// DISTINCT is set membership, represented by the existing indexed group state.
-fn normalize_distinct(plan: LogicalPlan) -> Result<LogicalPlan> {
-    Ok(plan
-        .transform_up(|plan| {
-            if let LogicalPlan::Distinct(Distinct::All(input)) = &plan {
-                if !input.schema().fields().is_empty() {
-                    let mut grouped = LogicalPlanBuilder::from(input.as_ref().clone())
-                        .aggregate(
-                            input
-                                .schema()
-                                .columns()
-                                .into_iter()
-                                .map(Expr::Column)
-                                .collect::<Vec<_>>(),
-                            Vec::<Expr>::new(),
-                        )?
-                        .build()?;
-                    if grouped.schema().as_arrow() != plan.schema().as_arrow()
-                        || grouped.schema().iter().ne(plan.schema().iter())
-                    {
-                        return Err(datafusion::common::DataFusionError::Plan(
-                            "DISTINCT normalization changed fields or qualifiers".into(),
-                        ));
-                    }
-                    // Grouping strengthens uniqueness dependencies. Retaining the original
-                    // weaker dependencies preserves the exact parent schema contract.
-                    if let LogicalPlan::Aggregate(aggregate) = &mut grouped {
-                        aggregate.schema = plan.schema().clone();
-                    }
-                    return Ok(Transformed::yes(grouped));
-                }
-            }
-            Ok(Transformed::no(plan))
-        })?
-        .data)
-}
-
 /// Immutable candidate; only acknowledgement changes the owning view.
+#[must_use = "a prepared refresh must be acknowledged to advance the view"]
 pub struct PreparedSqlRefresh {
     owner: u64,
     before: u64,
@@ -143,84 +100,9 @@ fn context() -> SessionContext {
     SessionContext::new_with_config(config)
 }
 
-fn check_expr(expr: &Expr) -> datafusion::common::Result<()> {
-    expr.apply(|e| {
-        let forbidden = matches!(e, Expr::ScalarSubquery(_) | Expr::Exists(_) |
-            Expr::InSubquery(_) | Expr::OuterReferenceColumn(_, _) | Expr::Placeholder(_))
-            || matches!(e, Expr::ScalarFunction(f) if f.func.signature().volatility != Volatility::Immutable);
-        if forbidden {
-            return Err(datafusion::common::DataFusionError::Plan(format!(
-                "expression cannot be maintained: {e}")));
-        }
-        Ok(TreeNodeRecursion::Continue)
-    })?;
-    Ok(())
-}
-
-fn add_node(
-    plan: &LogicalPlan,
-    nodes: &mut Vec<Node>,
-    known: &mut HashMap<LogicalPlan, usize>,
-) -> Result<usize> {
-    if let Some(id) = known.get(plan) {
-        return Ok(*id);
-    }
-    match plan {
-        LogicalPlan::Projection(_)
-        | LogicalPlan::Filter(_)
-        | LogicalPlan::Window(_)
-        | LogicalPlan::Aggregate(_)
-        | LogicalPlan::Sort(_)
-        | LogicalPlan::Join(_)
-        | LogicalPlan::Repartition(_)
-        | LogicalPlan::Union(_)
-        | LogicalPlan::TableScan(_)
-        | LogicalPlan::EmptyRelation(_)
-        | LogicalPlan::SubqueryAlias(_)
-        | LogicalPlan::Limit(_)
-        | LogicalPlan::Values(_)
-        | LogicalPlan::Distinct(_)
-        | LogicalPlan::Unnest(_) => {}
-        _ => {
-            return Err(Error::Invalid(format!(
-                "unsupported SQL operator: {}",
-                plan.display()
-            )))
-        }
-    }
-    for e in plan.expressions() {
-        check_expr(&e)?;
-    }
-    let inputs = plan
-        .inputs()
-        .iter()
-        .map(|p| add_node(p, nodes, known))
-        .collect::<Result<Vec<_>>>()?;
-    let ordered = matches!(plan, LogicalPlan::Sort(_))
-        || (inputs.len() == 1
-            && nodes[inputs[0]].ordered
-            && matches!(
-                plan,
-                LogicalPlan::Projection(_)
-                    | LogicalPlan::Filter(_)
-                    | LogicalPlan::SubqueryAlias(_)
-                    | LogicalPlan::Limit(_)
-                    | LogicalPlan::Repartition(_)
-            ));
-    let id = nodes.len();
-    nodes.push(Node {
-        plan: plan.clone(),
-        inputs,
-        ordered,
-    });
-    known.insert(plan.clone(), id);
-    Ok(id)
-}
-
 impl SqlView {
     /// Rebuild exactly the committed sources and validate its result before
     /// restoring the logical epoch. Source provenance is validated by its owner.
-    #[cfg(feature = "iceberg")]
     pub(crate) async fn restore_checkpoint_with_optimizer(
         snapshot: &Snapshot,
         optimizer: IncrementalOptimizer,
@@ -241,7 +123,6 @@ impl SqlView {
     }
 
     /// Bind a source-aware publication to this owner's exact prepared state.
-    #[cfg(feature = "iceberg")]
     pub(crate) fn checkpoint_for(&self, candidate: &PreparedSqlRefresh) -> Result<Snapshot> {
         if candidate.owner != self.owner
             || candidate.before != self.epoch
@@ -265,7 +146,6 @@ impl SqlView {
     }
 
     /// Encode the initial view without manufacturing a source transition.
-    #[cfg(feature = "iceberg")]
     pub(crate) fn bootstrap_snapshot(&self) -> Result<Snapshot> {
         if self.epoch != 0 {
             return Err(Error::Invalid("bootstrap requires epoch zero".into()));
@@ -318,9 +198,9 @@ impl SqlView {
             }
             Ok(TreeNodeRecursion::Continue)
         })?;
-        let plan = normalize_distinct(ctx.state().optimize(&analyzed)?)?;
+        let plan = graph::normalize_distinct(ctx.state().optimize(&analyzed)?)?;
         let mut nodes = Vec::new();
-        let root = add_node(&plan, &mut nodes, &mut HashMap::new())?;
+        let root = graph::add_node(&plan, &mut nodes, &mut HashMap::new())?;
         if root + 1 != nodes.len() {
             return Err(Error::Invalid(
                 "query root was not last in postorder".into(),
@@ -799,154 +679,6 @@ impl SqlView {
         self.groups = candidate.groups;
         self.keyed = candidate.keyed;
         self.accumulators = candidate.accumulators;
-        Ok(())
-    }
-}
-
-/// A SQL view whose input vector and output changes commit in one local epoch.
-pub struct DurableSqlView {
-    view: SqlView,
-    store: CheckpointStore,
-}
-impl DurableSqlView {
-    /// Bootstrap a new store or recover its exact committed source vector.
-    /// Initial tables are used only when no checkpoint has been published.
-    pub async fn open(
-        path: impl AsRef<Path>,
-        sql: &str,
-        initial: BTreeMap<String, RecordBatch>,
-    ) -> Result<Self> {
-        Self::open_with_optimizer(path, sql, initial, IncrementalOptimizer::default()).await
-    }
-
-    /// Bootstrap or rebuild committed sources using the supplied rule registry.
-    ///
-    /// Rule implementations are not persisted. Supply the desired registry again
-    /// on reopen; committed output is still checked against the rebuilt query.
-    pub async fn open_with_optimizer(
-        path: impl AsRef<Path>,
-        sql: &str,
-        initial: BTreeMap<String, RecordBatch>,
-        optimizer: IncrementalOptimizer,
-    ) -> Result<Self> {
-        let store = CheckpointStore::open(path)?;
-        let view = match store.load()? {
-            Some(snapshot) => {
-                if snapshot.sql != sql {
-                    return Err(Error::Invalid(
-                        "SQL definition differs from checkpoint".into(),
-                    ));
-                }
-                let mut view = SqlView::new_with_optimizer(sql, snapshot.tables, optimizer).await?;
-                let rebuilt = view.contents()?;
-                let ordered = view.nodes.last().is_some_and(|n| n.ordered);
-                if (ordered && rebuilt != snapshot.output)
-                    || Bag::from_batch(&rebuilt)? != Bag::from_batch(&snapshot.output)?
-                {
-                    return Err(Error::Invalid(
-                        "recovered SQL result differs from committed output".into(),
-                    ));
-                }
-                view.epoch = snapshot.epoch;
-                view
-            }
-            None => {
-                let view = SqlView::new_with_optimizer(sql, initial, optimizer).await?;
-                let bootstrap = Snapshot {
-                    sql: sql.into(),
-                    epoch: 0,
-                    tables: view.tables()?,
-                    output: view.contents()?,
-                    delta: view
-                        .states
-                        .last()
-                        .ok_or_else(|| Error::Invalid("empty graph".into()))?
-                        .bag
-                        .weighted_batch()?,
-                };
-                store.commit(None, &bootstrap)?;
-                view
-            }
-        };
-        Ok(Self { view, store })
-    }
-    /// Current committed SQL view.
-    pub fn view(&self) -> &SqlView {
-        &self.view
-    }
-    /// Persist and then acknowledge one atomic multi-table batch.
-    pub async fn refresh(&mut self, changes: &[TableChange]) -> Result<RefreshStats> {
-        self.refresh_with_observer(changes, |_| Ok(())).await
-    }
-    /// Refresh with deterministic durability barriers for process-kill acceptance.
-    pub async fn refresh_with_observer(
-        &mut self,
-        changes: &[TableChange],
-        observer: impl FnMut(PublishPoint) -> Result<()>,
-    ) -> Result<RefreshStats> {
-        // Reconcile a prior committed-but-unacknowledged attempt before accepting
-        // a new batch. Callers recover rather than replay an uncertain epoch.
-        if self
-            .store
-            .load()?
-            .is_none_or(|s| s.epoch != self.view.epoch)
-        {
-            return Err(Error::Invalid(
-                "durable epoch differs; reopen before submitting another batch".into(),
-            ));
-        }
-        let candidate = self.view.prepare(changes).await?;
-        let snapshot = Snapshot {
-            sql: self.view.sql.clone(),
-            epoch: candidate.epoch(),
-            tables: candidate
-                .tables
-                .iter()
-                .map(|(n, b)| Ok((n.clone(), b.to_batch()?)))
-                .collect::<Result<_>>()?,
-            output: candidate.contents().clone(),
-            delta: candidate.delta()?,
-        };
-        self.store
-            .commit_with_observer(Some(self.view.epoch), &snapshot, observer)?;
-        let stats = candidate.stats.clone();
-        self.view.acknowledge(candidate)?;
-        Ok(stats)
-    }
-}
-
-#[cfg(test)]
-mod normalization_tests {
-    use super::*;
-    use datafusion::logical_expr::{col, Distinct, EmptyRelation};
-
-    #[test]
-    fn remaining_distinct_normalizes_with_exact_qualifiers_and_zero_columns_stay_distinct(
-    ) -> Result<()> {
-        let schema = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
-            datafusion::arrow::datatypes::Field::new("k", DataType::Int64, true),
-        ]));
-        let scan = cache_scan(
-            &Arc::new(datafusion::common::DFSchema::try_from_qualified_schema(
-                "t", &schema,
-            )?),
-            RecordBatch::new_empty(schema),
-            0,
-        )?;
-        let input = LogicalPlanBuilder::from(scan)
-            .project(vec![col("t.k")])?
-            .build()?;
-        let distinct = LogicalPlan::Distinct(Distinct::All(Arc::new(input)));
-        let normalized = normalize_distinct(distinct.clone())?;
-        assert!(matches!(normalized, LogicalPlan::Aggregate(_)));
-        assert_eq!(normalized.schema(), distinct.schema());
-        let zero = LogicalPlan::Distinct(Distinct::All(Arc::new(LogicalPlan::EmptyRelation(
-            EmptyRelation {
-                produce_one_row: false,
-                schema: Arc::new(datafusion::common::DFSchema::empty()),
-            },
-        ))));
-        assert_eq!(normalize_distinct(zero.clone())?, zero);
         Ok(())
     }
 }

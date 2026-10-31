@@ -1,6 +1,6 @@
 //! SQL binding and row-image extraction; no incremental maintenance algorithms.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
@@ -11,13 +11,12 @@ use datafusion::common::TableReference;
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Volatility};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
-use datafusion::sql::sqlparser::ast::{
-    AssignmentTarget, FromTable, ObjectName, Statement, TableFactor, TableObject, TableWithJoins,
-};
+use datafusion::sql::sqlparser::ast::{ObjectName, Statement};
 
+use super::dml_compiler::TransactionMode;
 use super::store::DatabaseSnapshot;
-use super::{invalid, DmlWork};
 use crate::bag::Bag;
+use crate::error::invalid;
 use crate::{Result, TableChange};
 
 pub(super) fn statements(sql: &str) -> Result<Vec<Statement>> {
@@ -74,12 +73,19 @@ pub(super) fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-pub(super) fn context(snapshot: &DatabaseSnapshot, include_views: bool) -> Result<SessionContext> {
+/// Relations visible to a SQL planning context, independent of transaction state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RelationScope {
+    BaseTables,
+    AllRelations,
+}
+
+pub(super) fn context(snapshot: &DatabaseSnapshot, scope: RelationScope) -> Result<SessionContext> {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
     for (name, t) in &snapshot.tables {
         ctx.register_batch(TableReference::bare(name.as_str()), t.batch.clone())?;
     }
-    if include_views {
+    if scope == RelationScope::AllRelations {
         for (name, v) in &snapshot.views {
             ctx.register_batch(TableReference::bare(name.as_str()), v.output.clone())?;
         }
@@ -98,7 +104,7 @@ pub(super) fn reads(plan: &LogicalPlan) -> Result<BTreeSet<String>> {
     Ok(names)
 }
 
-fn immutable(plan: &LogicalPlan) -> Result<()> {
+pub(super) fn immutable(plan: &LogicalPlan) -> Result<()> {
     plan.apply_with_subqueries(|p| {
         for expr in p.expressions() {
             expr.apply(|e| {
@@ -203,240 +209,14 @@ pub(super) async fn create_table(
     ))
 }
 
-fn target(table: &TableWithJoins) -> Result<String> {
-    if !table.joins.is_empty() {
-        return Err(invalid("joined DML target is not supported"));
-    }
-    let TableFactor::Table {
-        name: target,
-        alias: None,
-        args: None,
-        ..
-    } = &table.relation
-    else {
-        return Err(invalid("expected a plain DML table target"));
-    };
-    let n = name(target)?;
-    if table.to_string() != target.to_string() {
-        return Err(invalid("DML target modifiers are not supported"));
-    }
-    Ok(n)
-}
-
-pub(super) struct DmlResult {
-    pub table: String,
-    pub batch: RecordBatch,
-    pub delta: Bag,
-    pub work: DmlWork,
-}
-
-pub(super) async fn dml(
-    snapshot: &DatabaseSnapshot,
-    statement: &Statement,
-    explicit: bool,
-) -> Result<DmlResult> {
-    let ctx = context(snapshot, true)?;
-    let (table, old, new, plan) = match statement {
-        Statement::Insert(insert) => {
-            let TableObject::TableName(target) = &insert.table else {
-                return Err(invalid("INSERT requires a named base table"));
-            };
-            let table = name(target)?;
-            let source = insert
-                .source
-                .as_ref()
-                .ok_or_else(|| invalid("INSERT requires VALUES or SELECT"))?;
-            let columns = if insert.columns.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " ({})",
-                    insert
-                        .columns
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            let simple = format!(
-                "INSERT {}{}{} {}",
-                if insert.into { "INTO " } else { "" },
-                target,
-                columns,
-                source
-            );
-            if statement.to_string() != simple {
-                return Err(invalid("INSERT modifiers are not supported"));
-            }
-            let original = snapshot
-                .tables
-                .get(&table)
-                .ok_or_else(|| invalid("INSERT target must be a base table"))?;
-            let plan = ctx
-                .state()
-                .create_logical_plan(&statement.to_string())
-                .await?;
-            let LogicalPlan::Dml(dml) = plan else {
-                return Err(invalid("expected a typed INSERT plan"));
-            };
-            let input = dml.input.as_ref().clone();
-            immutable(&input)?;
-            reject_mv_reads(snapshot, &input, explicit)?;
-            let new = typed(
-                &collect(&ctx, input.clone()).await?,
-                original.batch.schema(),
-            )?;
-            (
-                table,
-                RecordBatch::new_empty(original.batch.schema()),
-                new,
-                input,
-            )
-        }
-        Statement::Delete(delete) => {
-            let from = match &delete.from {
-                FromTable::WithFromKeyword(f) | FromTable::WithoutKeyword(f) => f,
-            };
-            if from.len() != 1 {
-                return Err(invalid("DELETE requires exactly one target"));
-            }
-            let table = target(&from[0])?;
-            let filter = delete
-                .selection
-                .as_ref()
-                .map(|e| format!(" WHERE {e}"))
-                .unwrap_or_default();
-            if statement.to_string() != format!("DELETE FROM {}{filter}", from[0]) {
-                return Err(invalid("DELETE modifiers are not supported"));
-            }
-            let original = snapshot
-                .tables
-                .get(&table)
-                .ok_or_else(|| invalid("DELETE target must be a base table"))?;
-            let plan =
-                plan_query(&ctx, &format!("SELECT * FROM {}{filter}", quote(&table))).await?;
-            reject_mv_reads(snapshot, &plan, explicit)?;
-            let old = typed(&collect(&ctx, plan.clone()).await?, original.batch.schema())?;
-            let new = RecordBatch::new_empty(original.batch.schema());
-            (table, old, new, plan)
-        }
-        Statement::Update(update) => {
-            let table = target(&update.table)?;
-            let original = snapshot
-                .tables
-                .get(&table)
-                .ok_or_else(|| invalid("UPDATE target must be a base table"))?;
-            let filter = update
-                .selection
-                .as_ref()
-                .map(|e| format!(" WHERE {e}"))
-                .unwrap_or_default();
-            let simple = format!(
-                "UPDATE {} SET {}{filter}",
-                update.table,
-                update
-                    .assignments
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            if statement.to_string() != simple {
-                return Err(invalid("UPDATE modifiers are not supported"));
-            }
-            let mut assignments = BTreeMap::new();
-            for assignment in &update.assignments {
-                let AssignmentTarget::ColumnName(column) = &assignment.target else {
-                    return Err(invalid("tuple assignment is not supported"));
-                };
-                let column = name(column)?;
-                original.batch.schema().index_of(&column)?;
-                if assignments
-                    .insert(column, assignment.value.to_string())
-                    .is_some()
-                {
-                    return Err(invalid("duplicate UPDATE assignment"));
-                }
-            }
-            if assignments.is_empty() {
-                return Err(invalid("UPDATE has no assignments"));
-            }
-            let width = original.batch.num_columns();
-            let mut expressions = Vec::new();
-            for (i, f) in original.batch.schema().fields().iter().enumerate() {
-                expressions.push(format!("{} AS __optd_old_{i}", quote(f.name())));
-            }
-            for (i, f) in original.batch.schema().fields().iter().enumerate() {
-                let e = assignments
-                    .get(f.name())
-                    .cloned()
-                    .unwrap_or_else(|| quote(f.name()));
-                expressions.push(format!("({e}) AS __optd_new_{i}"));
-            }
-            let plan = plan_query(
-                &ctx,
-                &format!(
-                    "SELECT {} FROM {}{filter}",
-                    expressions.join(", "),
-                    quote(&table)
-                ),
-            )
-            .await?;
-            reject_mv_reads(snapshot, &plan, explicit)?;
-            let images = collect(&ctx, plan.clone()).await?;
-            let old = typed(
-                &images.project(&(0..width).collect::<Vec<_>>())?,
-                original.batch.schema(),
-            )?;
-            let new = typed(
-                &images.project(&(width..2 * width).collect::<Vec<_>>())?,
-                original.batch.schema(),
-            )?;
-            (table, old, new, plan)
-        }
-        _ => return Err(invalid("expected INSERT, DELETE or UPDATE")),
-    };
-    let before = &snapshot
-        .tables
-        .get(&table)
-        .ok_or_else(|| invalid("unbound DML target"))?
-        .batch;
-    let delta = Bag::from_parts(&new, &old)?;
-    let next = Bag::from_batch(before)?.add(&delta)?.to_batch()?;
-    let mut input_rows = 0usize;
-    for name in reads(&plan)? {
-        let rows = snapshot
-            .tables
-            .get(&name)
-            .map(|t| t.batch.num_rows())
-            .or_else(|| snapshot.views.get(&name).map(|v| v.output.num_rows()))
-            .unwrap_or(0);
-        input_rows = input_rows.checked_add(rows).ok_or(crate::Error::Overflow)?;
-    }
-    let affected_rows = if matches!(statement, Statement::Insert(_)) {
-        new.num_rows()
-    } else {
-        old.num_rows()
-    };
-    Ok(DmlResult {
-        table,
-        batch: next,
-        work: DmlWork {
-            affected_rows,
-            source_relation_rows: input_rows,
-            net_changed_rows: delta.len(),
-        },
-        delta,
-    })
-}
-
 pub(super) fn reject_mv_reads(
     snapshot: &DatabaseSnapshot,
     plan: &LogicalPlan,
-    explicit: bool,
+    mode: TransactionMode,
 ) -> Result<()> {
-    if explicit && reads(plan)?.iter().any(|n| snapshot.views.contains_key(n)) {
+    if mode == TransactionMode::Explicit
+        && reads(plan)?.iter().any(|n| snapshot.views.contains_key(n))
+    {
         return Err(invalid(
             "materialized-view reads inside explicit transactions are not yet supported",
         ));

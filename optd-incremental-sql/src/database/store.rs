@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use datafusion::arrow::array::RecordBatch;
 use serde::{Deserialize, Serialize};
 
-use super::{invalid, CommitReport};
+use super::response::CommitReport;
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES};
+use crate::error::invalid;
 use crate::store::{
     batches_equal, component, json_bytes, read_batch, read_json_file, sync_dir, verified_file,
     write_batch, write_bytes, CheckpointDirectories, FileEntry, PublishPoint,
