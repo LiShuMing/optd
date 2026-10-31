@@ -79,10 +79,10 @@ pub enum PublishPoint {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileEntry {
-    name: String,
-    bytes: u64,
-    sha256: String,
+pub(crate) struct FileEntry {
+    pub(crate) name: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -642,7 +642,7 @@ fn snapshots_equal(left: &Snapshot, right: &Snapshot) -> bool {
         && batches_equal(&left.delta, &right.delta)
 }
 
-fn batches_equal(left: &RecordBatch, right: &RecordBatch) -> bool {
+pub(crate) fn batches_equal(left: &RecordBatch, right: &RecordBatch) -> bool {
     left.schema() == right.schema()
         && left.num_rows() == right.num_rows()
         && left
@@ -652,7 +652,7 @@ fn batches_equal(left: &RecordBatch, right: &RecordBatch) -> bool {
             .all(|(a, b)| a.to_data() == b.to_data())
 }
 
-fn write_batch(directory: &Path, name: &str, batch: &RecordBatch) -> Result<FileEntry> {
+pub(crate) fn write_batch(directory: &Path, name: &str, batch: &RecordBatch) -> Result<FileEntry> {
     let mut file = new_file(&directory.join(name))?;
     {
         let mut writer = FileWriter::try_new(&mut file, batch.schema().as_ref())?;
@@ -663,7 +663,7 @@ fn write_batch(directory: &Path, name: &str, batch: &RecordBatch) -> Result<File
     describe_file(name, file)
 }
 
-fn read_batch(directory: &Path, entry: &FileEntry) -> Result<RecordBatch> {
+pub(crate) fn read_batch(directory: &Path, entry: &FileEntry) -> Result<RecordBatch> {
     let file = verified_file(directory, entry)?;
     let mut reader = FileReader::try_new(file, None)?;
     let batch = reader
@@ -678,7 +678,7 @@ fn read_batch(directory: &Path, entry: &FileEntry) -> Result<RecordBatch> {
     Ok(batch)
 }
 
-fn write_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<FileEntry> {
+pub(crate) fn write_bytes(directory: &Path, name: &str, bytes: &[u8]) -> Result<FileEntry> {
     let mut file = new_file(&directory.join(name))?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -707,7 +707,7 @@ fn describe_file(name: &str, mut file: File) -> Result<FileEntry> {
     })
 }
 
-fn verified_file(directory: &Path, entry: &FileEntry) -> Result<File> {
+pub(crate) fn verified_file(directory: &Path, entry: &FileEntry) -> Result<File> {
     if !component(&entry.name)
         || entry.sha256.len() != 64
         || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -751,7 +751,7 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn read_json_file(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read_json_file(path: &Path) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.len() > MAX_JSON_BYTES {
         return Err(invalid("invalid or oversized checkpoint JSON file"));
@@ -763,7 +763,7 @@ fn read_json_file(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
+pub(crate) fn json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
     let bytes =
         serde_json::to_vec(value).map_err(|error| invalid(format!("checkpoint JSON: {error}")))?;
     if bytes.len() as u64 > MAX_JSON_BYTES {
@@ -776,7 +776,7 @@ fn parse_json<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|error| invalid(format!("checkpoint JSON: {error}")))
 }
 
-fn component(value: &str) -> bool {
+pub(crate) fn component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
@@ -790,12 +790,12 @@ fn component(value: &str) -> bool {
 /// Existing directories are not assumed durable: a previous failed open may
 /// have created them. Canonicalization resolves relative paths and symlinks;
 /// synchronizing every ancestor also handles retries after an interrupted mkdir.
-struct CheckpointDirectories {
-    root: PathBuf,
+pub(crate) struct CheckpointDirectories {
+    pub(crate) root: PathBuf,
 }
 
 impl CheckpointDirectories {
-    fn create(path: &Path) -> Result<Self> {
+    pub(crate) fn create(path: &Path) -> Result<Self> {
         if path.as_os_str().is_empty() {
             return Err(invalid("checkpoint directory path must be nonempty"));
         }
@@ -812,7 +812,10 @@ impl CheckpointDirectories {
         Ok(Self { root })
     }
 
-    fn synchronize(&self, mut synchronize: impl FnMut(&Path) -> Result<()>) -> Result<()> {
+    pub(crate) fn synchronize(
+        &self,
+        mut synchronize: impl FnMut(&Path) -> Result<()>,
+    ) -> Result<()> {
         for directory in self.root.ancestors() {
             synchronize(directory)?;
         }
@@ -820,7 +823,7 @@ impl CheckpointDirectories {
     }
 }
 
-fn sync_dir(path: &Path) -> Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     File::open(path)?.sync_all()?;
     Ok(())
 }

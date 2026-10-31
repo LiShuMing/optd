@@ -33,6 +33,9 @@ type Bag = BTreeMap<Vec<u8>, i64>;
 #[path = "query_mode.rs"]
 mod query_mode;
 
+#[path = "database_harness.rs"]
+mod database_harness;
+
 fn plan_qualification(view: &SqlView) -> Value {
     use optd_incremental_sql::Strategy;
     let strategies = view.strategies();
@@ -395,7 +398,14 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
     let query_mode =
         std::env::var("OPTD_SQL_BENCH_QUERY_MODE").unwrap_or_else(|_| "original".into());
     query_mode::prepare("SELECT 1", &query_mode)?;
+    let database_root = std::env::var_os("OPTD_SQL_BENCH_DATABASE_ROOT").map(PathBuf::from);
+    if let Some(root) = &database_root {
+        fs::create_dir(root)?;
+    }
     let iceberg_root = std::env::var_os("OPTD_SQL_BENCH_ICEBERG_ROOT").map(PathBuf::from);
+    if database_root.is_some() && iceberg_root.is_some() {
+        return Err("SQL database and Iceberg benchmark backends are mutually exclusive".into());
+    }
     if let Some(root) = &iceberg_root {
         #[cfg(not(feature = "iceberg"))]
         return Err(format!(
@@ -449,7 +459,12 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
                 check_digest(&file, required_string(variant, "sha256")?)?;
                 let original = fs::read_to_string(file)?;
                 let (sql, transformation) = query_mode::prepare(&original, &query_mode)?;
-                let mut result = run_query(&sql, complete, source_root.as_deref()).await?;
+                let mut result = if let Some(root) = &database_root {
+                    database_harness::run(&sql, complete, &root.join(format!("query-{variant_id}")))
+                        .await?
+                } else {
+                    run_query(&sql, complete, source_root.as_deref()).await?
+                };
                 result["query_transformation"] = transformation;
                 Ok::<_, Box<dyn Error + Send + Sync>>(result)
             })
@@ -470,7 +485,9 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
             record["variant_id"] = variant["variant_id"].clone();
             record["source"] = query["source"].clone();
             record["qualification"] = query["qualification"].clone();
-            record["source_backend"] = json!(if iceberg_root.is_some() {
+            record["source_backend"] = json!(if database_root.is_some() {
+                "sql_database"
+            } else if iceberg_root.is_some() {
                 "typed_iceberg_endpoint_vector"
             } else {
                 "typed_arrow"
@@ -511,12 +528,21 @@ pub async fn run_manifest(path: &Path, selected: Option<u64>) -> Result<Value> {
         .filter(|record| record["completed_rounds"] == 3)
         .count();
     let mut report = json!({"format_version":1,"suite":manifest["suite"],"manifest":path,"manifest_sha256":manifest_digest,"command":std::env::args().collect::<Vec<_>>(),"host_arch":std::env::consts::ARCH,"host_os":std::env::consts::OS,"query_timeout_seconds":timeout_seconds,"timeout_scope":"async_query_future","session_configuration":{"target_partitions":1,"comparison":"exact_typed_bag"},"source":manifest["source"],"schema_sha256":manifest["schema_sha256"],"data_status":manifest["data_status"],"fixture_qualification":manifest["fixture_qualification"],"fixture_error":fixture_error,"executed_variants":records.len(),"bootstrap_verified_variants":bootstrap_verified,"three_rounds_verified_variants":complete_rounds_verified,"passed_variants":passed,"failed_variants":failed,"verified_empty_only_variants":empty_only,"verified_unchanged_output_variants":unchanged,"incomplete_variants":records.len()-passed,"nonempty_final_variants":nonempty,"scale_or_performance_qualification":false,"queries":records});
-    report["source_backend"] = json!(if iceberg_root.is_some() {
+    report["source_backend"] = json!(if database_root.is_some() {
+        "sql_database"
+    } else if iceberg_root.is_some() {
         "typed_iceberg_endpoint_vector"
     } else {
         "typed_arrow"
     });
     report["iceberg_artifact_root"] = json!(iceberg_root);
+    report["database_artifact_root"] = json!(database_root);
+    report["unsupported_strict_plan_variants"] = json!(report["queries"]
+        .as_array()
+        .ok_or("missing records")?
+        .iter()
+        .filter(|r| r["status"] == "unsupported_strict_plan")
+        .count());
     report["query_mode"] = json!(query_mode);
     Ok(report)
 }

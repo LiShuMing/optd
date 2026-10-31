@@ -6,6 +6,7 @@
 
 mod accumulator_state;
 mod bag;
+pub mod database;
 mod engine;
 mod executor;
 mod group_state;
