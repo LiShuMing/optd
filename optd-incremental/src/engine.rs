@@ -75,6 +75,7 @@ static NEXT_VIEW: AtomicU64 = AtomicU64::new(1);
 
 /// An immutable refresh result; the driver commits output before acknowledging it.
 #[derive(Debug)]
+#[must_use = "a prepared refresh must be acknowledged to advance the view"]
 pub struct PreparedRefresh {
     owner: u64,
     revision: u64,
@@ -139,7 +140,7 @@ impl View {
         if start > source.current_position() {
             return Err(RefreshError::InvalidPosition);
         }
-        check_capabilities(&plan, &tables, source.capabilities())?;
+        check_capabilities(&plan, source.capabilities())?;
 
         // The aggregate rule merges into `StoredView`, which is *this view's*
         // contents. That is the accumulator relation only when the aggregate is
@@ -318,11 +319,7 @@ impl std::fmt::Debug for View {
 ///
 /// This is the mechanical form of `change_capture.md` §7: the *shape of the view*,
 /// not the storage it sits on, decides what the feed must be able to express.
-fn check_capabilities(
-    plan: &IncPlanNode,
-    tables: &[TableId],
-    caps: Capabilities,
-) -> Result<(), RefreshError> {
+fn check_capabilities(plan: &IncPlanNode, caps: Capabilities) -> Result<(), RefreshError> {
     if !caps.ordered {
         return Err(RefreshError::InsufficientCapabilities { missing: "ordered" });
     }
@@ -346,7 +343,6 @@ fn check_capabilities(
             missing: "cross_table_position",
         });
     }
-    let _ = tables;
     Ok(())
 }
 
