@@ -23,6 +23,7 @@ use crate::plan::{
     union, IncNodeType, IncPlanNode,
 };
 
+/// Failure to derive a complete executable delta expression from a concrete plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RewriteError {
     /// An operator that has no delta rule in this milestone. The caller must fall
@@ -46,8 +47,8 @@ impl std::fmt::Display for RewriteError {
 
 /// Rewrite a plan so that every `Δ` has been pushed to a scan.
 ///
-/// Idempotent on an already-rewritten plan (there is no `Δ` left, so nothing
-/// happens), which matters because the driver rewrites once per refresh range.
+/// Idempotent on an already-rewritten plan: `Delta(Scan)` remains as the resolved
+/// change-feed read. The view driver rewrites once at load and reuses that plan.
 pub fn rewrite(plan: IncPlanNode) -> Result<IncPlanNode, RewriteError> {
     if plan.typ == IncNodeType::Delta {
         return rewrite_delta(&plan);

@@ -25,7 +25,9 @@ pub type ColRef = usize;
 /// Scalar expressions, used as the predicate type of a node.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Expr {
+    /// Zero-based column in the operator's input row.
     Col(ColRef),
+    /// Constant scalar value, including NULL.
     Lit(Value),
     /// `a > b` — enough to exercise filtering; the framework does not need a full
     /// expression language to demonstrate the algebra.
@@ -52,7 +54,10 @@ impl fmt::Display for Expr {
 /// `docs/src/incremental/agg.md` §1 for why they need extra state.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AggKind {
+    /// Count input row multiplicities, including rows with NULL values.
+    /// The count is always the first accumulator, even when not explicitly requested.
     Count,
+    /// Sum non-NULL integer values from this zero-based input column.
     Sum(ColRef),
 }
 
@@ -79,7 +84,9 @@ pub enum IncNodeType {
     /// than the value is what lets a later batch merge into it
     /// (`docs/src/incremental/agg.md` §1).
     Agg {
+        /// Input columns forming the group key, in output order.
         groups: Vec<ColRef>,
+        /// Functions defining the mandatory row count and subsequent SUM slots.
         aggs: Vec<AggKind>,
     },
     /// Flip every weight of the input. This is what makes
@@ -90,7 +97,9 @@ pub enum IncNodeType {
     /// children are `[partial, stored]`. Groups whose count reaches zero are
     /// dropped (a group that sums to zero is *not* empty — see `agg.md` §1).
     MergeAgg {
+        /// Original input grouping columns; their count determines stored key width.
         groups: Vec<ColRef>,
+        /// Original functions defining the partial and stored accumulator layout.
         aggs: Vec<AggKind>,
     },
     /// The **change marker**: `Δ(child)` is the change to `child`, not its value.
@@ -130,6 +139,7 @@ impl optd_core::nodes::NodeType for IncNodeType {
     }
 }
 
+/// Shared concrete plan node using the reference algebra's operator vocabulary.
 pub type IncPlanNode = ArcPlanNode<IncNodeType>;
 
 fn node(typ: IncNodeType, children: Vec<IncPlanNode>) -> IncPlanNode {
@@ -161,42 +171,52 @@ fn node_with_pred(typ: IncNodeType, children: Vec<IncPlanNode>, pred: Expr) -> I
 
 // --- constructors -----------------------------------------------------------
 
+/// Read a table snapshot, or its change range when immediately below `Delta`.
 pub fn scan(table: TableId) -> IncPlanNode {
     node(IncNodeType::Scan(table), vec![])
 }
 
+/// Construct the empty relation, the identity for signed multiset addition.
 pub fn empty() -> IncPlanNode {
     node(IncNodeType::EmptyRelation, vec![])
 }
 
+/// Keep the requested input columns in order, consolidating equal output rows.
 pub fn project(child: IncPlanNode, cols: Vec<ColRef>) -> IncPlanNode {
     node(IncNodeType::Projection(cols), vec![child])
 }
 
+/// Retain input rows whose predicate is TRUE; FALSE and NULL are discarded.
 pub fn filter(child: IncPlanNode, pred: Expr) -> IncPlanNode {
     node_with_pred(IncNodeType::Filter, vec![child], pred)
 }
 
+/// Inner equijoin with left/right-local column pairs and multiplied row weights.
 pub fn join(left: IncPlanNode, right: IncPlanNode, keys: Vec<(ColRef, ColRef)>) -> IncPlanNode {
     node(IncNodeType::Join(keys), vec![left, right])
 }
 
+/// Add signed row multiplicities; duplicates are not eliminated.
 pub fn union(left: IncPlanNode, right: IncPlanNode) -> IncPlanNode {
     node(IncNodeType::Union, vec![left, right])
 }
 
+/// Aggregate into group keys, a mandatory row count and one slot per requested SUM.
 pub fn agg(child: IncPlanNode, groups: Vec<ColRef>, aggs: Vec<AggKind>) -> IncPlanNode {
     node(IncNodeType::Agg { groups, aggs }, vec![child])
 }
 
+/// Request output changes; rewrite non-scan children before evaluating the plan.
 pub fn delta(child: IncPlanNode) -> IncPlanNode {
     node(IncNodeType::Delta, vec![child])
 }
 
+/// Reverse input row weights to express signed subtraction.
 pub fn negate(child: IncPlanNode) -> IncPlanNode {
     node(IncNodeType::Negate, vec![child])
 }
 
+/// Read the current view contents supplied by the refresh evaluation context.
 pub fn stored_view() -> IncPlanNode {
     node(IncNodeType::StoredView, vec![])
 }
@@ -239,6 +259,8 @@ impl IncNodeType {
     }
 }
 
+/// Return concrete children in port order, omitting optimizer group references.
+/// Evaluation and rewriting separately reject nodes containing unresolved groups.
 pub fn children_of(node: &PlanNode<IncNodeType>) -> Vec<&IncPlanNode> {
     node.children
         .iter()

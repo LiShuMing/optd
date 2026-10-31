@@ -4,6 +4,8 @@
 //! operators explicitly report local recomputation. No whole-query fallback is
 //! hidden behind the incremental API. See `docs/src/incremental/sql_execution.md`.
 
+#![deny(missing_docs)]
+
 mod accumulator_state;
 mod bag;
 pub mod database;

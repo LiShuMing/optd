@@ -30,8 +30,11 @@ pub type TableId = u32;
     Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, serde::Serialize, serde::Deserialize,
 )]
 pub enum Value {
+    /// SQL NULL, including its unknown comparison semantics in the evaluator.
     Null,
+    /// Signed 64-bit integer.
     Int(i64),
+    /// Owned UTF-8 string with binary equality.
     Str(String),
 }
 
@@ -109,10 +112,13 @@ impl Multiset {
         self.try_union(&other.try_negate()?)
     }
 
+    /// Construct an empty relation or signed change set.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Build a positive relation, counting repeated full rows as duplicates.
+    /// Multiplicities must fit in `i64`; this convenience constructor is unchecked.
     pub fn from_rows(rows: impl IntoIterator<Item = Row>) -> Self {
         let mut ms = Self::new();
         for r in rows {
@@ -122,6 +128,8 @@ impl Multiset {
     }
 
     /// Add `weight` copies of `row`. A resulting weight of zero removes the row.
+    /// This convenience method uses unchecked arithmetic; use [`Self::try_add_row`]
+    /// when weights come from untrusted input or can approach integer limits.
     pub fn add_row(&mut self, row: Row, weight: i64) {
         if weight == 0 {
             return;
@@ -139,6 +147,8 @@ impl Multiset {
         }
     }
 
+    /// Add the other's weights in place using unchecked arithmetic.
+    /// Use [`Self::try_union`] when overflow must be reported without partial mutation.
     pub fn merge(&mut self, other: &Multiset) {
         for (row, w) in other.iter() {
             self.add_row(row.clone(), *w);
@@ -146,6 +156,7 @@ impl Multiset {
     }
 
     /// Multiset union: weights add. `A ∪ B` (this is what `Δ` rules combine with).
+    /// Uses unchecked arithmetic; [`Self::try_union`] reports overflow.
     pub fn union(&self, other: &Multiset) -> Multiset {
         let mut out = self.clone();
         out.merge(other);
@@ -154,11 +165,13 @@ impl Multiset {
 
     /// Multiset difference `self ⊖ other`: negate the other's weights and add.
     /// This is how `Σ(before) = Σ(after) ⊖ Δ` is realised.
+    /// Uses unchecked arithmetic; [`Self::try_difference`] reports overflow.
     pub fn difference(&self, other: &Multiset) -> Multiset {
         self.union(&other.negate())
     }
 
     /// `⊖ self`: flip every weight.
+    /// Uses unchecked arithmetic; [`Self::try_negate`] reports overflow.
     pub fn negate(&self) -> Multiset {
         let mut out = Multiset::new();
         for (row, w) in self.iter() {
@@ -167,6 +180,7 @@ impl Multiset {
         out
     }
 
+    /// Visit distinct stored rows and nonzero weights in deterministic row order.
     pub fn iter(&self) -> impl Iterator<Item = (&Row, &i64)> {
         self.entries.iter()
     }
@@ -176,16 +190,19 @@ impl Multiset {
         self.entries.get(row).copied().unwrap_or(0)
     }
 
+    /// Whether consolidation left no rows with nonzero weight.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Count distinct stored rows, independent of their multiplicities or signs.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Total number of rows counting multiplicity (negative weights contribute
     /// negatively, so this is only meaningful for relations).
+    /// Uses unchecked summation; the total must fit in `i64`.
     pub fn total(&self) -> i64 {
         self.entries.values().sum()
     }

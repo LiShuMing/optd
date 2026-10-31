@@ -24,15 +24,24 @@ use crate::source::DeltaSource;
 /// Per-table refresh ranges: `(from, to]` for each base table.
 pub type Ranges = BTreeMap<TableId, (Position, Position)>;
 
+/// Immutable source endpoints and committed view state for reference evaluation.
+/// Ordinary scans use `position`; delta scans use their per-table `ranges`.
 pub struct EvalContext<'a> {
+    /// Source observation that retains the requested snapshots and change ranges.
     pub source: &'a dyn DeltaSource,
     /// Snapshot endpoint pinned for all ordinary scans.
     pub position: Position,
+    /// Per-table change ranges; an absent table contributes no delta rows.
     pub ranges: &'a Ranges,
     /// The view's current contents, for `StoredView`.
     pub stored_view: &'a Multiset,
 }
 
+/// Evaluate a concrete reference plan without mutating source or committed state.
+///
+/// Rejects invalid arity, unresolved non-scan delta markers, invalid column
+/// references and checked arithmetic failures. This fully materializing evaluator
+/// is a semantic oracle, not the typed SQL executor or an efficiency guarantee.
 pub fn eval(plan: &IncPlanNode, ctx: &EvalContext) -> Result<Multiset, String> {
     let kids = children_of(plan);
     let arity = match &plan.typ {

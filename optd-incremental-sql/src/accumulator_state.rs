@@ -95,6 +95,8 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
     Ok(true)
 }
 
+/// One group's cardinality, mergeable accumulator states and last emitted row.
+/// Cardinality controls group removal; it differs from COUNT over nullable values.
 #[derive(Clone, Debug)]
 struct Entry {
     rows: i64,
@@ -103,6 +105,10 @@ struct Entry {
     output: Vec<ScalarValue>,
 }
 
+/// Exact retractable aggregates, retaining states rather than historical input rows.
+///
+/// Candidates share untouched entries through `Arc`; cloning still copies the
+/// complete map directory. Only changed groups rebuild accumulator values.
 #[derive(Clone, Debug)]
 pub(crate) struct AccumulatorState {
     schema: SchemaRef,
@@ -112,6 +118,9 @@ pub(crate) struct AccumulatorState {
 }
 
 impl AccumulatorState {
+    /// Bootstrap a planner-qualified aggregate from its complete positive input.
+    /// The planner must apply `eligible` first; this is not a general aggregate
+    /// interpreter. A global aggregate retains its output even for empty input.
     pub(crate) fn new(
         ctx: &SessionContext,
         operator: &RelationOperator,
@@ -216,6 +225,12 @@ impl AccumulatorState {
         Bag::from_batch(&RecordBatch::try_new(self.schema.clone(), columns)?)
     }
 
+    /// Return an isolated candidate, signed output difference and local work counts.
+    ///
+    /// Retract old contributions before adding new ones. Callers must supply valid
+    /// full-row changes: without historical inputs, this state cannot establish
+    /// that each retracted row existed. Any error leaves `self` unchanged.
+    /// Grouped empty states disappear; the empty global aggregate remains present.
     pub(crate) fn update(
         &self,
         positive: &RecordBatch,

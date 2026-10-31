@@ -21,12 +21,14 @@ const FORMAT: &str = "optd-sql-database/1";
 const MAX_HISTORY: usize = 100_000;
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
+/// Base-table identity and contents at one database epoch.
 #[derive(Clone)]
 pub(super) struct TableData {
     pub id: u64,
     pub batch: RecordBatch,
 }
 
+/// Persisted view definition and output; execution indexes are rebuilt on open.
 #[derive(Clone)]
 pub(super) struct ViewData {
     pub id: u64,
@@ -35,6 +37,10 @@ pub(super) struct ViewData {
     pub output: RecordBatch,
 }
 
+/// Tables, view outputs and output deltas published together under one root.
+///
+/// Deltas belong only to this epoch. Cloning shares Arrow buffers while isolating
+/// catalog mutations; it does not eliminate later table scans or materialization.
 #[derive(Clone, Default)]
 pub(super) struct DatabaseSnapshot {
     pub epoch: u64,
@@ -44,6 +50,7 @@ pub(super) struct DatabaseSnapshot {
     pub deltas: BTreeMap<String, RecordBatch>,
 }
 
+/// Persisted request identity and original outcome for exact identified-write retries.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Receipt {
@@ -95,6 +102,8 @@ struct Manifest {
     receipt: Option<Receipt>,
 }
 
+/// Exclusive host-local writer; `CURRENT` alone determines committed visibility.
+/// Unreferenced attempt directories are never treated as committed epochs.
 pub(super) struct DatabaseStore {
     root: PathBuf,
     _lock: File,
@@ -104,6 +113,7 @@ pub(super) struct DatabaseStore {
 }
 
 impl DatabaseStore {
+    /// Acquire the writer lock and validate the current snapshot and metadata lineage.
     pub fn open(path: &Path) -> Result<Self> {
         let dirs = CheckpointDirectories::create(path)?;
         let root = dirs.root.clone();
@@ -143,6 +153,7 @@ impl DatabaseStore {
         Ok(out)
     }
 
+    /// Clone catalog state while retaining shared immutable Arrow buffers.
     pub fn snapshot(&self) -> DatabaseSnapshot {
         self.snapshot.clone()
     }
@@ -269,6 +280,7 @@ impl DatabaseStore {
         Ok(result)
     }
 
+    /// Search committed metadata for an exact retry; reject ID reuse with other SQL.
     pub fn receipt(&self, id: &str, fingerprint: &str) -> Result<Option<CommitReport>> {
         for m in self.manifests()?.into_iter().rev() {
             if let Some(r) = m.receipt {
@@ -283,6 +295,7 @@ impl DatabaseStore {
         Ok(None)
     }
 
+    /// Materialize every committed snapshot in epoch order, within the lineage budget.
     pub fn history(&self) -> Result<Vec<DatabaseSnapshot>> {
         self.manifests()?
             .iter()
@@ -290,6 +303,15 @@ impl DatabaseStore {
             .collect()
     }
 
+    /// Publish exactly the successor epoch, checking that `CURRENT` still matches.
+    ///
+    /// Payloads and manifest become durable before atomic pointer replacement;
+    /// observers run after the files barrier and after the pointer durability barrier.
+    /// The in-memory head advances only after both callbacks succeed.
+    ///
+    /// An IO or observer error can occur after `CURRENT` was replaced. Failure
+    /// therefore does not imply rollback: the caller must fence the session and
+    /// reopen before further use, even if this store's snapshot still looks old.
     pub fn commit(
         &mut self,
         next: DatabaseSnapshot,

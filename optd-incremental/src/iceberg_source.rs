@@ -25,9 +25,17 @@ pub enum IcebergSourceError {
     /// An Iceberg call failed.
     Iceberg(iceberg::Error),
     /// A column has a type this adapter does not map to [`Value`].
-    UnsupportedType { column: String, data_type: String },
+    UnsupportedType {
+        /// Column whose Iceberg type cannot be represented by this adapter.
+        column: String,
+        /// Diagnostic rendering of the unsupported source type.
+        data_type: String,
+    },
     /// A snapshot the timeline refers to is gone (expired from metadata).
-    MissingSnapshot { snapshot_id: i64 },
+    MissingSnapshot {
+        /// Required Iceberg snapshot that is absent from retained metadata.
+        snapshot_id: i64,
+    },
     /// Checkpoint is incompatible with this observation.
     InvalidCheckpoint,
     /// Checked row arithmetic or metadata encoding failed.

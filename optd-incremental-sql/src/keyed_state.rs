@@ -14,6 +14,7 @@ use crate::{Error, Result};
 
 type Key = Vec<u8>;
 
+/// Full-row multiplicities plus the row sequence needed by snapshot evaluation.
 #[derive(Clone, Debug)]
 struct Bucket {
     bag: Bag,
@@ -21,6 +22,11 @@ struct Bucket {
     batch: RecordBatch,
 }
 
+/// Complete per-key input buckets for joins or partitioned windows.
+///
+/// Prepared candidates share untouched bucket payloads through `Arc`; cloning
+/// still copies the map directories. Window output buckets preserve the actual
+/// committed result, since reevaluating peers could choose a different row order.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyedState {
     schemas: Vec<SchemaRef>,
@@ -30,6 +36,8 @@ pub(crate) struct KeyedState {
     outputs: Option<(SchemaRef, BTreeMap<Key, Arc<Bag>>)>,
 }
 
+/// Isolated index candidate and the union of changed keys across all input ports.
+/// Lookup permissions come from the verified plan's Before/After requirements.
 pub(crate) struct KeyedUpdate<'a> {
     pub(crate) state: KeyedState,
     keys: BTreeSet<Key>,
@@ -107,6 +115,8 @@ fn merge(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<RecordBatch> {
 }
 
 impl KeyedState {
+    /// Bootstrap complete input indexes from aligned row/key batches.
+    /// Optional window output must have exactly the input's partition keys.
     pub(crate) fn new(
         inputs: &[RecordBatch],
         keys: &[RecordBatch],
@@ -149,10 +159,16 @@ impl KeyedState {
         })
     }
 
+    /// Count indexed keys per input port, rather than rows or bytes read.
     pub(crate) fn totals(&self) -> Vec<usize> {
         self.inputs.iter().map(BTreeMap::len).collect()
     }
 
+    /// Consolidate signed changes and replace only buckets whose contents change.
+    ///
+    /// Every row batch needs aligned keys of the fixed index type. Invalid schemas
+    /// or retractions fail without changing the installed state. Snapshot rows are
+    /// materialized later by lookups, restricted to the union of touched keys.
     pub(crate) fn prepare(
         &self,
         positives: &[RecordBatch],
@@ -226,6 +242,7 @@ impl KeyedState {
 }
 
 impl KeyedUpdate<'_> {
+    /// Count affected keys across all ports, including keys whose bucket disappeared.
     pub(crate) fn touched(&self) -> usize {
         self.keys.len()
     }
@@ -280,6 +297,10 @@ impl KeyedUpdate<'_> {
     }
 
     /// Follow the executed custom program, rather than silently replacing its output.
+    ///
+    /// Only affected partitions may change. Validation can fail after earlier
+    /// candidate buckets changed; discard this candidate on error. Installed state
+    /// remains untouched because this update owns its separate map directories.
     pub(crate) fn apply_window_delta(
         &mut self,
         pos: &RecordBatch,

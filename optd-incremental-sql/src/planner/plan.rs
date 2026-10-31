@@ -163,17 +163,28 @@ pub enum Operation {
         schema: SchemaRef,
     },
     /// Signed changes of an explicitly bound upstream relation.
-    DeltaRead { input: usize, schema: SchemaRef },
+    DeltaRead {
+        /// Global upstream relation ID, not a local operator port.
+        input: usize,
+        /// Complete typed upstream output schema.
+        schema: SchemaRef,
+    },
     /// An immutable committed/candidate upstream relation.
     SnapshotRead {
+        /// Global upstream relation ID.
         input: usize,
+        /// Committed or candidate relation to read.
         version: SnapshotVersion,
+        /// Complete typed upstream output schema.
         schema: SchemaRef,
     },
     /// Raw named-source changes or its candidate snapshot.
     SourceRead {
+        /// Bound base-table name in the execution context.
         name: String,
+        /// True reads signed changes; false reads the positive candidate snapshot.
         delta: bool,
+        /// Raw source schema before scan projection or filtering.
         schema: SchemaRef,
     },
     /// A typed zero signed relation.
@@ -184,7 +195,9 @@ pub enum Operation {
     Negate,
     /// Apply a self-contained typed relation operator.
     Apply {
+        /// Typed expressions and placeholder input schemas.
         operator: RelationOperator,
+        /// Whether inputs are positive, signed linear or signed bilinear relations.
         mode: ApplyMode,
     },
     /// Extract keys from positive and negative input changes, preserving row alignment.
@@ -193,27 +206,50 @@ pub enum Operation {
     PrepareIndex(IndexSpec),
     /// Read one complete affected input port from a prepared index version.
     IndexLookup {
+        /// Declared keyed-state slot prepared earlier in this program.
         state: usize,
+        /// Input port within that state, in `IndexSpec::inputs` order.
         port: usize,
+        /// Committed or candidate buckets over the same affected-key closure.
         version: SnapshotVersion,
+        /// Complete input schema, including columns that are not index keys.
         schema: SchemaRef,
     },
     /// Read actual committed window output; never rerun tie-sensitive Before.
-    CachedOutput { state: usize, schema: SchemaRef },
+    CachedOutput {
+        /// Keyed-state slot containing committed window output buckets.
+        state: usize,
+        /// Window output schema.
+        schema: SchemaRef,
+    },
     /// Evaluate a scoped snapshot with explicit inputs and work accounting.
     EvaluateSnapshot {
+        /// State slot that owns the affected-key closure and its work accounting.
         state: usize,
+        /// Snapshot version of the supplied scoped inputs.
         version: SnapshotVersion,
+        /// Original typed operator evaluated only over those inputs.
         operator: RelationOperator,
     },
     /// Complete candidate input/output index state using the executed signed output.
     CompleteIndex(IndexSpec),
     /// Prepare the indexed affected groups from projected signed changes.
-    PrepareGroups { state: usize },
+    PrepareGroups {
+        /// Declared group-state slot to stage without mutating committed buckets.
+        state: usize,
+    },
     /// Read complete surviving inputs of the affected groups.
-    GroupLookup { state: usize, schema: SchemaRef },
+    GroupLookup {
+        /// Prepared group-state slot whose affected inputs are read.
+        state: usize,
+        /// Aggregate input schema, rather than its output or key-only schema.
+        schema: SchemaRef,
+    },
     /// Diff aggregate output against committed groups and complete candidate state.
-    CompleteGroups { state: usize },
+    CompleteGroups {
+        /// Prepared group-state slot completed with the supplied aggregate output.
+        state: usize,
+    },
     /// Difference against Before while retaining After's physical row sequence.
     Replace,
 }
@@ -225,9 +261,13 @@ pub enum IncrementalNode {
     Logical(Operation),
     /// A snapshot request expanded by an Optd transformation rule.
     ScopedSnapshot {
+        /// Typed operator whose output is requested over the affected closure.
         operator: RelationOperator,
+        /// Proven join-key or window-partition dependency closure.
         scope: KeyScope,
+        /// Committed or candidate snapshot of that closure.
         version: SnapshotVersion,
+        /// State slot providing scoped inputs or cached committed output.
         state: usize,
     },
     /// Selected physical operation; the runtime accepts only these nodes.

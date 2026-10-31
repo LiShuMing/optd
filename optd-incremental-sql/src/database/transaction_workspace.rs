@@ -10,14 +10,24 @@ use crate::{Error, PreparedSqlRefresh, Result, SqlView};
 use datafusion::sql::sqlparser::ast::Statement;
 use std::collections::BTreeMap;
 
+/// Private table snapshot and consolidated changes for one pending transaction.
+///
+/// Statements read preceding writes in this workspace. View engines remain
+/// committed until every affected view has prepared successfully and the session
+/// publishes one database root. Dropping the workspace publishes nothing.
 pub(super) struct TransactionWorkspace {
+    /// Candidate tables and catalog; view outputs remain committed until prepare.
     pub(super) snapshot: DatabaseSnapshot,
+    /// Net signed full-row changes per table across all staged statements.
     pub(super) changes: BTreeMap<String, Bag>,
+    /// Statement work in execution order, even when later changes cancel earlier ones.
     pub(super) work: Vec<DmlWork>,
+    /// A statement failed; the session admits only ROLLBACK for this workspace.
     pub(super) aborted: bool,
 }
 
 impl TransactionWorkspace {
+    /// Own a candidate snapshot, clearing output deltas from the previous epoch.
     pub(super) fn new(mut snapshot: DatabaseSnapshot) -> Self {
         snapshot.deltas.clear();
         Self {
@@ -32,12 +42,19 @@ impl TransactionWorkspace {
 /// Fully prepared state kept private until one database root is published.
 #[must_use = "prepared database changes must be published and installed together"]
 pub(super) struct PreparedCommit {
+    /// Outcome persisted with the request receipt, when the write has an ID.
     pub(super) report: CommitReport,
+    /// View-state candidates to acknowledge only after publishing the root.
     pub(super) candidates: BTreeMap<String, PreparedSqlRefresh>,
+    /// Complete next-epoch tables, view outputs and output deltas to publish together.
     pub(super) snapshot: DatabaseSnapshot,
 }
 
 impl TransactionWorkspace {
+    /// Stage a statement and consolidate its changes with earlier table changes.
+    ///
+    /// All fallible compilation and consolidation precede mutation. On error the
+    /// workspace is unchanged; the session decides whether to abort the transaction.
     pub(super) async fn apply_dml(
         &mut self,
         stmt: &Statement,
@@ -60,6 +77,11 @@ impl TransactionWorkspace {
         Ok(())
     }
 
+    /// Consume the workspace and prepare affected views at exactly the next epoch.
+    ///
+    /// Each view sees the net table changes across the whole transaction. Engines
+    /// are borrowed: any failure drops all candidates without publishing tables,
+    /// outputs or view state. Success still requires publication and installation.
     pub(super) async fn prepare(
         mut self,
         committed_epoch: u64,

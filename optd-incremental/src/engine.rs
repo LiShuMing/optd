@@ -25,10 +25,18 @@ use crate::plan::{children_of, delta, IncNodeType, IncPlanNode};
 use crate::rules::{has_unresolved_delta, rewrite, RewriteError};
 use crate::source::DeltaSource;
 
+/// Rejection while loading, preparing or acknowledging a maintained view.
+///
+/// Preparation errors leave committed contents and watermarks unchanged. A
+/// failed acknowledgement rejects the candidate without advancing the view;
+/// durable publication, if any, is the caller's separate responsibility.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RefreshError {
     /// The feed cannot support this view. The caller must rebuild.
-    InsufficientCapabilities { missing: &'static str },
+    InsufficientCapabilities {
+        /// Required feed capability that was not advertised.
+        missing: &'static str,
+    },
     /// The rules could not resolve a marker; rebuilding is the only correct path.
     CannotMaintain(RewriteError),
     /// The plan is evaluable but its shape is one this milestone cannot maintain
@@ -36,7 +44,10 @@ pub enum RefreshError {
     UnsupportedShape(String),
     /// The caller's table list omits a table the plan reads. A caller error, not
     /// a property of the plan; tracked separately so it can be reported as one.
-    TableListMismatch { missing: Vec<TableId> },
+    TableListMismatch {
+        /// Distinct plan tables absent from the caller's refresh table list.
+        missing: Vec<TableId>,
+    },
     /// The plan is not evaluable.
     Eval(String),
     /// Prepared refresh belongs to another view or no longer follows this state.
@@ -283,10 +294,12 @@ impl View {
         Ok(true)
     }
 
+    /// Current committed output; preparing a candidate does not change it.
     pub fn contents(&self) -> &Multiset {
         &self.contents
     }
 
+    /// Acknowledged source positions corresponding to the committed contents.
     pub fn watermarks(&self) -> &BTreeMap<TableId, Position> {
         &self.watermarks
     }

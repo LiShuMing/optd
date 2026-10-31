@@ -27,6 +27,8 @@
 //! `Sort`/`Limit` and subqueries return [`rules::RewriteError`] and are expected
 //! to be rebuilt, which is the documented policy rather than a gap.
 
+#![deny(missing_docs)]
+
 pub mod cdc;
 pub mod change;
 #[cfg(feature = "iceberg")]

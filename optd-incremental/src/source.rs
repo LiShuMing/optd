@@ -80,6 +80,7 @@ pub struct InMemorySource {
 }
 
 impl InMemorySource {
+    /// Start at position zero with empty tables and the advertised feed capabilities.
     pub fn new(capabilities: Capabilities) -> Self {
         Self {
             capabilities,

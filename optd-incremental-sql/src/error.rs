@@ -1,6 +1,9 @@
 //! Typed failures shared by SQL planning, maintenance and recovery.
 
-/// Failure before a candidate can become visible or a checkpoint is accepted.
+/// Failure during SQL planning, maintenance, publication or recovery.
+///
+/// A publication error can occur after the durable root changed; it does not
+/// guarantee rollback. The session must be reopened to resolve that outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Rejected SQL, input, state transition or resource requirement.

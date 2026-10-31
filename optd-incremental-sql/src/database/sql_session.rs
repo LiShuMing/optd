@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+/// Caller retry key plus the digest of canonicalized SQL used to detect ID reuse.
 struct RequestIdentity {
     id: String,
     fingerprint: String,
@@ -25,6 +26,9 @@ struct RequestIdentity {
 ///
 /// DDL is autocommit-only. Explicit transactions provide base-table read-your-writes;
 /// materialized-view reads within those transactions are rejected rather than stale.
+/// A publication or installation error fences the session: drop and reopen it to
+/// resolve the committed epoch before issuing more SQL. This is a host-local
+/// single-writer interface, not a distributed transaction coordinator.
 pub struct SqlSession {
     store: DatabaseStore,
     committed: DatabaseSnapshot,
@@ -35,6 +39,10 @@ pub struct SqlSession {
 
 impl SqlSession {
     /// Open a database, acquire its exclusive writer lock and reconstruct all views.
+    ///
+    /// Rebuilds strict incremental plans and derived state from committed base
+    /// tables, then checks outputs and dependencies against the durable catalog.
+    /// Recovery includes full reads and computation; it is not a delta-only path.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let store = DatabaseStore::open(path.as_ref())?;
         let committed = store.snapshot();
@@ -87,11 +95,19 @@ impl SqlSession {
     }
 
     /// Execute exactly one SQL statement.
+    ///
+    /// A statement error aborts an active explicit transaction until ROLLBACK.
+    /// Autocommit/COMMIT may fail after durable publication; a fenced session
+    /// must be dropped and reopened rather than treated as a rolled-back write.
     pub async fn execute(&mut self, statement: &str) -> Result<SqlResponse> {
         self.execute_observed(statement, |_| Ok(())).await
     }
 
     /// Execute with deterministic callbacks at actual durable publication barriers.
+    ///
+    /// Callbacks run synchronously and may return an error for fault injection.
+    /// Even a callback error after pointer publication fences the session; no
+    /// compensating rollback is attempted. See [`Self::execute`] for transaction errors.
     pub async fn execute_observed(
         &mut self,
         statement: &str,
@@ -108,6 +124,10 @@ impl SqlSession {
     }
 
     /// Execute a SQL script, preserving ordinary statement/autocommit boundaries.
+    ///
+    /// Parses the whole script first, then stops at the first execution error.
+    /// Earlier autocommit statements remain committed; the script is atomic only
+    /// when its statements use an explicit transaction that successfully commits.
     pub async fn execute_script(&mut self, script: &str) -> Result<Vec<SqlResponse>> {
         self.ensure_ready()?;
         let statements = match sql::statements(script) {
@@ -129,12 +149,20 @@ impl SqlSession {
     /// Execute one autocommit write with a persistent caller-supplied request ID.
     ///
     /// An exact retry returns the original commit outcome, even after later commits.
+    /// IDs must contain 1..256 bytes and are bound to canonicalized statement text.
+    /// Reusing an ID with other SQL is rejected. Only autocommit writes are admitted.
+    /// After uncertain publication, reopen and retry with the same ID to resolve
+    /// whether the original request committed without applying it twice.
     pub async fn execute_request(&mut self, id: &str, statement: &str) -> Result<SqlResponse> {
         self.execute_request_observed(id, statement, |_| Ok(()))
             .await
     }
 
     /// Identified autocommit write with publication-barrier instrumentation.
+    ///
+    /// An already committed retry returns its stored outcome without executing
+    /// SQL or invoking callbacks. New writes follow the error and fencing contract
+    /// of [`Self::execute_observed`].
     pub async fn execute_request_observed(
         &mut self,
         id: &str,
@@ -173,12 +201,20 @@ impl SqlSession {
     /// Execute a DML-only transaction identified by the complete SQL script.
     ///
     /// This API makes ambiguous COMMIT retries resolvable without replaying writes.
+    /// The script contains only DML, without BEGIN/COMMIT; all statements share
+    /// one workspace and publish once. Base tables provide read-your-writes and
+    /// materialized-view reads are rejected. IDs follow [`Self::execute_request`],
+    /// binding the whole canonicalized script rather than an individual statement.
+    /// Preparation errors publish nothing; publication errors require reopening.
     pub async fn execute_transaction(&mut self, id: &str, script: &str) -> Result<SqlResponse> {
         self.execute_transaction_observed(id, script, |_| Ok(()))
             .await
     }
 
     /// Identified DML transaction with durable publication-barrier instrumentation.
+    ///
+    /// Stored retries skip execution and callbacks. New writes follow
+    /// [`Self::execute_transaction`] and [`Self::execute_observed`].
     pub async fn execute_transaction_observed(
         &mut self,
         id: &str,
@@ -227,6 +263,9 @@ impl SqlSession {
     }
 
     /// Replay every committed view delta and compare each prefix to its stored output.
+    ///
+    /// Reads historical snapshots and payloads, so work grows with retained history.
+    /// View identities distinguish a recreated view from a dropped view of the same name.
     pub fn verify_output_history(&self) -> Result<()> {
         self.ensure_ready()?;
         let mut states = BTreeMap::<u64, Bag>::new();
@@ -472,6 +511,8 @@ impl SqlSession {
         Ok(SqlResponse::committed(response, false))
     }
 
+    /// Prepare every affected view before publishing once, then install candidates.
+    /// Preparation failure leaves committed state intact; later errors fence it.
     async fn commit_workspace(
         &mut self,
         tx: TransactionWorkspace,
@@ -488,6 +529,8 @@ impl SqlSession {
         Ok(SqlResponse::committed(report, false))
     }
 
+    /// Publish the shared root while keeping the session fenced until installation.
+    /// A failure may already be durable; never clear the fence on the error path.
     fn publish(
         &mut self,
         next: DatabaseSnapshot,
@@ -507,6 +550,9 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Acknowledge candidates only after their outputs have become durable.
+    /// Partial installation must keep the fence set so reopening rebuilds all views
+    /// from the authoritative root instead of exposing mixed in-memory revisions.
     fn install(&mut self, candidates: BTreeMap<String, PreparedSqlRefresh>) -> Result<()> {
         for (name, candidate) in candidates {
             // Session ownership and &mut self exclude another acknowledgement.
