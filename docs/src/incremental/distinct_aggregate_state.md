@@ -1,6 +1,6 @@
 # Reference-counted DISTINCT aggregates
 
-**Status:** accepted · 2026-10-31; local source/design review, implementation pending
+**Status:** accepted · 2026-10-31; implementation verified locally, evidence in ROADMAP R03b
 **Scope:** R03b single-argument builtin COUNT/SUM/AVG DISTINCT over already qualified
 exact types, mixed with ordinary aggregates and MIN/MAX. No dependency, persisted
 format, grouping-set, floating arithmetic or multi-argument COUNT contract change.
@@ -125,3 +125,22 @@ versus duplicate counts, NULL exclusion, native empty result types, candidate
 isolation and preserving fallback for unqualified types/modifiers. No dependency,
 format or numerical-policy change is needed. This review accepts implementation
 scope; all new implementation and witness acceptance remains unverified.
+
+
+## 10. Implementation and observed verification
+
+The existing aggregate cell now has an exclusive DISTINCT representation containing
+counted value roots and native state. `OrderedValues::apply_membership` returns
+only entering/leaving values; ordinary extrema skip membership collection. Empty
+crossing arrays keep the argument's exact Arrow type. Normalized key-only DISTINCT
+uses existing group row counts and the same accumulator rule. `distinct_work` is
+an optional separate diagnostic, and canonical identity checks cover all five
+supported builtins. No derived-state persistence or format change is introduced.
+
+ROADMAP R03b records RED/green selection, independent set/value and complete SQL
+oracles, fixed-change scaling and cancellation assertions, SQL retry/reopen/history,
+247 default / 261 Iceberg passes, 41 report-tool passes, private rustdoc, mdBook and
+a fresh frozen-binary Q28 strict three-round witness with observed zero crossings.
+Multi-argument/unqualified types/modifiers retain their explicit boundaries. These
+local results do not certify all TPC queries, bounded recovery/checkpoint IO or
+controlled performance.

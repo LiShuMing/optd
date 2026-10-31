@@ -389,7 +389,7 @@ async fn distinct_is_indexed_membership_including_null_and_final_delete() {
     assert!(view
         .strategies()
         .iter()
-        .any(|n| n.strategy == Strategy::ChangedGroupRecompute));
+        .any(|n| n.strategy == Strategy::AccumulatorDelta));
     assert!(!view
         .strategies()
         .iter()
@@ -411,8 +411,8 @@ async fn distinct_is_indexed_membership_including_null_and_final_delete() {
         assert!(stats
             .nodes
             .iter()
-            .filter_map(|n| n.group_work.as_ref())
-            .all(|w| w.touched_groups <= 2 && w.aggregate_input_rows <= 3));
+            .filter_map(|n| n.accumulator_work.as_ref())
+            .all(|w| w.touched_groups <= 2 && w.historical_input_rows == 0));
     }
 }
 

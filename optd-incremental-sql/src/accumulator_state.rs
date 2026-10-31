@@ -14,14 +14,14 @@ use datafusion::prelude::SessionContext;
 
 use crate::bag::Bag;
 use crate::group_state::{encode_keys, supported_key, KeyPolicy};
-use crate::metrics::{AccumulatorWork, ValueIndexWork};
+use crate::metrics::AccumulatorWork;
 use crate::planner::plan::RelationOperator;
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
 mod aggregate_cell;
 mod value_index;
-use aggregate_cell::{AggregateSpec, Cell};
+use aggregate_cell::{AggregateSpec, ArgumentMode, Cell, CellWork};
 
 type Key = Vec<u8>;
 type PartitionRows = BTreeMap<Key, (Vec<ScalarValue>, Vec<u32>)>;
@@ -38,7 +38,7 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
     let LogicalPlan::Aggregate(agg) = plan else {
         return Ok(false);
     };
-    if agg.aggr_expr.is_empty() {
+    if agg.aggr_expr.is_empty() && agg.group_expr.is_empty() {
         return Ok(false);
     }
     for key in &agg.group_expr {
@@ -60,7 +60,6 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
         };
         if !matches!(f.func.name(), "count" | "sum" | "avg" | "min" | "max")
             || session.aggregate_functions().get(f.func.name()) != Some(&f.func)
-            || f.params.distinct
             || f.params.filter.is_some()
             || !f.params.order_by.is_empty()
             || f.params.null_treatment.is_some()
@@ -68,17 +67,29 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
         {
             return Ok(false);
         }
+        let builtin = match f.func.name() {
+            "count" => datafusion::functions_aggregate::count::count_udaf(),
+            "sum" => datafusion::functions_aggregate::sum::sum_udaf(),
+            "avg" => datafusion::functions_aggregate::average::avg_udaf(),
+            "min" => datafusion::functions_aggregate::min_max::min_udaf(),
+            "max" => datafusion::functions_aggregate::min_max::max_udaf(),
+            _ => return Ok(false),
+        };
+        if f.func != builtin {
+            return Ok(false);
+        }
+        if f.params.distinct
+            && (f.params.args.len() != 1
+                || !supported_key(
+                    &f.params.args[0].get_type(agg.input.schema())?,
+                    KeyPolicy {
+                        binary_strings: true,
+                    },
+                ))
+        {
+            return Ok(false);
+        }
         if matches!(f.func.name(), "min" | "max") {
-            // The registry can contain a same-name user function. Extrema depend on
-            // the pinned builtin's ordering and NULL/type semantics, not its name.
-            let builtin = if f.func.name() == "min" {
-                datafusion::functions_aggregate::min_max::min_udaf()
-            } else {
-                datafusion::functions_aggregate::min_max::max_udaf()
-            };
-            if f.func != builtin {
-                return Ok(false);
-            }
             if f.params.args.len() != 1
                 || !supported_key(
                     &f.params.args[0].get_type(agg.input.schema())?,
@@ -183,7 +194,14 @@ impl AccumulatorState {
                 .schema(input.schema())
                 .alias(operator.schema().field(agg.group_expr.len() + i).name())
                 .build()?;
-            functions.push(AggregateSpec::new(fun, f.func.name())?);
+            // The native cell receives ordinary values or DISTINCT zero crossings.
+            // Its expression deliberately keeps the builder's DISTINCT=false default.
+            let mode = if f.params.distinct {
+                ArgumentMode::Distinct(f.params.args[0].get_type(agg.input.schema())?)
+            } else {
+                ArgumentMode::All
+            };
+            functions.push(AggregateSpec::new(fun, f.func.name(), mode)?);
         }
         let mut state = Self {
             schema: operator.schema(),
@@ -294,7 +312,7 @@ impl AccumulatorState {
         let pa = arguments(positive)?;
         let na = arguments(negative)?;
         let touched = changes.len();
-        let mut value_index_work = ValueIndexWork::default();
+        let mut cell_work = CellWork::default();
         for (key, (values, plus, minus)) in changes {
             let previous = self.entries.get(&key);
             if let Some(entry) = previous {
@@ -331,7 +349,7 @@ impl AccumulatorState {
                     &mut entry.states[i],
                     &select(&pa[i], &plus)?,
                     &select(&na[i], &minus)?,
-                    &mut value_index_work,
+                    &mut cell_work,
                 )?);
             }
             new.push(entry.output.clone());
@@ -353,7 +371,12 @@ impl AccumulatorState {
                 .functions
                 .iter()
                 .any(AggregateSpec::is_indexed)
-                .then_some(value_index_work),
+                .then_some(cell_work.extrema),
+            distinct_work: self
+                .functions
+                .iter()
+                .any(AggregateSpec::is_distinct)
+                .then_some(cell_work.distinct),
         };
         Ok((next, delta, work))
     }
@@ -365,7 +388,7 @@ mod tests {
     use datafusion::arrow::array::Int64Array;
 
     #[tokio::test]
-    async fn registered_same_name_user_extrema_do_not_inherit_builtin_eligibility() {
+    async fn registered_same_name_user_aggregates_do_not_inherit_builtin_eligibility() {
         use datafusion::logical_expr::{create_udaf, Volatility};
 
         let ctx = SessionContext::new();
@@ -378,7 +401,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        for name in ["min", "max"] {
+        for name in ["count", "sum", "avg", "min", "max"] {
             ctx.register_udaf(create_udaf(
                 name,
                 vec![DataType::Int64],
@@ -399,7 +422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unoptimized_distinct_and_modifier_nodes_are_not_admitted_as_plain_accumulators() {
+    async fn unoptimized_modifiers_and_unqualified_distinct_types_are_not_admitted() {
         let ctx = SessionContext::new();
         ctx.register_batch(
             "t",
@@ -411,9 +434,9 @@ mod tests {
         )
         .unwrap();
         for sql in [
-            "SELECT min(DISTINCT v) FROM t",
+            "SELECT count(DISTINCT CAST(v AS DOUBLE)) FROM t",
             "SELECT min(v) FILTER (WHERE v > 0) FROM t",
-            "SELECT count(DISTINCT v), max(v) FROM t",
+            "SELECT avg(DISTINCT v), max(v) FROM t",
         ] {
             // Inspect original nodes: the SQL optimizer may safely remove redundant
             // DISTINCT on MIN or split COUNT DISTINCT into multiple ordinary nodes.

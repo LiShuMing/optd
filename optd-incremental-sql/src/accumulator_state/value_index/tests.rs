@@ -145,3 +145,60 @@ fn overflow_negative_counts_and_corrupt_identity_fail_without_mutating_installed
         .is_err());
     Ok(())
 }
+
+#[test]
+fn membership_returns_exact_zero_crossings_and_skips_projected_cancellation() -> Result<()> {
+    let converter = converter();
+    let mut values = OrderedValues::default();
+    let mut model = BTreeMap::<i64, usize>::new();
+    let mut seed = 131071u64;
+    for step in 0..180 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let value = (seed % 17) as i64 - 8;
+        let remove = model.contains_key(&value) && step % 3 != 0;
+        let (positive, negative) = if step % 11 == 0 {
+            (vec![Some(value), None], vec![Some(value), None])
+        } else if remove {
+            (vec![None], vec![Some(value)])
+        } else {
+            (vec![Some(value), Some(value)], vec![None])
+        };
+        let before = model.clone();
+        for value in positive.iter().flatten() {
+            *model.entry(*value).or_default() += 1;
+        }
+        for value in negative.iter().flatten() {
+            let count = model.get_mut(value).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                model.remove(value);
+            }
+        }
+        let changes = values.apply_membership(
+            &converter,
+            &array(positive),
+            &array(negative),
+            &mut ValueIndexWork::default(),
+        )?;
+        let entered = model
+            .keys()
+            .filter(|v| !before.contains_key(*v))
+            .map(|v| ScalarValue::Int64(Some(*v)))
+            .collect::<Vec<_>>();
+        let left = before
+            .keys()
+            .filter(|v| !model.contains_key(*v))
+            .map(|v| ScalarValue::Int64(Some(*v)))
+            .collect::<Vec<_>>();
+        assert_eq!(changes.entering, entered);
+        assert_eq!(changes.leaving, left);
+        assert_eq!(values.values.len(), model.len());
+        for (_, entry) in values.values.iter() {
+            let ScalarValue::Int64(Some(value)) = entry.value else {
+                panic!("integer model");
+            };
+            assert_eq!(entry.count, model[&value] as i64);
+        }
+    }
+    Ok(())
+}

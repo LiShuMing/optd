@@ -1,4 +1,4 @@
-//! Arbitrary-deletion extrema retain counted values, never historical complete rows.
+//! Extrema and DISTINCT retain counted values, never historical complete rows.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,6 +32,13 @@ struct ValueDelta {
     weight: i64,
 }
 
+/// Non-NULL values entering or leaving a DISTINCT aggregate's native input.
+#[derive(Default)]
+pub(super) struct MembershipChanges {
+    pub(super) entering: Vec<ScalarValue>,
+    pub(super) leaving: Vec<ScalarValue>,
+}
+
 /// Cloning shares immutable value branches and resets candidate-local copy work.
 #[derive(Clone, Debug, Default)]
 pub(super) struct OrderedValues {
@@ -47,6 +54,31 @@ impl OrderedValues {
         positive: &ArrayRef,
         negative: &ArrayRef,
         work: &mut ValueIndexWork,
+    ) -> Result<()> {
+        self.update(converter, positive, negative, work, None)
+    }
+
+    /// Update counts and return only native membership zero crossings.
+    pub(super) fn apply_membership(
+        &mut self,
+        converter: &RowConverter,
+        positive: &ArrayRef,
+        negative: &ArrayRef,
+        work: &mut ValueIndexWork,
+    ) -> Result<MembershipChanges> {
+        let mut membership = MembershipChanges::default();
+        self.update(converter, positive, negative, work, Some(&mut membership))?;
+        Ok(membership)
+    }
+
+    /// Consolidate and validate counts once, optionally observing membership changes.
+    fn update(
+        &mut self,
+        converter: &RowConverter,
+        positive: &ArrayRef,
+        negative: &ArrayRef,
+        work: &mut ValueIndexWork,
+        mut membership: Option<&mut MembershipChanges>,
     ) -> Result<()> {
         let mut delta = BTreeMap::<Vec<u8>, ValueDelta>::new();
         for (array, weight) in [(positive, 1i64), (negative, -1i64)] {
@@ -71,7 +103,7 @@ impl OrderedValues {
                     });
                 if entry.value != value {
                     return Err(invalid(
-                        "extremum sort encoding does not preserve scalar identity",
+                        "counted value sort encoding does not preserve scalar identity",
                     ));
                 }
                 entry.weight = entry.weight.checked_add(weight).ok_or(Error::Overflow)?;
@@ -86,16 +118,20 @@ impl OrderedValues {
             let previous = self.values.get(&key);
             if previous.is_some_and(|old| old.value != delta.value) {
                 return Err(invalid(
-                    "extremum sort encoding differs from retained scalar identity",
+                    "counted value sort encoding differs from retained scalar identity",
                 ));
             }
-            let next = previous
-                .map(|old| old.count)
-                .unwrap_or_default()
-                .checked_add(delta.weight)
-                .ok_or(Error::Overflow)?;
+            let old_count = previous.map(|old| old.count).unwrap_or_default();
+            let next = old_count.checked_add(delta.weight).ok_or(Error::Overflow)?;
             if next < 0 {
-                return Err(invalid("negative extremum value reference count"));
+                return Err(invalid("negative value reference count"));
+            }
+            if let Some(changes) = &mut membership {
+                if old_count == 0 && next > 0 {
+                    changes.entering.push(delta.value.clone());
+                } else if old_count > 0 && next == 0 {
+                    changes.leaving.push(delta.value.clone());
+                }
             }
             if next == 0 {
                 self.values.remove(&key);

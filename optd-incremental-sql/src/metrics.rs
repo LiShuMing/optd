@@ -43,6 +43,9 @@ pub struct AccumulatorWork {
     /// Actual indexed MIN/MAX work; absent for native-only nodes and older reports.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_index_work: Option<ValueIndexWork>,
+    /// Actual DISTINCT function membership work; absent for ordinary/older nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_work: Option<DistinctWork>,
 }
 
 /// Operator-local ordered-value maintenance, summed across touched groups/functions.
@@ -57,6 +60,22 @@ pub struct ValueIndexWork {
     pub directory_entries_copied: usize,
     /// First/last entry lookups, including empty value indexes.
     pub extremum_lookups: usize,
+}
+
+/// DISTINCT argument counts and actual inputs supplied to native accumulators.
+/// Normalized key-only DISTINCT uses group row counts and reports AccumulatorWork.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DistinctWork {
+    /// Argument rows consumed by DISTINCT functions, including NULL and both signs.
+    pub input_rows: usize,
+    /// Nonzero net values whose retained reference counts were probed and updated.
+    pub value_updates: usize,
+    /// Existing persistent value-directory nodes actually cloned.
+    pub directory_entries_copied: usize,
+    /// Non-NULL values whose count first became positive, supplied once to native state.
+    pub entering_values: usize,
+    /// Non-NULL values whose final occurrence disappeared, retracted once from native state.
+    pub leaving_values: usize,
 }
 
 /// Actual input work at an indexed aggregate, independent of elapsed time.

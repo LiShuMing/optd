@@ -38,7 +38,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | verified |
-| R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | in_progress |
+| R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | verified |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
@@ -862,5 +862,74 @@ Claimed by this task after R03a `0c30be5`.
 defines membership zero crossings under existing accumulator plans, normalized
 DISTINCT grouping with refcounts, mixed exact native aggregates, optional measured
 work and a fresh TPC-DS Q28 strict SQL witness. Local source/design review is
-complete; implementation and all acceptance gates remain pending. Design is
-committed before implementation; no dependency or persisted format change.
+complete. The accepted design was committed as `c51edf7` before implementation.
+The existing accumulator rule/Optd operation now maintains qualified single-argument
+COUNT/SUM/AVG DISTINCT with counted persistent value directories and native state
+updated only for membership zero crossings. MIN/MAX DISTINCT retains counted extrema.
+Normalized DISTINCT/group-only nodes use the group entry's row count and emit keys
+only on membership changes, without retaining/recomputing duplicate buckets.
+Canonical builtin identity is checked for all five aggregate functions; original
+numerical, key-type and modifier boundaries remain. No dependency, rule-name, Optd
+operation or persisted format change.
+
+**Verified RED/green:** mixed global COUNT DISTINCT with COUNT/SUM/Decimal AVG
+selected `OperatorRecompute` at R03a and now selects only accumulator aggregates.
+Logs: `target/roadmap-r03b-red-20261031.log`,
+`target/roadmap-r03b-green-20261031.log`. The eight DISTINCT integration tests and
+an independent 180-step membership-map oracle cover duplicate and final deletions,
+NULL/all-NULL/empty input, all admitted count argument types, exact Decimal256
+COUNT/SUM/AVG, independent DISTINCT arguments, mixed ordinary/extrema state,
+projection-level cancellation, group removal/recreation and signed output replay.
+A 120-epoch independent integer-set oracle checks refreshed COUNT/SUM DISTINCT;
+fresh complete SQL endpoints verify schemas and output. SQL INSERT/DELETE/UPDATE
+tests reopen after every round, retry the original request and check every durable
+output-history prefix. Failed, discarded and stale candidates preserve installed
+counts and outputs.
+
+**Verified work scope:** at 1,024 / 8,192 untouched groups or hot-group values,
+nonfinal duplicate deletion updates three value counts and sends zero entering or
+leaving values to the three DISTINCT native functions. Final deletion/replacement
+sends exactly three values per sign, with logarithmically bounded actual path copies
+and zero historical aggregate input reads. Projected cancellations copy zero value
+nodes and perform zero native input updates. A normalized DISTINCT bucket containing
+1,024 / 8,192 duplicates consumes one changed row, copies one group directory node,
+reads zero historical rows and emits no output change until the final occurrence.
+The optional `distinct_work` domain records exact value/count/copy and native input
+units separately from extrema and source/cache/SQL/store work. A report-tool test
+checks exact nested sums and preserves missing old diagnostics as unknown.
+
+**Verified final gates:** the R01a Rust 1.95.0 locked offline wrapper, project target
+and TMPDIR with `bash scripts/agent-check.sh sql` exited 0: fmt, both warnings-denied
+Clippy configurations, **247 default passed / 2 ignored**, **261 Iceberg passed /
+3 ignored**. Log: `target/roadmap-r03b-gates-20261031.log`. The R01a private-rustdoc
+command exited 0, log `target/roadmap-r03b-rustdoc-20261031.log`. The same wrapper
+with `bash scripts/agent-check.sh sql-tools` exited 0: fixture-hash verification and
+**41 tool tests**, log `target/roadmap-r03b-tools-20261031.log`. An initial focused
+plan test still expected DISTINCT's old Group state; it now asserts the actual
+Accumulator state and adds a FILTER aggregate to retain explicit Group contract
+coverage. Its original failure remains in
+`target/roadmap-r03b-targeted-20261031.log`; final full checks pass both paths.
+
+After all feature jobs ended, explicitly built the default `benchmark_sql_database`
+example and froze a runner. The wrapper with
+`python3 target/roadmap-r03b-distinct-witness-20261031.py` exited 0: **TPC-DS Q28
+passes three strict SQL DML rounds, independent full SQL, reopen and output-history
+replay**, plus unified numeric-work audit. The six original SQL quantity/price
+branches retain AVG/COUNT/COUNT DISTINCT; the directed fixture has six store_sales
+rows. Initial/final output rows are 1/1 and output changes are observed. Actual
+DISTINCT work: four consumed argument rows/value updates, one copied value-directory
+node, three entering values and one leaving value. The script requires actual
+membership work as well as semantic/nonempty/change evidence.
+
+Fresh artifacts: `target/roadmap-r03b-distinct-live-20261031/`. Commands, independent
+warehouse root, source/lockfile/runner/report identities and unchanged before/after
+binary hash are retained. Logs: `target/roadmap-r03b-bench-build-20261031.log`,
+`target/roadmap-r03b-witness-20261031.log`. This small `relational_core` witness is
+not full-TPC, standard-scale or controlled performance qualification; performance
+and end-to-end delta-work flags stay false. Full checkpoint writes and derived-state
+bootstrap on restart remain R07; unqualified types and modifiers keep strict guards.
+
+mdBook with the R01a wrapper and project book output exited 0, log
+`target/roadmap-r03b-docs-20261031.log`. **R03b is verified locally.** Implementation
+is the local commit titled `Maintain DISTINCT aggregates from value membership changes`;
+no push. Next owner: this task, R03c GROUPING SETS / ROLLUP.

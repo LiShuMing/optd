@@ -32,6 +32,22 @@ class IncrementalWork(unittest.TestCase):
             del round_["sql_stats"]["nodes"][0]["accumulator_work"]["value_index_work"]
         self.assertFalse(any("value_index_work" in key for key in audit(source)["observed_work"]))
 
+    def test_distinct_membership_work_preserves_zero_crossings_and_legacy_absence(self):
+        source = self.fixture()
+        rounds = source["queries"][0]["profiles"][0]["verification"]["rounds"]
+        for round_ in rounds:
+            round_["sql_stats"]["nodes"][0]["accumulator_work"]["distinct_work"] = {
+                "input_rows": 4, "value_updates": 2,
+                "directory_entries_copied": 3, "entering_values": 1, "leaving_values": 0}
+        work = audit(source)["observed_work"]
+        for name, expected in [("input_rows", 12), ("value_updates", 6),
+                               ("directory_entries_copied", 9), ("entering_values", 3),
+                               ("leaving_values", 0)]:
+            self.assertEqual(work["accumulator_work.distinct_work." + name], expected)
+        for round_ in rounds:
+            del round_["sql_stats"]["nodes"][0]["accumulator_work"]["distinct_work"]
+        self.assertFalse(any("distinct_work" in key for key in audit(source)["observed_work"]))
+
     def test_unexecuted_planned_blocker_prevents_strict_coverage_claim(self):
         result=audit(self.fixture())
         self.assertEqual(result["counts"],{"total":1,"semantic_pass":1,"strict_plan_eligible":0,

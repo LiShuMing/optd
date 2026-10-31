@@ -144,10 +144,11 @@ async fn all_outer_semi_anti_plans_expose_index_access_and_share_one_preparation
 }
 
 #[tokio::test]
-async fn window_and_group_plans_expose_different_state_contracts() {
+async fn window_group_and_accumulator_plans_expose_different_state_contracts() {
     for sql in [
         "SELECT k,v,ROW_NUMBER() OVER(PARTITION BY k ORDER BY v) AS n FROM a",
         "SELECT DISTINCT k,v FROM a",
+        "SELECT k, SUM(v) FILTER (WHERE v > 0) FROM a GROUP BY k",
     ] {
         let view = SqlView::new_with_optimizer(
             sql,
@@ -162,6 +163,7 @@ async fn window_and_group_plans_expose_different_state_contracts() {
             walk(&program.physical, true);
             match &program.state {
                 Some(StateSpec::Accumulator { .. }) => {
+                    found = true;
                     assert_eq!(program.strategy(), Strategy::AccumulatorDelta);
                     assert!(program
                         .steps

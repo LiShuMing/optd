@@ -205,7 +205,7 @@ async fn different_partition_keys_compile_as_separate_scoped_window_nodes() {
 }
 
 #[tokio::test]
-async fn distinct_and_grouped_having_use_group_state_with_linear_consumers() {
+async fn distinct_and_grouped_having_use_accumulator_state_with_linear_consumers() {
     for sql in [
         "SELECT DISTINCT k,v FROM a",
         "SELECT DISTINCT k+1 AS shifted,v FROM a",
@@ -214,29 +214,11 @@ async fn distinct_and_grouped_having_use_group_state_with_linear_consumers() {
         let view = compile(sql, strict()).await;
         let plan = view.incremental_plan();
         assert_graph(plan);
-        let accumulator = sql.contains("SUM(v)");
-        let rule = if accumulator {
-            "builtin.aggregate.accumulator"
-        } else {
-            "builtin.grouped_aggregate"
-        };
-        for group in selected(plan, rule) {
-            assert_eq!(
-                group.maintenance,
-                if accumulator {
-                    Maintenance::Accumulate
-                } else {
-                    Maintenance::ChangedGroups
-                }
-            );
-            assert_eq!(
-                group.maintenance.strategy(),
-                if accumulator {
-                    Strategy::AccumulatorDelta
-                } else {
-                    Strategy::ChangedGroupRecompute
-                }
-            );
+        let aggregates = selected(plan, "builtin.aggregate.accumulator");
+        assert!(!aggregates.is_empty());
+        for group in aggregates {
+            assert_eq!(group.maintenance, Maintenance::Accumulate);
+            assert_eq!(group.maintenance.strategy(), Strategy::AccumulatorDelta);
             assert_eq!(group.maintenance.key_scope(), None);
             assert_eq!(group.inputs.len(), 1);
         }
