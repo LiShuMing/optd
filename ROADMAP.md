@@ -34,7 +34,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | verified |
 | R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | verified |
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
-| R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | in_progress |
+| R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | verified |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | pending |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | pending |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | pending |
@@ -325,3 +325,52 @@ Use shared bounded sorted leaves, preserve no-converter singleton admission and
 final-state UPDATE checks, measure directory clones and checkpoint flattening
 separately. Implementation and regression gates remain outstanding; no source
 representation change or efficiency improvement is claimed yet.
+
+
+### R02b — immutable transaction table blocks
+
+Design: [transaction table blocks](docs/src/incremental/transaction_table_blocks.md).
+Table snapshots share bounded ordered leaves with cached Arrow batches. DML updates
+only touched leaves; selectors bind their batches without a full-table collection.
+Snapshots share the same Arrow row converter. Final global resource checks precede
+leaf expansion; bounded signed-delta encoding preserves valid two-image updates.
+Store flatten misses and recovery/bootstrap conversion are separately measured;
+old serialized diagnostics retain unknown new domains.
+
+**Verified regression:** old code failed all three new table-block tests (exit 101),
+`target/roadmap-r02b-red-20261031.log`. After implementation they passed (exit 0),
+`target/roadmap-r02b-green-20261031.log`. Fixed VALUES insertion at 1024/8192 input
+rows reads zero selector rows, collects zero target rows, copies 256 historical
+leaf entries and materializes 257 leaf rows. Directory copies remain 4/32; full
+checkpoint concatenation and writes remain 1025/8193 rows. These are measured
+boundaries, not an end-to-end performance claim. Independent multiset/SQL cases
+exercise key moves, duplicates/NULL, swaps, splits, discarded/failed candidates,
+old-root retention, schema/scalar/encoding/volume guards, zero-column rows and
+multi-chunk signed encoding. Existing DML counter assertions now expect actual
+leaf work rather than the removed complete-target conversion.
+
+Commands use R01a's Rust 1.95.0 offline/locked wrapper, four jobs, debug=0, compiler
+incremental disabled, project target/TMPDIR. Focused command:
+`cargo +1.95.0 test --offline --locked -p optd-incremental-sql --lib --test cli --test database_work --test dml_work --test table_blocks`.
+Log `target/roadmap-r02b-focused-20261031.log` exited 0; later complete gates include
+three additional unit cases. Initial full gates failed both Clippy modes on a new
+test modulo spelling, retained in `target/roadmap-r02b-gates-20261031.log`. After
+correction, `bash scripts/agent-check.sh sql` exited 0: format, both Clippy modes,
+194 default tests (2 ignored), 208 Iceberg tests (3 ignored), including process-death
+recovery. Log `target/roadmap-r02b-gates-fixed-20261031.log`. Required private rustdoc,
+mdBook and 38 Python tool tests exited 0; logs `target/roadmap-r02b-rustdoc-20261031.log`,
+`target/roadmap-r02b-docs-20261031.log`, `target/roadmap-r02b-tools-20261031.log`.
+
+Selected current working-tree binary SQL witnesses passed TPC-H Q1 and TPC-DS Q1,
+three INSERT/DELETE/UPDATE rounds, independent SQL, reopen and delta-history checks.
+Artifacts and binary/report hashes: `target/roadmap-r02b-live-20261031/`.
+Commands use `OPTD_SQL_BENCH_QUERY_MODE=relational_core`, query timeout 180s,
+fresh `OPTD_SQL_BENCH_DATABASE_ROOT` per suite and
+`timeout --signal=TERM --kill-after=5s 240s target/roadmap-20261031/debug/examples/benchmark_sql_database <manifest> <report> 1`.
+Manifests: `optd-incremental-sql/benchmarks/tpch/manifest.json` and
+`/tmp/optd-efficiency-tpcds-core-20261030/q01/fixture/manifest.json`.
+`audit-command.json` records the work audit; both selected strict plans and semantic
+witnesses passed. No full TPC matrix or controlled performance rerun occurred;
+`performance_qualified=false`. Directory copies, batch-header clones, retained flat
+caches, full history/bootstrap and full checkpoint writes remain. Implementation is
+local-only; next work is R02c, followed by the remaining ledger.

@@ -71,7 +71,7 @@ impl TransactionWorkspace {
             .tables
             .get_mut(&result.table)
             .ok_or_else(|| invalid("DML target disappeared"))?
-            .batch = result.batch;
+            .rows = result.rows;
         self.changes.insert(result.table, combined);
         self.work.push(result.work);
         Ok(())

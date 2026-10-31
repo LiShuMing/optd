@@ -1,8 +1,9 @@
 //! Compile one DML statement into old/new typed row images from one snapshot.
 
-use super::dml_work::{DmlExecutionWork, DmlTargetWork, SelectorWork};
+use super::dml_work::{DmlExecutionWork, SelectorWork};
 use super::response::DmlWork;
 use super::store::DatabaseSnapshot;
+use super::table_rows::TableRows;
 use super::{selector_work, sql};
 use crate::bag::Bag;
 use crate::error::invalid;
@@ -57,7 +58,7 @@ fn target(table: &TableWithJoins) -> Result<String> {
 /// Work separates logical dependencies from measured delivery and target replacement.
 pub(super) struct DmlResult {
     pub table: String,
-    pub batch: RecordBatch,
+    pub rows: TableRows,
     pub delta: Bag,
     pub work: DmlWork,
 }
@@ -105,35 +106,22 @@ impl<'a> DmlCompiler<'a> {
             .tables
             .get(&table)
             .ok_or_else(|| invalid("unbound DML target"))?
-            .batch;
+            .rows;
         let delta = Bag::from_parts(&new, &old)?;
-        let target = Bag::from_batch(before)?;
-        let mut execution = DmlExecutionWork {
+        let update = before.apply(&delta)?;
+        let execution = DmlExecutionWork {
             selector: source_work,
             old_image_rows: old.num_rows(),
             new_image_rows: new.num_rows(),
-            target: DmlTargetWork {
-                collected_rows: before.num_rows(),
-                distinct_entries: target.len(),
-                ..Default::default()
-            },
+            target: update.work,
         };
-        let next = target.add(&delta)?;
-        if !delta.is_empty() {
-            execution.target.delta_update.record_rebuild(target.len())?;
-        }
-        let next = next.to_batch()?;
-        execution
-            .target
-            .delta_update
-            .record_materialization(&next)?;
         let mut input_rows = 0usize;
         for name in sql::reads(&plan)? {
             let rows = self
                 .snapshot
                 .tables
                 .get(&name)
-                .map(|t| t.batch.num_rows())
+                .map(|t| t.rows.num_rows())
                 .or_else(|| self.snapshot.views.get(&name).map(|v| v.output.num_rows()))
                 .unwrap_or(0);
             input_rows = input_rows.checked_add(rows).ok_or(crate::Error::Overflow)?;
@@ -145,7 +133,7 @@ impl<'a> DmlCompiler<'a> {
         };
         Ok(DmlResult {
             table,
-            batch: next,
+            rows: update.rows,
             work: DmlWork {
                 affected_rows,
                 source_relation_rows: input_rows,
@@ -210,10 +198,10 @@ impl<'a> DmlCompiler<'a> {
         sql::immutable(&input)?;
         sql::reject_mv_reads(snapshot, &input, mode)?;
         let selected = self.selector.collect(input.clone()).await?;
-        let new = sql::typed(&selected.batch, original.batch.schema())?;
+        let new = sql::typed(&selected.batch, original.rows.schema())?;
         Ok(RowImages {
             table,
-            old: RecordBatch::new_empty(original.batch.schema()),
+            old: RecordBatch::new_empty(original.rows.schema()),
             new,
             source_plan: input,
             source_work: selected.work,
@@ -254,8 +242,8 @@ impl<'a> DmlCompiler<'a> {
         .await?;
         sql::reject_mv_reads(snapshot, &plan, mode)?;
         let selected = self.selector.collect(plan.clone()).await?;
-        let old = sql::typed(&selected.batch, original.batch.schema())?;
-        let new = RecordBatch::new_empty(original.batch.schema());
+        let old = sql::typed(&selected.batch, original.rows.schema())?;
+        let new = RecordBatch::new_empty(original.rows.schema());
         Ok(RowImages {
             table,
             old,
@@ -302,7 +290,7 @@ impl<'a> DmlCompiler<'a> {
                 return Err(invalid("tuple assignment is not supported"));
             };
             let column = sql::name(column)?;
-            original.batch.schema().index_of(&column)?;
+            original.rows.schema().index_of(&column)?;
             if assignments
                 .insert(column, assignment.value.to_string())
                 .is_some()
@@ -313,12 +301,12 @@ impl<'a> DmlCompiler<'a> {
         if assignments.is_empty() {
             return Err(invalid("UPDATE has no assignments"));
         }
-        let width = original.batch.num_columns();
+        let width = original.rows.num_columns();
         let mut expressions = Vec::new();
-        for (i, f) in original.batch.schema().fields().iter().enumerate() {
+        for (i, f) in original.rows.schema().fields().iter().enumerate() {
             expressions.push(format!("{} AS __optd_old_{i}", sql::quote(f.name())));
         }
-        for (i, f) in original.batch.schema().fields().iter().enumerate() {
+        for (i, f) in original.rows.schema().fields().iter().enumerate() {
             let e = assignments
                 .get(f.name())
                 .cloned()
@@ -339,11 +327,11 @@ impl<'a> DmlCompiler<'a> {
         let images = selected.batch;
         let old = sql::typed(
             &images.project(&(0..width).collect::<Vec<_>>())?,
-            original.batch.schema(),
+            original.rows.schema(),
         )?;
         let new = sql::typed(
             &images.project(&(width..2 * width).collect::<Vec<_>>())?,
-            original.batch.schema(),
+            original.rows.schema(),
         )?;
         Ok(RowImages {
             table,

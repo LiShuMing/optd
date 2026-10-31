@@ -5,6 +5,7 @@ use super::response::{CommitReport, SqlResponse};
 use super::sql::{self, RelationScope};
 use super::store::{DatabaseSnapshot, DatabaseStore, Receipt, TableData, ViewData};
 use super::store_work::{RecoveryWork, StoreWork};
+use super::table_rows::TableRows;
 use super::transaction_workspace::{PreparedCommit, TransactionWorkspace};
 use crate::bag::Bag;
 use crate::error::invalid;
@@ -62,7 +63,7 @@ impl SqlSession {
                         .tables
                         .get(n)
                         .ok_or_else(|| invalid("unbound restored view dependency"))?;
-                    Ok((n.clone(), t.batch.clone()))
+                    Ok((n.clone(), t.rows.materialize()?.batch))
                 })
                 .collect::<Result<_>>()?;
             let dependency_rows = tables
@@ -461,7 +462,13 @@ impl SqlSession {
                     return Err(invalid("relation already exists"));
                 }
                 let id = allocate(&mut tx.snapshot)?;
-                tx.snapshot.tables.insert(name, TableData { id, batch });
+                tx.snapshot.tables.insert(
+                    name,
+                    TableData {
+                        id,
+                        rows: TableRows::from_batch(batch)?.rows,
+                    },
+                );
             }
             Statement::CreateView(view) => {
                 let name = sql::name(&view.name)?;
@@ -486,7 +493,7 @@ impl SqlSession {
                         let t = tx.snapshot.tables.get(n).ok_or_else(|| {
                             invalid("MV definitions may reference base tables only")
                         })?;
-                        Ok((n.clone(), t.batch.clone()))
+                        Ok((n.clone(), t.rows.materialize()?.batch))
                     })
                     .collect::<Result<_>>()?;
                 let engine = SqlView::new_with_optimizer(

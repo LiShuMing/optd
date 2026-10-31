@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::response::CommitReport;
 use super::store_work::{PayloadAction, PayloadKind, StoreWork, StoreWorkCounter};
+use super::table_rows::TableRows;
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES};
 use crate::error::invalid;
 use crate::store::{
@@ -26,7 +27,7 @@ static ATTEMPT: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub(super) struct TableData {
     pub id: u64,
-    pub batch: RecordBatch,
+    pub rows: TableRows,
 }
 
 /// Persisted view definition and output; execution indexes are rebuilt on open.
@@ -224,8 +225,17 @@ impl DatabaseStore {
         let batch = read_batch(&self.directory(&p.directory)?, &p.file)?;
         self.work
             .payload(kind, PayloadAction::Read, p.file.bytes, batch.num_rows())?;
-        Bag::from_batch(&batch)?;
+        if !matches!(kind, PayloadKind::Table) {
+            Bag::from_batch(&batch)?;
+        }
         Ok(batch)
+    }
+
+    /// Import tables once per loaded snapshot, accounting actual block bootstrap.
+    fn table_rows(&self, payload: &Payload) -> Result<TableRows> {
+        let imported = TableRows::from_batch(self.batch(payload, PayloadKind::Table)?)?;
+        self.work.table_bootstrap(&imported.work)?;
+        Ok(imported.rows)
     }
 
     fn read_snapshot(&self, m: &Manifest) -> Result<DatabaseSnapshot> {
@@ -240,7 +250,7 @@ impl DatabaseStore {
                         n.clone(),
                         TableData {
                             id: t.id,
-                            batch: self.batch(&t.data, PayloadKind::Table)?,
+                            rows: self.table_rows(&t.data)?,
                         },
                     ))
                 })
@@ -376,7 +386,7 @@ impl DatabaseStore {
                 .snapshot
                 .tables
                 .get(n)
-                .filter(|old| old.id == t.id && batches_equal(&old.batch, &t.batch))
+                .filter(|old| old.id == t.id && old.rows.same_contents(&t.rows))
                 .and_then(|_| self.manifest.as_ref()?.tables.get(n));
             let data = match reusable {
                 Some(old) => {
@@ -384,15 +394,19 @@ impl DatabaseStore {
                         PayloadKind::Table,
                         PayloadAction::Reuse,
                         old.data.file.bytes,
-                        t.batch.num_rows(),
+                        t.rows.num_rows(),
                     )?;
                     old.data.clone()
                 }
-                None => payload(
-                    PayloadKind::Table,
-                    format!("table-{}.arrow", t.id),
-                    &t.batch,
-                )?,
+                None => {
+                    let materialized = t.rows.materialize()?;
+                    self.work.table_materialization(&materialized.work)?;
+                    payload(
+                        PayloadKind::Table,
+                        format!("table-{}.arrow", t.id),
+                        &materialized.batch,
+                    )?
+                }
             };
             tables.insert(n.clone(), TableEntry { id: t.id, data });
         }

@@ -21,7 +21,7 @@ async fn work(db: &mut SqlSession, sql: &str) -> Value {
 }
 
 #[tokio::test]
-async fn values_and_selective_updates_expose_target_work_as_untouched_rows_grow() {
+async fn values_and_selective_updates_expose_changed_leaf_work_as_untouched_rows_grow() {
     for n in [32, 256] {
         let root = tempfile::tempdir().unwrap();
         let mut db = setup(root.path(), n).await;
@@ -29,8 +29,10 @@ async fn values_and_selective_updates_expose_target_work_as_untouched_rows_grow(
         assert_eq!(w["execution"]["selector"]["source_rows"], 0);
         assert_eq!(w["execution"]["selector"]["source_batches"], 0);
         assert_eq!(w["execution"]["new_image_rows"], 1);
-        assert_eq!(w["execution"]["target"]["collected_rows"], n);
-        assert_eq!(w["execution"]["target"]["distinct_entries"], n);
+        // R02b intentionally removes the full target Arrow-to-Bag conversion;
+        // leaf copies/materialization remain measured below.
+        assert_eq!(w["execution"]["target"]["collected_rows"], 0);
+        assert_eq!(w["execution"]["target"]["distinct_entries"], 0);
         assert_eq!(w["execution"]["target"]["delta_update"]["map_rebuilds"], 1);
         assert_eq!(
             w["execution"]["target"]["delta_update"]["old_row_entries_copied"],
@@ -70,11 +72,11 @@ async fn optimized_away_reads_remain_distinct_from_available_relation_rows() {
     assert_eq!(w["source_relation_rows"], 8);
     assert_eq!(w["execution"]["selector"]["source_rows"], 0);
     assert_eq!(w["execution"]["selector"]["source_batches"], 0);
-    assert_eq!(w["execution"]["target"]["collected_rows"], 8);
+    assert_eq!(w["execution"]["target"]["collected_rows"], 0);
     assert_eq!(w["execution"]["target"]["delta_update"]["map_rebuilds"], 0);
     assert_eq!(
         w["execution"]["target"]["delta_update"]["materializations"],
-        1
+        0
     );
     let w = work(&mut db, "INSERT INTO t SELECT COUNT(*) FROM t").await;
     assert_eq!(w["source_relation_rows"], 8);
@@ -131,7 +133,7 @@ async fn statement_work_preserves_transaction_snapshots_and_failed_statement_iso
     assert_eq!(w[0]["execution"]["selector"]["source_rows"], 0);
     assert_eq!(w[1]["execution"]["selector"]["source_rows"], 9);
     assert_eq!(w[1]["execution"]["old_image_rows"], 1);
-    assert_eq!(w[1]["execution"]["target"]["collected_rows"], 9);
+    assert_eq!(w[1]["execution"]["target"]["collected_rows"], 0);
     assert_eq!(
         db.execute("SELECT * FROM t")
             .await

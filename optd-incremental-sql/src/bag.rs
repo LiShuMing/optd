@@ -19,6 +19,9 @@ pub const MAX_MATERIALIZED_ROWS: usize = 1_000_000;
 /// Conservative scalar-size accounting also bounds wide or variable-width rows.
 pub(crate) const MAX_MATERIALIZED_BYTES: usize = 256 * 1024 * 1024;
 
+/// Bound each temporary lookup-encoding batch, independent of signed delta size.
+const MAX_KEY_ENCODING_ROWS: usize = 1024;
+
 type Entry<'a> = (&'a Vec<ScalarValue>, i64);
 
 /// A schema-bound signed multiset, retaining DataFusion scalar identity exactly.
@@ -32,7 +35,143 @@ pub(crate) struct Bag {
     rows: Arc<HashMap<Vec<ScalarValue>, i64>>,
 }
 
+/// One exact complete row associated with its Arrow sort encoding.
+pub(crate) struct KeyedBagRow<'a> {
+    pub(crate) key: Vec<u8>,
+    pub(crate) values: &'a [ScalarValue],
+    pub(crate) weight: i64,
+}
+
+/// Temporary encoding volume, separate from relation cache materialization.
+pub(crate) struct EncodedBagRows<'a> {
+    pub(crate) rows: Vec<KeyedBagRow<'a>>,
+    pub(crate) array_bytes: usize,
+}
+
+/// Expanded scalar estimates used by the existing materialization safety contract.
+pub(crate) struct MaterializationVolume {
+    pub(crate) rows: usize,
+    pub(crate) scalar_bytes: usize,
+}
+
 impl Bag {
+    /// Copy a trusted same-schema subset of already consolidated entries.
+    /// Callers must not pass duplicate complete rows; reject rather than overwrite.
+    pub(crate) fn from_unique_entries<'a>(
+        schema: SchemaRef,
+        entries: impl IntoIterator<Item = (&'a [ScalarValue], i64)>,
+    ) -> Result<Self> {
+        let mut rows = HashMap::new();
+        for (row, weight) in entries {
+            if weight == 0 || row.len() != schema.fields().len() {
+                return Err(Error::Invalid("invalid consolidated row entry".into()));
+            }
+            rows.try_reserve(1).map_err(allocation_error)?;
+            if rows.insert(clone_row(row)?, weight).is_some() {
+                return Err(Error::Invalid("duplicate consolidated row entry".into()));
+            }
+        }
+        Ok(Self {
+            schema,
+            rows: Arc::new(rows),
+        })
+    }
+
+    /// Split an ordered relation into bounded distinct-entry subsets.
+    /// A singleton uses the existing no-sort path for otherwise unorderable types.
+    pub(crate) fn split(&self, bound: usize) -> Result<Vec<Self>> {
+        if bound == 0 {
+            return Err(Error::Invalid("zero table block bound".into()));
+        }
+        if self.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.len() <= bound {
+            return Ok(vec![self.clone()]);
+        }
+        self.sorted_entries()?
+            .chunks(bound)
+            .map(|entries| {
+                Self::from_unique_entries(
+                    self.schema(),
+                    entries
+                        .iter()
+                        .map(|(row, weight)| (row.as_slice(), *weight)),
+                )
+            })
+            .collect()
+    }
+
+    /// Encode signed entries for lookup with the table's shared converter.
+    /// Final relation leaves validate scalar identity on encoding ties: old/new
+    /// images may tie even when their final singleton relation remains admitted.
+    pub(crate) fn keyed_rows(&self, converter: &RowConverter) -> Result<EncodedBagRows<'_>> {
+        let entries = self
+            .rows
+            .iter()
+            .map(|(row, weight)| (row, *weight))
+            .collect::<Vec<_>>();
+        // A signed two-image UPDATE may contain more entries/bytes than either
+        // valid endpoint. Bound each encoding batch, not the combined delta.
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(entries.len())
+            .map_err(allocation_error)?;
+        let mut array_bytes = 0usize;
+        let mut start = 0usize;
+        while start < entries.len() {
+            let mut end = start;
+            let mut bytes = 0usize;
+            while end < entries.len() && end - start < MAX_KEY_ENCODING_ROWS {
+                let next = bytes
+                    .checked_add(scalar_bytes(entries[end].0)?)
+                    .ok_or(Error::Overflow)?;
+                if end > start && next > MAX_MATERIALIZED_BYTES {
+                    break;
+                }
+                bytes = next;
+                end += 1;
+            }
+            let batch = materialize(self.schema(), &entries[start..end], false)?;
+            array_bytes = array_bytes
+                .checked_add(batch.get_array_memory_size())
+                .ok_or(Error::Overflow)?;
+            let encoded = converter.convert_columns(batch.columns())?;
+            for (i, (row, weight)) in entries[start..end].iter().enumerate() {
+                rows.push(KeyedBagRow {
+                    key: encoded.row(i).as_ref().to_vec(),
+                    values: row,
+                    weight: *weight,
+                });
+            }
+            start = end;
+        }
+        rows.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        Ok(EncodedBagRows { rows, array_bytes })
+    }
+
+    /// Compute the same expanded row/scalar estimates as to_batch, without expansion.
+    pub(crate) fn materialization_volume(&self) -> Result<MaterializationVolume> {
+        let mut rows = 0usize;
+        let mut bytes = 0usize;
+        self.validate_relation()?;
+        for (row, weight) in self.rows.iter() {
+            let repeats = usize::try_from(*weight).map_err(|_| Error::Overflow)?;
+            rows = rows.checked_add(repeats).ok_or(Error::Overflow)?;
+            bytes = bytes
+                .checked_add(
+                    scalar_bytes(row)?
+                        .checked_mul(repeats)
+                        .ok_or(Error::Overflow)?,
+                )
+                .ok_or(Error::Overflow)?;
+        }
+        check_materialization_volume(rows, bytes)?;
+        Ok(MaterializationVolume {
+            rows,
+            scalar_bytes: bytes,
+        })
+    }
+
     /// Construct an empty relation without losing its column types or metadata.
     pub(crate) fn empty(schema: SchemaRef) -> Self {
         Self {
@@ -414,6 +553,12 @@ fn batch_with_rows(schema: SchemaRef, columns: Vec<ArrayRef>, count: usize) -> R
         columns,
         &RecordBatchOptions::new().with_row_count(Some(count)),
     )?)
+}
+
+/// Preserve global resource limits when an immutable table has several leaves.
+pub(crate) fn check_materialization_volume(rows: usize, bytes: usize) -> Result<()> {
+    check_row_limit(rows)?;
+    check_byte_limit(bytes)
 }
 
 fn check_row_limit(count: usize) -> Result<()> {

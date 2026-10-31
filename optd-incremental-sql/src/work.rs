@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-/// Full source/cache map rebuilds caused by signed updates during refresh.
+/// Relation-map rebuilding and cache materialization at the owning scope.
+/// Refresh uses complete source/cache maps; DML block maintenance uses leaf maps.
 ///
 /// Row entries count distinct complete rows, not expanded multiplicities. Array
 /// bytes are Arrow's reported buffer sizes for materialized batches, not measured
@@ -14,11 +15,11 @@ use crate::{Error, Result};
 /// replacement batches from physical expressions are also excluded.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelationWork {
-    /// Nonempty signed updates that rebuild a complete relation map.
+    /// Nonempty signed updates that rebuild the owning complete or leaf map.
     pub map_rebuilds: usize,
     /// Existing distinct row entries copied into those rebuilt maps.
     pub old_row_entries_copied: usize,
-    /// Complete cache batches materialized from updated Bags.
+    /// Cache batches materialized from updated Bags at the owning scope.
     pub materializations: usize,
     /// Expanded rows emitted by those materializations, including duplicates.
     pub materialized_rows: usize,

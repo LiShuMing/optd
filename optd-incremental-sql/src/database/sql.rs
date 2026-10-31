@@ -8,6 +8,7 @@ use datafusion::arrow::compute::{cast_with_options, concat_batches, CastOptions}
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::TableReference;
+use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Volatility};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
@@ -83,7 +84,10 @@ pub(super) enum RelationScope {
 pub(super) fn context(snapshot: &DatabaseSnapshot, scope: RelationScope) -> Result<SessionContext> {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
     for (name, t) in &snapshot.tables {
-        ctx.register_batch(TableReference::bare(name.as_str()), t.batch.clone())?;
+        ctx.register_table(
+            TableReference::bare(name.as_str()),
+            Arc::new(MemTable::try_new(t.rows.schema(), vec![t.rows.batches()])?),
+        )?;
     }
     if scope == RelationScope::AllRelations {
         for (name, v) in &snapshot.views {

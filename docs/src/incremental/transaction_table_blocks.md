@@ -1,6 +1,6 @@
 # Immutable transaction table blocks
 
-**Status:** accepted · 2026-10-31; implementation pending
+**Status:** accepted · 2026-10-31
 **Scope:** ROADMAP R02b; immutable block snapshots and statement-local changed-block
 updates. Persistent state directories, lazy engine caches and block checkpoint IO
 remain R02c/R02d/R07a.
@@ -36,6 +36,8 @@ a sorted directory of shared immutable leaves and a per-snapshot flattened cache
 Leaves hold a Bag and its ordered Arrow batch; the directory key is the leaf's
 lowest encoded complete row. Use existing Arrow row ordering and reject encoding
 ties between unequal scalar rows as Bag currently does. Empty tables retain schema.
+All leaf boundary and delta encodings share the snapshot's same `RowConverter`
+instance, including dictionary encodings, as Arrow's comparison contract requires.
 A candidate owns its new directory and shares all unchanged leaves. The initial
 leaf bound is 256 distinct full-row entries, a bounded-work choice rather than a
 claim of an optimal performance threshold. Expanded duplicate counts remain subject
@@ -46,6 +48,12 @@ leaf directory, grouping changes per touched leaf, updating each leaf once and
 splitting changed leaves as needed. Validate exact schema, checked multiplicities,
 final nonnegative rows and global row/byte budgets before publishing the candidate.
 Deleted empty leaves disappear; no automatic full-table compaction occurs.
+First compute all touched leaves' final Bags and checked total volume, then check
+the final global budget before expanding replacement leaves. A cross-leaf key move
+must not be rejected because its transient preparation order exceeds that budget.
+Encode signed delta entries in batches bounded by 1024 entries and the scalar-byte
+budget; a two-image delta can exceed either valid endpoint's volume. Final leaves
+retain endpoint limits and scalar-identity checks.
 An empty delta shares the entire table snapshot and performs no target conversion.
 Schemas for which Arrow cannot construct a row converter retain a single-leaf mode:
 the existing Bag materializer determines whether their final relation is admitted.
@@ -75,6 +83,9 @@ The existing collection counters describe real Arrow-to-Bag collection (zero on
 maintained statement targets); add separately named snapshot size diagnostics if
 needed. Do not relabel total target size as actual input work. Recovery distinguishes
 bootstrap collection from later statement work. Preserve optional old receipt fields.
+New block, bootstrap and flatten diagnostics are optional on deserialization: absent
+historical fields remain unknown. Live counters start at measured zero; interval
+subtraction preserves unknown domains rather than fabricating zero measurements.
 
 ## 5. Failure modes and recovery
 
@@ -124,3 +135,8 @@ integer/string workloads. No dependency or numerical-contract changes are needed
 Implementation gates remain the full acceptance list above. The design is not
 implementation or performance evidence. Directory overlays and lazy duplicate
 expansion remain separate increments.
+
+Remaining work includes complete directory copies, MemTable batch-header clones,
+full changed-table checkpoint concatenation/writes, full bootstrap/history conversion
+and retained flattened caches. This representation does not establish end-to-end
+delta complexity, bounded retained memory or a controlled performance improvement.

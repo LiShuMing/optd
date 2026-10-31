@@ -83,6 +83,32 @@ impl PayloadIoWork {
     }
 }
 
+/// Full-table cache misses at consumers that still require one Arrow batch.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableMaterializationWork {
+    /// Successful concatenations (zero for shared cache hits).
+    pub misses: u64,
+    /// Expanded rows emitted by those concatenations.
+    pub rows: u64,
+    /// Sum of Arrow array buffer sizes in the resulting batches.
+    pub array_bytes: u64,
+}
+
+/// Actual Arrow-to-block work during SQL table import and history restoration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableBootstrapWork {
+    /// Expanded table rows collected into a positive Bag.
+    pub collected_rows: u64,
+    /// Distinct complete rows in the collected Bags.
+    pub distinct_entries: u64,
+    /// Nonempty ordered leaf caches materialized during import.
+    pub leaf_materializations: u64,
+    /// Expanded rows in those leaf caches.
+    pub materialized_rows: u64,
+    /// Sum of Arrow array buffer sizes in those leaf caches.
+    pub materialized_array_bytes: u64,
+}
+
 /// Cumulative, host-local SQL database work since this session began opening.
 ///
 /// Read byte volumes describe successfully decoded file lengths, not reader/syscall
@@ -90,7 +116,7 @@ impl PayloadIoWork {
 /// Complete operations count even if a later publication barrier fails. Partial
 /// failed helpers, directory operations, fsyncs and comparison CPU work are excluded.
 /// This diagnostic is never stored in receipts and does not certify publication.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreWork {
     /// Successful CURRENT reads during open and predecessor checks.
     pub pointer_reads: FileWork,
@@ -112,6 +138,59 @@ pub struct StoreWork {
     pub history_traversals: u64,
     /// Validated manifest visits inside those traversals.
     pub manifests_visited: u64,
+    /// Actual full-table concatenation misses during checkpoint publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_materialization: Option<TableMaterializationWork>,
+    /// Actual table conversion while restoring current or historical snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_bootstrap: Option<TableBootstrapWork>,
+}
+
+impl Default for StoreWork {
+    fn default() -> Self {
+        Self {
+            pointer_reads: FileWork::default(),
+            pointer_writes: FileWork::default(),
+            manifest_reads: FileWork::default(),
+            manifest_writes: FileWork::default(),
+            checksum_reads: FileWork::default(),
+            tables: PayloadIoWork::default(),
+            view_outputs: PayloadIoWork::default(),
+            output_deltas: PayloadIoWork::default(),
+            history_traversals: 0,
+            manifests_visited: 0,
+            table_materialization: Some(TableMaterializationWork::default()),
+            table_bootstrap: Some(TableBootstrapWork::default()),
+        }
+    }
+}
+
+impl TableMaterializationWork {
+    fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            misses: subtract(self.misses, before.misses)?,
+            rows: subtract(self.rows, before.rows)?,
+            array_bytes: subtract(self.array_bytes, before.array_bytes)?,
+        })
+    }
+}
+
+impl TableBootstrapWork {
+    fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            collected_rows: subtract(self.collected_rows, before.collected_rows)?,
+            distinct_entries: subtract(self.distinct_entries, before.distinct_entries)?,
+            leaf_materializations: subtract(
+                self.leaf_materializations,
+                before.leaf_materializations,
+            )?,
+            materialized_rows: subtract(self.materialized_rows, before.materialized_rows)?,
+            materialized_array_bytes: subtract(
+                self.materialized_array_bytes,
+                before.materialized_array_bytes,
+            )?,
+        })
+    }
 }
 
 impl StoreWork {
@@ -131,6 +210,18 @@ impl StoreWork {
             output_deltas: self.output_deltas.since(&before.output_deltas)?,
             history_traversals: subtract(self.history_traversals, before.history_traversals)?,
             manifests_visited: subtract(self.manifests_visited, before.manifests_visited)?,
+            table_materialization: self
+                .table_materialization
+                .as_ref()
+                .zip(before.table_materialization.as_ref())
+                .map(|(a, b)| a.since(b))
+                .transpose()?,
+            table_bootstrap: self
+                .table_bootstrap
+                .as_ref()
+                .zip(before.table_bootstrap.as_ref())
+                .map(|(a, b)| a.since(b))
+                .transpose()?,
         })
     }
 }
@@ -216,6 +307,35 @@ impl StoreWorkCounter {
         event(&mut next)?;
         *work = next;
         Ok(())
+    }
+
+    pub(super) fn table_materialization(&self, work: &TableMaterializationWork) -> Result<()> {
+        self.record(|w| {
+            let next = w
+                .table_materialization
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks table materialization domain"))?;
+            add(&mut next.misses, work.misses)?;
+            add(&mut next.rows, work.rows)?;
+            add(&mut next.array_bytes, work.array_bytes)
+        })
+    }
+
+    pub(super) fn table_bootstrap(&self, work: &TableBootstrapWork) -> Result<()> {
+        self.record(|w| {
+            let next = w
+                .table_bootstrap
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks table bootstrap domain"))?;
+            add(&mut next.collected_rows, work.collected_rows)?;
+            add(&mut next.distinct_entries, work.distinct_entries)?;
+            add(&mut next.leaf_materializations, work.leaf_materializations)?;
+            add(&mut next.materialized_rows, work.materialized_rows)?;
+            add(
+                &mut next.materialized_array_bytes,
+                work.materialized_array_bytes,
+            )
+        })
     }
 
     pub(super) fn pointer_read(&self, bytes: usize) -> Result<()> {
@@ -337,5 +457,27 @@ mod interval_tests {
         );
         assert!(before.since(&after).is_err());
         assert_eq!(after.since(&after).unwrap(), StoreWork::default());
+    }
+}
+
+#[cfg(test)]
+mod legacy_table_domains {
+    use super::*;
+
+    #[test]
+    fn old_work_json_keeps_new_domains_unknown() {
+        let mut value = serde_json::to_value(StoreWork::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("table_materialization");
+        value.as_object_mut().unwrap().remove("table_bootstrap");
+        let old: StoreWork = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.table_materialization.is_none());
+        assert!(old.table_bootstrap.is_none());
+        assert_eq!(serde_json::to_value(&old).unwrap(), value);
+        let interval = StoreWork::default().since(&old).unwrap();
+        assert!(interval.table_materialization.is_none());
+        assert!(interval.table_bootstrap.is_none());
     }
 }

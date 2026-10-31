@@ -23,15 +23,41 @@ pub struct SelectorWork {
     pub output_rows: usize,
 }
 
-/// Complete target-table conversion and replacement work for a DML statement.
+/// Changed-leaf work, distinct from full-table directory copying and checkpoint IO.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableBlockWork {
+    /// Installed nonempty leaves before this statement (size, not access work).
+    pub total_blocks_before: usize,
+    /// Shared directory entries copied into a private candidate.
+    pub directory_entries_copied: usize,
+    /// Leaf ranges visited, including insertion into an empty table.
+    pub touched_blocks: usize,
+    /// Existing leaves replaced or removed by this statement.
+    pub touched_existing_blocks: usize,
+    /// Unchanged existing leaf payloads shared by the candidate.
+    pub reused_blocks: usize,
+    /// Changed leaves split into multiple bounded replacements.
+    pub split_blocks: usize,
+    /// New distinct entries copied to create split Bag subsets, beyond old-map copying.
+    pub split_row_entries_copied: usize,
+    /// Distinct signed entries encoded for directory lookup.
+    pub delta_key_rows: usize,
+    /// Arrow buffer sizes of those temporary encoding batches.
+    pub delta_key_array_bytes: usize,
+}
+
+/// Actual target collection and complete-map or changed-leaf replacement work.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DmlTargetWork {
     /// Expanded input rows collected from the statement's target snapshot.
     pub collected_rows: usize,
     /// Distinct complete row entries resulting from that collection.
     pub distinct_entries: usize,
-    /// Actual complete map copies and final Arrow materialization.
+    /// Actual map copies and Arrow materialization at complete-map/leaf boundaries.
     pub delta_update: RelationWork,
+    /// Measured leaf maintenance, absent in receipts predating block snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_update: Option<TableBlockWork>,
 }
 
 /// Measured statement work, distinct from view maintenance and durable storage.
