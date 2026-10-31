@@ -164,6 +164,27 @@ async fn verify(db: &mut SqlSession, sql: &str, current: &Tables) -> Result<Reco
     Ok(expected)
 }
 
+// Streaming statements keeps one commit boundary without accumulating a >16MiB
+// request string. Callers discard the session if statement execution fails.
+async fn execute_batch(
+    db: &mut SqlSession,
+    statements: &[String],
+) -> Result<Option<optd_incremental_sql::database::CommitReport>> {
+    if statements.is_empty() {
+        return Ok(None);
+    }
+    db.execute("BEGIN").await?;
+    for statement in statements {
+        db.execute(statement).await?;
+    }
+    Ok(Some(
+        db.execute("COMMIT")
+            .await?
+            .commit
+            .ok_or("missing commit report")?,
+    ))
+}
+
 pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Value> {
     let referenced = referenced_tables(sql, complete).await?;
     let mut current: Tables = referenced
@@ -203,13 +224,19 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
             .await
             .map_err(|e| format!("bootstrap_ddl: {e}"))?;
         script.push_str(&format!("{ddl};\n"));
-        for sql in insert(name, b)? {
-            db.execute(&sql)
-                .await
-                .map_err(|e| format!("bootstrap_insert_{name}: {e}"))?;
-            script.push_str(&format!("{sql};\n"));
-        }
     }
+    let initial = current
+        .iter()
+        .map(|(name, b)| insert(name, b))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    script.push_str(&format!("BEGIN;\n{};\nCOMMIT;\n", initial.join(";\n")));
+    fs::write(root.join("input.sql"), &script)?;
+    execute_batch(&mut db, &initial)
+        .await
+        .map_err(|e| format!("bootstrap_rows: {e}"))?;
     let ddl = format!("CREATE MATERIALIZED VIEW maintained_result AS {sql}");
     db.execute(&ddl)
         .await
@@ -217,6 +244,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     script.push_str(&format!("{ddl};\n"));
     let mut previous = verify(&mut db, sql, &current).await?;
     let initial_rows = previous.num_rows();
+    let bootstrap_epoch = db.epoch();
     let mut nonempty = initial_rows > 0;
     let mut output_changed = false;
     let mut rounds = Vec::new();
@@ -242,19 +270,11 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
             }
         }
         let body = statements.join(";\n");
-        let report = if statements.is_empty() {
-            None
-        } else {
-            Some(
-                db.execute_transaction(stage, &body)
-                    .await
-                    .map_err(|e| format!("{stage}: {e}"))?
-                    .commit
-                    .ok_or("missing commit report")?,
-            )
-        };
         script.push_str(&format!("BEGIN;\n{body};\nCOMMIT;\n"));
         fs::write(root.join("input.sql"), &script)?;
+        let report = execute_batch(&mut db, &statements)
+            .await
+            .map_err(|e| format!("{stage}: {e}"))?;
         let expected = verify(&mut db, sql, &current).await?;
         nonempty |= expected.num_rows() > 0;
         output_changed |= bag(&previous)? != bag(&expected)?;
@@ -266,7 +286,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     }
     Ok(
         json!({"status":if !nonempty{"verified_empty_only"}else if !output_changed{"verified_unchanged_output"}else{"pass"},
-        "plan_qualification":qualification,"initial_rows":initial_rows,"final_rows":previous.num_rows(),"nonempty_result_seen":nonempty,"output_delta_seen":output_changed,
+        "plan_qualification":qualification,"bootstrap_epoch":bootstrap_epoch,"initial_rows":initial_rows,"final_rows":previous.num_rows(),"nonempty_result_seen":nonempty,"output_delta_seen":output_changed,
         "completed_rounds":rounds.len(),"rounds":rounds,"oracle":"independent_DataFusion_full_SQL_over_independent_source_endpoints","comparison":"exact_typed_bag_sources_and_MV_plus_output_log_replay","sql_script":root.join("input.sql"),"warehouse":root.join("warehouse"),"performance_qualified":false}),
     )
 }
@@ -274,6 +294,33 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streaming_transaction_accepts_large_total_input_with_bounded_statements() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let mut db = SqlSession::open(root.path()).await?;
+        db.execute("CREATE TABLE input(v VARCHAR)").await?;
+        let payload = "x".repeat(8 * 1024 * 1024 + 1);
+        let statement = format!("INSERT INTO input VALUES ('{payload}')");
+        let statements = vec![statement.clone(), statement];
+        assert!(statements.iter().map(String::len).sum::<usize>() > 16 * 1024 * 1024);
+        let report = execute_batch(&mut db, &statements).await?.ok_or("commit")?;
+        assert_eq!(report.epoch, 2);
+        assert_eq!(report.affected_rows, 2);
+        let count = db
+            .execute("SELECT COUNT(*) AS n FROM input")
+            .await?
+            .rows
+            .ok_or("count")?;
+        equal(
+            &count,
+            &oracle("SELECT CAST(2 AS BIGINT) AS n", &Tables::new())
+                .await?
+                .rows,
+        )?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn generated_wide_sql_preserves_duplicates_nulls_literals_and_replays_as_a_script(
@@ -295,7 +342,10 @@ mod tests {
         let mut arrays = row.columns().to_vec();
         arrays[0] = ScalarValue::Int64(Some(3)).to_array_of_size(1)?;
         let other = RecordBatch::try_new(row.schema(), arrays)?;
-        let rows = concat_batches(&row.schema(), [&row, &row, &other])?;
+        let rows = concat_batches(
+            &row.schema(),
+            std::iter::repeat_n(&row, 130).chain([&other]),
+        )?;
         let complete = Tables::from([("input".into(), rows)]);
         let dir = tempfile::tempdir()?;
         let result = run(
@@ -306,6 +356,8 @@ mod tests {
         .await?;
         assert_eq!(result["status"], "pass");
         assert_eq!(result["completed_rounds"], 3);
+        // Two INSERT batches still publish one initial data commit.
+        assert_eq!(result["bootstrap_epoch"], 3);
         let script = fs::read_to_string(result["sql_script"].as_str().ok_or("script path")?)?;
         let mut db = SqlSession::open(dir.path().join("script-replay")).await?;
         db.execute_script(&script).await?;
