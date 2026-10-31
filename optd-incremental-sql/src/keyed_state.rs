@@ -39,6 +39,7 @@ pub(crate) struct KeyedState {
     schemas: Vec<SchemaRef>,
     key_types: Vec<DataType>,
     inputs: Vec<StateDirectory<Arc<Bucket>>>,
+    residual: Option<match_join::ResidualState>,
     // Window Before is committed output, not a potentially tie-reassigning run.
     outputs: Option<(SchemaRef, StateDirectory<Arc<Bag>>)>,
 }
@@ -140,6 +141,18 @@ fn merge(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<RecordBatch> {
 }
 
 impl KeyedState {
+    /// Compile and bootstrap only the residual state declared by the selected rule.
+    pub(crate) fn initialize_matches(
+        &mut self,
+        ctx: &datafusion::prelude::SessionContext,
+        spec: &IndexSpec,
+    ) -> Result<()> {
+        if let IndexAlgorithm::MatchCounts(operator) = &spec.algorithm {
+            self.residual = match_join::ResidualState::initialize(self, ctx, operator)?;
+        }
+        Ok(())
+    }
+
     /// Account actual input/output path copies after all candidate updates finish.
     pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
         for input in &self.inputs {
@@ -191,6 +204,7 @@ impl KeyedState {
             schemas: inputs.iter().map(RecordBatch::schema).collect(),
             key_types,
             inputs: indexes,
+            residual: None,
             outputs,
         })
     }

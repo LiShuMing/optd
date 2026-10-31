@@ -102,7 +102,7 @@ impl RelationOperator {
 pub enum IndexAlgorithm {
     /// Complete affected input snapshots for join/window evaluation.
     Scoped,
-    /// Pure equijoin membership maintained from original consolidated changes.
+    /// Equijoin membership maintained from original consolidated changes and counts.
     MatchCounts(RelationOperator),
 }
 
@@ -139,7 +139,7 @@ pub enum StateSpec {
         /// Original aggregate expressions and output schema.
         operator: RelationOperator,
     },
-    /// Complete affected-key input buckets and optional window output buckets.
+    /// Affected input buckets with optional row match counts or window output buckets.
     Keyed(IndexSpec),
     /// Group input/output index with its typed key projection.
     Group {
@@ -215,7 +215,7 @@ pub enum Operation {
     ProjectKeys(RelationOperator),
     /// Union affected keys and prepare an isolated candidate index exactly once.
     PrepareIndex(IndexSpec),
-    /// Maintain pure equijoin output from signed changes and match-count crossings.
+    /// Maintain equijoin output from signed changes and match-count crossings.
     MaintainMatchJoin {
         /// Keyed-state slot prepared by the single shared token.
         state: usize,
@@ -368,6 +368,13 @@ impl CompiledProgram {
         } else {
             match self.state {
                 Some(StateSpec::Accumulator { .. }) => super::Strategy::AccumulatorDelta,
+                Some(StateSpec::Keyed(_))
+                    if self.steps.iter().any(|step| {
+                        matches!(step.operation, Operation::EvaluateSnapshot { .. })
+                    }) =>
+                {
+                    super::Strategy::KeyedRecompute
+                }
                 Some(StateSpec::Keyed(_))
                     if self.steps.iter().any(|step| {
                         matches!(step.operation, Operation::MaintainMatchJoin { .. })

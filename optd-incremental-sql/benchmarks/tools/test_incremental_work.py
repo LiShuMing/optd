@@ -65,6 +65,25 @@ class IncrementalWork(unittest.TestCase):
             del round_["sql_stats"]["nodes"][0]["keyed_work"]["match_join_work"]
         self.assertFalse(any("match_join_work" in key for key in audit(source)["observed_work"]))
 
+    def test_residual_pair_and_count_copy_work_remains_separate_and_legacy_unknown(self):
+        source = self.fixture()
+        rounds = source["queries"][0]["profiles"][0]["verification"]["rounds"]
+        for round_ in rounds:
+            round_["sql_stats"]["nodes"] = [{"strategy": "MatchCountDelta", "keyed_work": {
+                "scope": "JoinKeys", "snapshot_input_rows_before": [0, 0],
+                "snapshot_input_rows_after": [0, 0], "match_join_work": {
+                    "residual_candidate_pairs": 6, "residual_predicate_rows": 6,
+                    "match_count_updates": 3, "count_map_entries_copied": 9,
+                    "count_directory_entries_copied": 2}}}]
+        work = audit(source)["observed_work"]
+        for name, total in [("residual_candidate_pairs", 18), ("residual_predicate_rows", 18),
+                            ("match_count_updates", 9), ("count_map_entries_copied", 27),
+                            ("count_directory_entries_copied", 6)]:
+            self.assertEqual(work["keyed_work.match_join_work." + name], total)
+        for round_ in rounds:
+            del round_["sql_stats"]["nodes"][0]["keyed_work"]["match_join_work"]["residual_predicate_rows"]
+        self.assertNotIn("keyed_work.match_join_work.residual_predicate_rows", audit(source)["observed_work"])
+
     def test_unexecuted_planned_blocker_prevents_strict_coverage_claim(self):
         result=audit(self.fixture())
         self.assertEqual(result["counts"],{"total":1,"semantic_pass":1,"strict_plan_eligible":0,

@@ -375,7 +375,7 @@ pub(crate) async fn run(
                     return Err(Error::Invalid("match-count index token differs".into()));
                 }
                 let update = indexes
-                    .get(state)
+                    .get_mut(state)
                     .ok_or_else(|| Error::Invalid("missing match-count index".into()))?;
                 let (delta, work) = update.maintain_match_join(operator)?;
                 if let Some(keyed) = &mut keyed_work {

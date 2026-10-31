@@ -1208,3 +1208,87 @@ no push. Overall ledger remains 12/31 verified, R04a in_progress, 18 pending.
 R04a pure-equijoin implementation: `1733c03` (local). Next slice is the reviewed
 residual count-state transition in match-count design §12; it retains opt-in
 selection, strict NULL-aware refusal and the existing scoped alternative.
+
+### R04a — opt-in residual match-count state
+
+Design review: `6e6ba3d`,
+[match-count design §12–13](docs/src/incremental/match_count_joins.md).
+The opt-in `builtin.match_count_join` contract is now version 2. It compiles the
+original deterministic residual with DataFusion's physical-expression API and
+retains exact full-row peer counts in shared per-key directories. Bootstrap/reopen
+reconstruct these derived counts; the persisted format is unchanged. Pure joins
+keep cardinality-only state. The executor consumes the selected physical operation,
+not original SQL text or a rule name.
+
+Each refresh evaluates only original consolidated changed-row/fixed-peer-row
+candidates, in predicate batches of at most 1024 rows. FALSE/NULL never match.
+The two stages update counts against A-after/B-before, then final A-after/B-after;
+peer count deltas consolidate before zero crossings. Own removed rows lose counts,
+zero-count surviving rows remain indexed, and cached own counts are checked against
+computed fixed-peer counts. Errors discard private input/count candidates.
+
+**Verified:** 13 match-count integration tests, including **1764 signed epochs**
+across all seven orientations and ordinary, NULL-safe, composite, less-than,
+NULL-sensitive and arithmetic conditions. Independent integer/NULL nested-loop
+results and every signed endpoint prefix agree; periodic fresh full SQL verifies
+schemas/results. Directed cases cover duplicate/empty first/last matches, discarded
+and stale candidates, computed/USING/self joins, downstream aggregates/windows,
+durable reopen and a stage-1 division-by-zero after successful private stage-0
+work. A subsequent valid refresh proves neither count nor input state leaked.
+The RED residual-plan test selected the previous scoped rule (exit 101):
+`target/roadmap-r04a-residual-red-20261031.log`.
+
+Hot semi/anti replacements keep 15 other rows in the changed bucket unchanged.
+Actual residual rows equal two changed distinct rows times the peer bucket size,
+with no unchanged/unchanged pair reevaluation, no emitted pairs and no transient
+zero crossings. Growing untouched keys leaves pair/count-map work unchanged while
+persistent count-directory path copies are separately bounded. Counters report
+remaining complete touched input/count-map copies and materialization honestly.
+Bootstrap pair evaluation, source/cache/store IO and latency are outside these
+refresh counters; no end-to-end delta complexity or performance is certified.
+
+An explicit custom Optd rewrite adds a shared S-S snapshot to a match-maintained
+program. Full SQL remains equal and the final strategy reports KeyedRecompute,
+with both snapshot and match work visible. This corrects physical-strategy
+precedence so a frontend label cannot conceal actual scoped evaluation.
+
+Final environment and commands match the pure-slice R01a wrapper above: Rust 1.95.0,
+offline locked dependencies, four jobs, debug=0, compiler incremental disabled,
+`target/roadmap-20261031` and its `tmp` subdirectory.
+
+```sh
+bash /tmp/optd-sql-env-20261029.sh env \
+  CARGO_TARGET_DIR=/home/admin/xwork/optd/target/roadmap-20261031 \
+  TMPDIR=/home/admin/xwork/optd/target/roadmap-20261031/tmp \
+  bash scripts/agent-check.sh sql
+python3 -m unittest discover -s optd-incremental-sql/benchmarks/tools -p 'test_*.py'
+bash /tmp/optd-sql-env-20261029.sh env \
+  CARGO_TARGET_DIR=/home/admin/xwork/optd/target/roadmap-20261031 \
+  TMPDIR=/home/admin/xwork/optd/target/roadmap-20261031/tmp \
+  RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --offline --locked \
+  -p optd-incremental-sql --no-deps --document-private-items --features iceberg
+bash /tmp/optd-sql-env-20261029.sh env \
+  MDBOOK_BUILD__BUILD_DIR=/home/admin/xwork/optd/target/roadmap-r04a-residual-book-20261031 \
+  mdbook build docs
+```
+
+Observed: **282 default / 296 Iceberg passed; 2/3 ignored**, fmt and both Clippy
+configurations PASS; **46 tool tests PASS**, including residual/count-copy metrics
+and historical-field absence. Gate log:
+`target/roadmap-r04a-residual-gates-20261031.log`; the initial full pass before the
+stronger hot fixture is retained as `target/roadmap-r04a-residual-initial-gates-20261031.log`.
+Private rustdoc/mdBook exit 0 in `target/roadmap-r04a-residual-{rustdoc,book}-20261031.log`.
+After the complete gates, the stage-two predicate-failure regression was strengthened:
+the next successful batch replaces the original peer row, exercising the retained
+count that stage one could otherwise have corrupted. Only this test changed.
+Fmt plus focused `clippy --no-deps --test match_count_sql -- -D warnings` and
+`test --test match_count_sql`, each under default and Iceberg configurations,
+all exited 0; **13 tests passed in each configuration**. Exact commands/results:
+`target/roadmap-r04a-residual-final-focused-20261031.log`.
+No new test is ignored. The existing ignored full-query/large-recovery/subprocess
+witnesses do not certify fresh full TPC or standard-scale performance.
+
+**Remaining:** default registry/SQL CREATE MV/DML/identified retry/history/reopen
+rollout and fresh isolated directed TPC witnesses. NULL-aware anti joins retain
+strict refusal pending R06; mark/range joins remain separate tasks. R04a remains
+in_progress; ledger stays 12/31 verified and 18 pending. Local commit only, no push.

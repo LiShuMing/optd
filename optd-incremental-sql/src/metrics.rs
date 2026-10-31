@@ -126,19 +126,19 @@ pub struct KeyedWork {
     pub match_join_work: Option<MatchJoinWork>,
 }
 
-/// Operator-local pure equijoin work, including touched-bucket rebuilding.
+/// Operator-local match-count work, including touched-bucket rebuilding.
 /// Source/cache IO and persistent-directory copies are recorded separately.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct MatchJoinWork {
     /// Consolidated distinct changed rows processed over the two stages.
     pub changed_entries: usize,
-    /// O(1) peer bucket cardinality probes, including absent/NULL buckets.
+    /// Peer bucket probes, including absent/NULL buckets; pure cardinality is O(1).
     pub count_probes: usize,
-    /// Distinct peer rows visited to emit matched pairs or membership changes.
+    /// Peer entries visited for pairs, residual predicates or pure zero crossings.
     pub peer_entries_visited: usize,
     /// Changed-distinct-row times peer-distinct-row products emitted by outer joins.
     pub matched_pairs: usize,
-    /// Valid key counts whose positivity changes during one of the two stages.
+    /// Pure key-count crossings or residual fixed-peer row-count crossings.
     pub zero_crossings: usize,
     /// Nonzero weighted output contributions before consolidation (duplicates included).
     pub emitted_contributions: usize,
@@ -146,6 +146,16 @@ pub struct MatchJoinWork {
     pub bucket_entries_copied: usize,
     /// Expanded positive rows materialized while rebuilding touched input buckets.
     pub bucket_rows_materialized: usize,
+    /// Distinct changed-row/peer-row pairs evaluated by the residual expression.
+    pub residual_candidate_pairs: usize,
+    /// Physical predicate rows evaluated, including FALSE and NULL results.
+    pub residual_predicate_rows: usize,
+    /// Changed own-row count writes/removals plus nonzero peer-count delta writes.
+    pub match_count_updates: usize,
+    /// Existing full-row count entries actually cloned in touched count maps.
+    pub count_map_entries_copied: usize,
+    /// Persistent count-directory entries actually copied by candidate updates.
+    pub count_directory_entries_copied: usize,
 }
 
 /// Actual dirty nodes and source epoch for a prepared refresh.

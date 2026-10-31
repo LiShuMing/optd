@@ -87,7 +87,7 @@ pub enum DeltaExpr {
 pub enum Maintenance {
     /// Update qualified retractable aggregate states from signed changes only.
     Accumulate,
-    /// Maintain pure outer/semi/anti joins using indexed match-count transitions.
+    /// Maintain equikey outer/semi/anti joins using indexed match-count transitions.
     MatchJoin,
     /// Compile this verified shorthand into Optd logical and physical plans.
     Delta(DeltaExpr),
@@ -230,7 +230,7 @@ pub(super) fn verify(context: &RuleContext<'_>, maintenance: &Maintenance) -> Re
             if super::capability::match_join_eligible(context)? {
                 Ok(())
             } else {
-                Err(Error::Invalid("unqualified pure match-count join".into()))
+                Err(Error::Invalid("unqualified match-count join".into()))
             }
         }
         Maintenance::Accumulate if context.accumulator_eligible() => Ok(()),

@@ -287,7 +287,9 @@ impl SqlView {
                     };
                     let output_batch = out.states[id].rows.materialize()?.batch;
                     let output = output_keys.as_ref().map(|keys| (&output_batch, keys));
-                    out.keyed[id] = Some(KeyedState::new(&inputs, &projected, output)?);
+                    let mut index = KeyedState::new(&inputs, &projected, output)?;
+                    index.initialize_matches(&out.ctx, spec)?;
+                    out.keyed[id] = Some(index);
                 }
                 None => {}
             }

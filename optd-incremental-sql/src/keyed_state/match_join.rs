@@ -1,11 +1,13 @@
-//! Pure equijoin transitions over the declared Before/After keyed state.
+//! Match-count equijoin transitions over the declared Before/After keyed state.
 //!
-//! Every row of a non-NULL equikey bucket shares the same peer match count.
+//! For pure equijoins, each eligible row shares its bucket's peer match count.
+//! Residual predicates use per-row counts in the dedicated child module.
 //! Semi/anti joins therefore read peers only at zero crossings. Outer joins
 //! additionally visit changed-row/peer pairs to emit their necessary output.
 
 use std::collections::HashMap;
 
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{NullEquality, ScalarValue};
 use datafusion::logical_expr::{JoinType, LogicalPlan};
 
@@ -14,6 +16,9 @@ use crate::bag::Bag;
 use crate::metrics::MatchJoinWork;
 use crate::planner::plan::RelationOperator;
 use crate::{Error, Result};
+
+mod residual;
+pub(super) use residual::ResidualState;
 
 /// Whether one side emits its own row at a given peer-count positivity.
 #[derive(Clone, Copy)]
@@ -40,6 +45,16 @@ struct Output {
     work: MatchJoinWork,
 }
 impl Output {
+    /// Consolidate typed signed output after both stages have completed.
+    fn finish(self, schema: SchemaRef) -> Result<(Bag, MatchJoinWork)> {
+        let bag = Bag::from_unique_entries(
+            schema,
+            self.rows
+                .iter()
+                .map(|(row, weight)| (row.as_slice(), *weight)),
+        )?;
+        Ok((bag, self.work))
+    }
     fn membership(&self, side: usize) -> Membership {
         match (self.kind, side) {
             (JoinType::LeftSemi, 0) | (JoinType::RightSemi, 1) => Membership::Matched,
@@ -171,7 +186,7 @@ impl Output {
 impl KeyedUpdate<'_> {
     /// Execute the two ordered one-sided transitions, never snapshot diffing.
     pub(crate) fn maintain_match_join(
-        &self,
+        &mut self,
         operator: &RelationOperator,
     ) -> Result<(Bag, MatchJoinWork)> {
         let LogicalPlan::Join(join) = operator.template.as_ref() else {
@@ -184,11 +199,7 @@ impl KeyedUpdate<'_> {
         let before = self
             .before
             .ok_or_else(|| invalid("match-count Before is not bound"))?;
-        if !self.after_readable
-            || update.changes.len() != 2
-            || join.filter.is_some()
-            || join.null_aware
-        {
+        if !self.after_readable || update.changes.len() != 2 || join.null_aware {
             return Err(invalid("unqualified match-count state/operator"));
         }
         let mut nulls = [Vec::new(), Vec::new()];
@@ -205,6 +216,21 @@ impl KeyedUpdate<'_> {
             rows: HashMap::new(),
             work: update.work.clone(),
         };
+        if let Some(residual) = &self.state.residual {
+            let mut next = residual.clone();
+            next.maintain(
+                before,
+                &self.state,
+                &update.changes,
+                join.null_equality,
+                &mut output,
+            )?;
+            self.state.residual = Some(next);
+            return output.finish(operator.schema());
+        }
+        if join.filter.is_some() {
+            return Err(invalid("missing residual match-count state"));
+        }
         // Delta-left with Before-right, then After-left with Delta-right. This
         // ordering counts the cross term once and avoids transient row ordering.
         for (side, deltas) in update.changes.iter().enumerate() {
@@ -232,14 +258,7 @@ impl KeyedUpdate<'_> {
                 output.stage(side, &delta.bag, peer, count(before), count(&self.state))?;
             }
         }
-        let bag = Bag::from_unique_entries(
-            operator.schema(),
-            output
-                .rows
-                .iter()
-                .map(|(row, weight)| (row.as_slice(), *weight)),
-        )?;
-        Ok((bag, output.work))
+        output.finish(operator.schema())
     }
 }
 

@@ -1,7 +1,7 @@
 //! Typed, multi-table SQL maintenance and atomic host-local recovery.
 //!
-//! Linear operators and inner joins propagate signed row changes; nonlinear
-//! operators explicitly report local recomputation. No whole-query fallback is
+//! Linear operators propagate signed changes; qualified aggregates and joins
+//! maintain explicit state. Other operators report local recomputation. No whole-query fallback is
 //! hidden behind the incremental API. See `docs/src/incremental/sql_execution.md`.
 
 #![deny(missing_docs)]

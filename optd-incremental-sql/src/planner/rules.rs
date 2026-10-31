@@ -67,6 +67,14 @@ pub(super) fn match_count_join() -> Arc<dyn IncrementalRule> {
 }
 
 impl IncrementalRule for Builtin {
+    fn version(&self) -> u32 {
+        if matches!(self, Self::MatchCountJoin) {
+            2
+        } else {
+            1
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
             Self::Constant => "builtin.constant",
@@ -167,7 +175,7 @@ impl IncrementalRule for Builtin {
 
     fn rewrite(&self, context: &RuleContext<'_>) -> Result<RuleRewrite> {
         let (maintenance, reason) = match self {
-            Self::MatchCountJoin => (Maintenance::MatchJoin, "maintain pure equijoin match counts using delta-left/before-right then after-left/delta-right; peer membership changes only at zero crossings"),
+            Self::MatchCountJoin => (Maintenance::MatchJoin, "maintain equijoin match counts using delta-left/before-right then after-left/delta-right; peer membership changes only at zero crossings"),
             Self::Accumulator => (Maintenance::Accumulate, "update qualified builtin aggregate state from insertions/retractions without reading historical group inputs"),
             Self::Constant => (
                 Maintenance::Constant,

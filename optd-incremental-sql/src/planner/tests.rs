@@ -324,7 +324,7 @@ fn null_aware_anti_join_cannot_declare_only_equal_key_dependencies() -> Result<(
 }
 
 #[test]
-fn match_join_frontend_refuses_inner_residual_and_null_aware_operators() -> Result<()> {
+fn match_join_frontend_admits_residuals_but_refuses_inner_and_null_aware_operators() -> Result<()> {
     use datafusion::logical_expr::{lit, Join, JoinType};
     let LogicalPlan::Join(join) = keyed_join(DataType::Int64, DataType::Int64)? else {
         panic!("builder creates a join");
@@ -332,7 +332,7 @@ fn match_join_frontend_refuses_inner_residual_and_null_aware_operators() -> Resu
     for (kind, residual, null_aware, eligible) in [
         (JoinType::Full, None, false, true),
         (JoinType::Inner, None, false, false),
-        (JoinType::Left, Some(lit(true)), false, false),
+        (JoinType::Left, Some(lit(true)), false, true),
         (JoinType::LeftAnti, None, true, false),
     ] {
         let plan = LogicalPlan::Join(Join::try_new(

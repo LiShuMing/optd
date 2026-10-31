@@ -1,6 +1,6 @@
 # Stateful outer/semi/anti join maintenance from match-count transitions
 
-**Status:** accepted · 2026-10-31; local source/API design review; pure-equijoin opt-in implemented, residual acceptance pending
+**Status:** accepted · 2026-10-31; local source/API design review; pure/residual opt-in implemented, default/SQL acceptance pending
 **Scope:** R04a typed equijoin keys, all seven outer/semi/anti orientations, optional
 SQL residual conditions and null-safe equality. Reuse Optd plans and derived
 candidate state. Mark/range joins, NULL-aware anti-join global dependencies and durable operator-state formats are separate.
@@ -260,3 +260,36 @@ Add a RED residual-plan test, independent integer/NULL residual oracle, randomiz
 two-sided signed replay, zero crossings/cancellation and hot/untouched scope tests,
 then both feature gates. Final strategy diagnostics must report any actually executed
 snapshot evaluations even when a custom plan also contains match maintenance.
+
+
+## 13. Residual implementation slice
+
+The opt-in rule is now version 2 and includes deterministic residuals. Bootstrap
+compiles a DataFusion Boolean expression and derives per-key full-row count maps.
+The physical operation evaluates only changed-row/fixed-peer candidates in chunks
+of at most 1024 rows, then applies consolidated peer-count transitions. Counts and
+inputs remain isolated in the prepared candidate; reopen reconstructs both maps.
+Pure equijoins retain the cardinality-only path. NULL-aware anti joins still require
+R06's global dependency algorithm and remain explicitly refused in strict mode.
+
+Thirteen SQL integration tests cover seven join orientations over 1764 signed
+randomized epochs with an independent integer/NULL oracle, periodic full SQL,
+NULL-safe and arithmetic residuals, FALSE/NULL, duplicate rows, empty first/last
+matches, discard/stale/failure, downstream consumers and durable reopen. A second
+stage division-by-zero regression proves first-stage candidate writes do not leak.
+Hot semi/anti replacement consolidates zero net peer counts before crossings;
+refresh evaluates exactly changed-distinct-row times peer-distinct-row candidates.
+Growing untouched keys keeps pair/count-map work fixed, with count-directory path
+copies separately bounded. Remaining full touched input/count-map copies are
+measured. Bootstrap pair work, source/cache/store IO and latency are not qualified
+by these refresh counters.
+
+An explicit custom Optd rule regression adds S-S snapshot evaluation to an otherwise
+match-maintained program. Its result remains equal to full SQL and diagnostics
+report KeyedRecompute plus the actual snapshot and match counters. This prevents
+frontend labels from hiding a final program's work.
+
+The RED residual-plan regression selected the former scoped rule. Current gate
+commands/results and local implementation identity are recorded in ROADMAP.md.
+Default SQL session selection, identified request/history acceptance and directed
+TPC witnesses remain the next rollout slice; R04a remains in_progress.
