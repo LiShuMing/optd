@@ -60,7 +60,7 @@ impl Bag {
 
     fn collect(batch: &RecordBatch, weight: impl Fn(usize) -> i64) -> Result<Self> {
         check_row_limit(batch.num_rows())?;
-        if batch.get_array_memory_size() > MAX_MATERIALIZED_BYTES {
+        if retained_input_bytes(batch)? > MAX_MATERIALIZED_BYTES {
             return Err(Error::Invalid(format!(
                 "local bag input exceeds the {MAX_MATERIALIZED_BYTES}-byte safety limit"
             )));
@@ -425,6 +425,57 @@ fn clone_row(row: &[ScalarValue]) -> Result<Vec<ScalarValue>> {
     Ok(cloned)
 }
 
+/// Count owned buffer allocations once even when IPC columns share a backing
+/// message. Array memory-size sums count the same capacity for every slice.
+fn retained_input_bytes(batch: &RecordBatch) -> Result<usize> {
+    use datafusion::arrow::array::ArrayData;
+    use datafusion::arrow::buffer::Buffer;
+    use std::collections::BTreeMap;
+
+    fn visit(data: &ArrayData, allocations: &mut BTreeMap<usize, usize>) -> Result<usize> {
+        let mut metadata = std::mem::size_of::<ArrayData>()
+            .checked_add(
+                data.buffers()
+                    .len()
+                    .checked_mul(std::mem::size_of::<Buffer>())
+                    .ok_or(Error::Overflow)?,
+            )
+            .ok_or(Error::Overflow)?;
+        for buffer in data
+            .buffers()
+            .iter()
+            .chain(data.nulls().map(|n| n.buffer()))
+        {
+            let bytes = buffer.capacity().max(
+                buffer
+                    .ptr_offset()
+                    .checked_add(buffer.len())
+                    .ok_or(Error::Overflow)?,
+            );
+            let entry = allocations
+                .entry(buffer.data_ptr().as_ptr() as usize)
+                .or_default();
+            *entry = (*entry).max(bytes);
+        }
+        for child in data.child_data() {
+            metadata = metadata
+                .checked_add(visit(child, allocations)?)
+                .ok_or(Error::Overflow)?;
+        }
+        Ok(metadata)
+    }
+    let mut allocations = BTreeMap::new();
+    let mut bytes = 0usize;
+    for column in batch.columns() {
+        bytes = bytes
+            .checked_add(visit(&column.to_data(), &mut allocations)?)
+            .ok_or(Error::Overflow)?;
+    }
+    allocations
+        .values()
+        .try_fold(bytes, |sum, n| sum.checked_add(*n).ok_or(Error::Overflow))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,5 +654,40 @@ mod tests {
         };
         assert_eq!(scalar_rows(&output)?, scalar_rows(&second.to_batch()?)?);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod allocation_budget_tests {
+    use super::*;
+
+    fn reserved_array(capacity: usize) -> Arc<Int64Array> {
+        let mut values = Vec::with_capacity(capacity);
+        values.push(7);
+        Arc::new(Int64Array::from(values))
+    }
+
+    #[test]
+    fn shared_arrow_allocations_count_once_and_oversized_allocations_still_reject() {
+        let array = reserved_array(MAX_MATERIALIZED_BYTES / 8 / 4);
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(
+                (0..8)
+                    .map(|i| Field::new(format!("v{i}"), DataType::Int64, false))
+                    .collect::<Vec<_>>(),
+            )),
+            vec![array as ArrayRef; 8],
+        )
+        .unwrap();
+        assert!(batch.get_array_memory_size() > MAX_MATERIALIZED_BYTES);
+        assert!(retained_input_bytes(&batch).unwrap() < MAX_MATERIALIZED_BYTES);
+        assert_eq!(Bag::from_batch(&batch).unwrap().total().unwrap(), 1);
+        let oversized = RecordBatch::try_from_iter(vec![(
+            "v",
+            reserved_array(MAX_MATERIALIZED_BYTES / 8 + 1) as ArrayRef,
+        )])
+        .unwrap();
+        assert!(retained_input_bytes(&oversized).unwrap() > MAX_MATERIALIZED_BYTES);
+        assert!(Bag::from_batch(&oversized).is_err());
     }
 }

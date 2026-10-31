@@ -468,3 +468,86 @@ async fn nullable_update_target_casts_reject_overflow_and_invalid_text_atomicall
     }
     db.verify_output_history().unwrap();
 }
+
+/// Generate the large Q21 SQL profile with benchmark_sql_database first. Its
+/// full-input checkpoint retains shared IPC allocations across many columns.
+#[tokio::test]
+#[ignore = "large recovery witness; set OPTD_SQL_RECOVERY_WAREHOUSE to the Q21 warehouse"]
+async fn database_ipc_reopen_counts_shared_allocations_once() {
+    use datafusion::common::ScalarValue;
+    use std::collections::HashMap;
+    let root = std::path::PathBuf::from(
+        std::env::var("OPTD_SQL_RECOVERY_WAREHOUSE")
+            .expect("explicit recovery witness path required"),
+    );
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            root.join(pointer["directory"].as_str().unwrap())
+                .join("manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut duplicated_capacity = false;
+    for table in manifest["tables"].as_object().unwrap().values() {
+        let data = &table["data"];
+        let file = std::fs::File::open(
+            root.join(data["directory"].as_str().unwrap())
+                .join(data["file"]["name"].as_str().unwrap()),
+        )
+        .unwrap();
+        let batch = datafusion::arrow::ipc::reader::FileReader::try_new(file, None)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        if batch.get_array_memory_size() > 256 * 1024 * 1024 {
+            assert!(data["file"]["bytes"].as_u64().unwrap() < 256 * 1024 * 1024);
+            duplicated_capacity = true;
+        }
+    }
+    assert!(
+        duplicated_capacity,
+        "witness must exercise repeated IPC allocation accounting"
+    );
+    let definition = &manifest["views"]["maintained_result"];
+    let sql = definition["sql"].as_str().unwrap();
+    let mut db = SqlSession::open(&root).await.unwrap();
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+    for name in definition["dependencies"].as_array().unwrap() {
+        let name = name.as_str().unwrap();
+        let rows = db
+            .execute(&format!("SELECT * FROM {name}"))
+            .await
+            .unwrap()
+            .rows
+            .unwrap();
+        ctx.register_batch(name, rows).unwrap();
+    }
+    let frame = ctx.sql(sql).await.unwrap();
+    let schema = Arc::new(frame.schema().as_arrow().clone());
+    let expected = concat_batches(&schema, &frame.collect().await.unwrap()).unwrap();
+    let actual = db
+        .execute("SELECT * FROM maintained_result")
+        .await
+        .unwrap()
+        .rows
+        .unwrap();
+    let bag = |batch: &RecordBatch| {
+        let mut rows = HashMap::<Vec<ScalarValue>, i64>::new();
+        for i in 0..batch.num_rows() {
+            let row = batch
+                .columns()
+                .iter()
+                .map(|a| ScalarValue::try_from_array(a, i).unwrap())
+                .collect();
+            *rows.entry(row).or_default() += 1;
+        }
+        rows
+    };
+    assert!(actual.num_rows() > 0, "large witness must be nonempty");
+    assert_eq!(bag(&actual), bag(&expected));
+    db.verify_output_history().unwrap();
+}
