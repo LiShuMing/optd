@@ -31,7 +31,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | --- | --- | --- | --- | --- |
 | R01a | P0 | Refresh work accounting: state-directory copies, relation rebuilds and materialization | Actual operation-boundary counters distinguish rows, entries and Arrow bytes; fixed-delta tests expose current scale costs; explicit scope exclusions | verified |
 | R01b | P0 | SQL selector and DML work accounting | Measure consumed source batches/rows separately from available relation rows; report target rebuild and delta generation | verified |
-| R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | pending |
+| R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | verified |
 | R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | pending |
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | pending |
@@ -204,7 +204,46 @@ Implementation is local-only. Counting delivered Arrow buffers does not measure
 allocator/device IO. Full target conversion and replacement remain visible costs;
 no efficiency or full TPC/performance qualification is claimed.
 
+### R01c — SQL database storage and recovery work
+
+Design: [store and recovery accounting](docs/src/incremental/store_work_accounting.md).
+Expose cumulative `SqlSession::store_work()` and immutable `recovery_work()`.
+Record successful file-helper boundaries using actual serialized lengths and rows:
+CURRENT/manifest reads/writes, checksum passes, table/view/delta reads/writes/reuse,
+lineage traversals and visits. Reopen separately records per-view dependency inputs,
+reconstructed output materialization and durable output comparison. Diagnostics are
+not persisted and never change original receipt identity. Completed operations
+remain inspectable in fenced sessions after a later barrier fails.
+
+**Verified feature baseline:** before implementation, the focused `database_work`
+target failed compilation (exit 101) because the new APIs did not exist; this is
+not a pre-existing semantic failure. Log `target/roadmap-r01c-red-20261031.log`.
+Four initial integration cases then passed (exit 0), log
+`target/roadmap-r01c-green-20261031.log`. Complete gates include a fifth case for
+shared dependencies across two restored views, plus one atomic-counter overflow
+unit test. Cases compare written byte counts with actual payload/manifest/CURRENT
+files, expose full writes at fixed changes with growing data, check no-op reuse,
+retry vs history vs recovery boundaries, NULL/duplicate-sensitive endpoints,
+isolated roots and failures at both actual publication barriers.
+
+Commands use the R01a wrapper/environment and project target/TMPDIR. Focused:
+`cargo +1.95.0 test --offline --locked -p optd-incremental-sql --test database_work`.
+`bash scripts/agent-check.sh sql` exited 0: format, both Clippy configurations,
+181 default tests (2 ignored), 195 Iceberg tests (3 ignored), including subprocess
+recovery. Log `target/roadmap-r01c-gates-20261031.log`. Private rustdoc with warnings
+denied and mdBook in the R01a environment also exited 0; logs
+`target/roadmap-r01c-rustdoc-20261031.log`, `target/roadmap-r01c-docs-20261031.log`.
+No full TPC matrix or controlled performance comparison was executed.
+
+This verification covers the host-local SQL database, not standalone checkpoint
+or native-source IO. Partial failed helpers, directory/fsync work, allocator/device
+traffic, comparison CPU and internal bootstrap operator visits remain unmeasured.
+Read volumes describe decoded file lengths; hash passes are separately counted.
+Current whole-payload writes and history scans remain visible costs. Local commit
+only; no publication is included.
+
 ### Next increment
 
-R01c: instrument SQL database payload reuse/writes, metadata/history reads and
-recovery reconstruction without serializing invocation work into original receipts.
+R01d: expose separate command/transaction, verification and recovery work in SQL
+and benchmark outputs, extending the structured work audit without manufacturing
+zeros for unavailable legacy measurements or reexecuting work to obtain counters.

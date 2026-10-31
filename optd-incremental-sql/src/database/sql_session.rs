@@ -4,6 +4,7 @@ use super::dml_compiler::TransactionMode;
 use super::response::{CommitReport, SqlResponse};
 use super::sql::{self, RelationScope};
 use super::store::{DatabaseSnapshot, DatabaseStore, Receipt, TableData, ViewData};
+use super::store_work::{RecoveryWork, StoreWork};
 use super::transaction_workspace::{PreparedCommit, TransactionWorkspace};
 use crate::bag::Bag;
 use crate::error::invalid;
@@ -35,6 +36,7 @@ pub struct SqlSession {
     views: BTreeMap<String, SqlView>,
     transaction: Option<TransactionWorkspace>,
     fenced: bool,
+    recovery: RecoveryWork,
 }
 
 impl SqlSession {
@@ -46,9 +48,13 @@ impl SqlSession {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let store = DatabaseStore::open(path.as_ref())?;
         let committed = store.snapshot();
+        let mut recovery = RecoveryWork {
+            store: store.work()?,
+            ..Default::default()
+        };
         let mut views = BTreeMap::new();
         for (name, v) in &committed.views {
-            let tables = v
+            let tables: BTreeMap<String, RecordBatch> = v
                 .dependencies
                 .iter()
                 .map(|n| {
@@ -59,13 +65,20 @@ impl SqlSession {
                     Ok((n.clone(), t.batch.clone()))
                 })
                 .collect::<Result<_>>()?;
+            let dependency_rows = tables
+                .values()
+                .try_fold(0u64, |rows, batch: &RecordBatch| {
+                    rows.checked_add(batch.num_rows() as u64)
+                        .ok_or(Error::Overflow)
+                })?;
             let engine = SqlView::new_with_optimizer(
                 &v.sql,
                 tables,
                 IncrementalOptimizer::default().require_incremental(),
             )
             .await?;
-            if Bag::from_batch(&engine.contents()?)? != Bag::from_batch(&v.output)? {
+            let output = engine.contents()?;
+            if Bag::from_batch(&output)? != Bag::from_batch(&v.output)? {
                 return Err(invalid(
                     "restored materialized view differs from committed result",
                 ));
@@ -78,6 +91,7 @@ impl SqlSession {
             if sql::reads(&plan)? != v.dependencies {
                 return Err(invalid("restored dependency catalog differs from SQL"));
             }
+            recovery.record_view(dependency_rows, &output, v.output.num_rows())?;
             views.insert(name.clone(), engine);
         }
         Ok(Self {
@@ -86,7 +100,22 @@ impl SqlSession {
             views,
             transaction: None,
             fenced: false,
+            recovery,
         })
+    }
+
+    /// Completed store operations since this session began opening, including retries.
+    ///
+    /// This read-only diagnostic is available after publication failures. It does not
+    /// establish whether a write committed; reopen to resolve a fenced session.
+    pub fn store_work(&self) -> Result<StoreWork> {
+        self.store.work()
+    }
+
+    /// Fixed work of this successful open, including full view-state reconstruction.
+    /// Later requests, retries and output-history verification do not change it.
+    pub fn recovery_work(&self) -> &RecoveryWork {
+        &self.recovery
     }
 
     /// Current committed database epoch; uncommitted statements do not advance it.

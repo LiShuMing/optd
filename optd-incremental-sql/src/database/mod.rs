@@ -10,8 +10,10 @@ mod selector_work;
 mod sql;
 mod sql_session;
 mod store;
+mod store_work;
 mod transaction_workspace;
 
 pub use dml_work::{DmlExecutionWork, DmlTargetWork, SelectorWork};
 pub use response::{display_rows, CommitReport, DmlWork, SqlResponse};
 pub use sql_session::SqlSession;
+pub use store_work::{FileWork, PayloadIoWork, PayloadWork, RecoveryWork, StoreWork};

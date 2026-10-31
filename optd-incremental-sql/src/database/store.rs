@@ -9,6 +9,7 @@ use datafusion::arrow::array::RecordBatch;
 use serde::{Deserialize, Serialize};
 
 use super::response::CommitReport;
+use super::store_work::{PayloadAction, PayloadKind, StoreWork, StoreWorkCounter};
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES};
 use crate::error::invalid;
 use crate::store::{
@@ -110,6 +111,7 @@ pub(super) struct DatabaseStore {
     head: Option<Root>,
     manifest: Option<Manifest>,
     snapshot: DatabaseSnapshot,
+    work: StoreWorkCounter,
 }
 
 impl DatabaseStore {
@@ -129,6 +131,7 @@ impl DatabaseStore {
         let mut out = Self {
             root,
             _lock: lock,
+            work: StoreWorkCounter::default(),
             head: None,
             manifest: None,
             snapshot: DatabaseSnapshot {
@@ -138,8 +141,9 @@ impl DatabaseStore {
         };
         match fs::symlink_metadata(out.root.join("CURRENT")) {
             Ok(_) => {
-                let head: Root =
-                    serde_json::from_slice(&read_json_file(&out.root.join("CURRENT"))?)?;
+                let bytes = read_json_file(&out.root.join("CURRENT"))?;
+                out.work.pointer_read(bytes.len())?;
+                let head: Root = serde_json::from_slice(&bytes)?;
                 let m = out.read_manifest(&head)?;
                 out.snapshot = out.read_snapshot(&m)?;
                 out.manifest = Some(m);
@@ -156,6 +160,11 @@ impl DatabaseStore {
     /// Clone catalog state while retaining shared immutable Arrow buffers.
     pub fn snapshot(&self) -> DatabaseSnapshot {
         self.snapshot.clone()
+    }
+
+    /// Snapshot completed file work; available even when the owning session is fenced.
+    pub fn work(&self) -> Result<StoreWork> {
+        self.work.snapshot()
     }
 
     fn directory(&self, name: &str) -> Result<PathBuf> {
@@ -178,6 +187,7 @@ impl DatabaseStore {
         let dir = self.directory(&root.directory)?;
         let file = verified_file(&dir, &root.manifest)?;
         let m: Manifest = serde_json::from_reader(file)?;
+        self.work.manifest_read(root.manifest.bytes)?;
         if m.format != FORMAT || m.epoch == 0 || m.next_id == 0 {
             return Err(invalid("invalid database format or epoch"));
         }
@@ -207,11 +217,13 @@ impl DatabaseStore {
         Ok(m)
     }
 
-    fn batch(&self, p: &Payload) -> Result<RecordBatch> {
+    fn batch(&self, p: &Payload, kind: PayloadKind) -> Result<RecordBatch> {
         if p.file.bytes > MAX_MATERIALIZED_BYTES as u64 {
             return Err(invalid("database IPC payload exceeds byte budget"));
         }
         let batch = read_batch(&self.directory(&p.directory)?, &p.file)?;
+        self.work
+            .payload(kind, PayloadAction::Read, p.file.bytes, batch.num_rows())?;
         Bag::from_batch(&batch)?;
         Ok(batch)
     }
@@ -228,7 +240,7 @@ impl DatabaseStore {
                         n.clone(),
                         TableData {
                             id: t.id,
-                            batch: self.batch(&t.data)?,
+                            batch: self.batch(&t.data, PayloadKind::Table)?,
                         },
                     ))
                 })
@@ -243,7 +255,7 @@ impl DatabaseStore {
                             id: v.id,
                             sql: v.sql.clone(),
                             dependencies: v.dependencies.clone(),
-                            output: self.batch(&v.output)?,
+                            output: self.batch(&v.output, PayloadKind::ViewOutput)?,
                         },
                     ))
                 })
@@ -251,12 +263,13 @@ impl DatabaseStore {
             deltas: m
                 .deltas
                 .iter()
-                .map(|(n, p)| Ok((n.clone(), self.batch(p)?)))
+                .map(|(n, p)| Ok((n.clone(), self.batch(p, PayloadKind::OutputDelta)?)))
                 .collect::<Result<_>>()?,
         })
     }
 
     fn manifests(&self) -> Result<Vec<Manifest>> {
+        self.work.start_history()?;
         let mut current = self.head.clone();
         let mut result = Vec::new();
         let mut visited = BTreeSet::new();
@@ -269,6 +282,7 @@ impl DatabaseStore {
             if m.epoch != expected {
                 return Err(invalid("noncontiguous database lineage"));
             }
+            self.work.visit_manifest()?;
             expected = expected.checked_sub(1).ok_or(Error::Overflow)?;
             current = m.previous.clone();
             result.push(m);
@@ -322,7 +336,10 @@ impl DatabaseStore {
             return Err(invalid("database predecessor differs"));
         }
         let disk = match fs::read(self.root.join("CURRENT")) {
-            Ok(bytes) => Some(serde_json::from_slice::<Root>(&bytes)?),
+            Ok(bytes) => {
+                self.work.pointer_read(bytes.len())?;
+                Some(serde_json::from_slice::<Root>(&bytes)?)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
@@ -343,12 +360,16 @@ impl DatabaseStore {
                 Err(e) => return Err(e.into()),
             }
         };
-        let payload = |filename: String, batch: &RecordBatch| -> Result<Payload> {
-            Ok(Payload {
-                directory: name.clone(),
-                file: write_batch(&dir, &filename, batch)?,
-            })
-        };
+        let payload =
+            |kind: PayloadKind, filename: String, batch: &RecordBatch| -> Result<Payload> {
+                let file = write_batch(&dir, &filename, batch)?;
+                self.work
+                    .payload(kind, PayloadAction::Write, file.bytes, batch.num_rows())?;
+                Ok(Payload {
+                    directory: name.clone(),
+                    file,
+                })
+            };
         let mut tables = BTreeMap::new();
         for (n, t) in &next.tables {
             let reusable = self
@@ -358,8 +379,20 @@ impl DatabaseStore {
                 .filter(|old| old.id == t.id && batches_equal(&old.batch, &t.batch))
                 .and_then(|_| self.manifest.as_ref()?.tables.get(n));
             let data = match reusable {
-                Some(old) => old.data.clone(),
-                None => payload(format!("table-{}.arrow", t.id), &t.batch)?,
+                Some(old) => {
+                    self.work.payload(
+                        PayloadKind::Table,
+                        PayloadAction::Reuse,
+                        old.data.file.bytes,
+                        t.batch.num_rows(),
+                    )?;
+                    old.data.clone()
+                }
+                None => payload(
+                    PayloadKind::Table,
+                    format!("table-{}.arrow", t.id),
+                    &t.batch,
+                )?,
             };
             tables.insert(n.clone(), TableEntry { id: t.id, data });
         }
@@ -372,8 +405,20 @@ impl DatabaseStore {
                 .filter(|old| old.id == v.id && batches_equal(&old.output, &v.output))
                 .and_then(|_| self.manifest.as_ref()?.views.get(n));
             let output = match reusable {
-                Some(old) => old.output.clone(),
-                None => payload(format!("view-{}.arrow", v.id), &v.output)?,
+                Some(old) => {
+                    self.work.payload(
+                        PayloadKind::ViewOutput,
+                        PayloadAction::Reuse,
+                        old.output.file.bytes,
+                        v.output.num_rows(),
+                    )?;
+                    old.output.clone()
+                }
+                None => payload(
+                    PayloadKind::ViewOutput,
+                    format!("view-{}.arrow", v.id),
+                    &v.output,
+                )?,
             };
             views.insert(
                 n.clone(),
@@ -394,7 +439,10 @@ impl DatabaseStore {
                     .get(n)
                     .ok_or_else(|| invalid("unbound output delta"))?
                     .id;
-                Ok((n.clone(), payload(format!("delta-{id}.arrow"), b)?))
+                Ok((
+                    n.clone(),
+                    payload(PayloadKind::OutputDelta, format!("delta-{id}.arrow"), b)?,
+                ))
             })
             .collect::<Result<_>>()?;
         let m = Manifest {
@@ -408,6 +456,7 @@ impl DatabaseStore {
             receipt,
         };
         let manifest = write_bytes(&dir, "manifest.json", &json_bytes(&m)?)?;
+        self.work.manifest_write(manifest.bytes)?;
         sync_dir(&dir)?;
         sync_dir(&self.root)?;
         observer(PublishPoint::FilesDurable)?;
@@ -416,7 +465,8 @@ impl DatabaseStore {
             manifest,
         };
         let pointer = format!("CURRENT-{name}.tmp");
-        write_bytes(&self.root, &pointer, &json_bytes(&head)?)?;
+        let entry = write_bytes(&self.root, &pointer, &json_bytes(&head)?)?;
+        self.work.pointer_write(entry.bytes)?;
         fs::rename(self.root.join(pointer), self.root.join("CURRENT"))?;
         sync_dir(&self.root)?;
         observer(PublishPoint::CurrentDurable)?;
