@@ -61,6 +61,7 @@
   - [Lazy SQL table scans](incremental/sql_table_leaf_demand.md)
   - [Retractable MIN/MAX value indexes](incremental/extrema_value_indexes.md)
   - [Reference-counted DISTINCT aggregates](incremental/distinct_aggregate_state.md)
+  - [Incremental GROUPING SETS normalization](incremental/grouping_set_normalization.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)

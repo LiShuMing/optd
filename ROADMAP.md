@@ -39,7 +39,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | verified |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | verified |
-| R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
+| R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | in_progress |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
 | R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | pending |
@@ -933,3 +933,15 @@ mdBook with the R01a wrapper and project book output exited 0, log
 `target/roadmap-r03b-docs-20261031.log`. **R03b is verified locally.** Implementation
 is the local commit titled `Maintain DISTINCT aggregates from value membership changes`;
 no push. Next owner: this task, R03c GROUPING SETS / ROLLUP.
+
+
+### R03c — design and implementation lane
+
+Claimed by this task after R03b `88b36bd`.
+[Incremental GROUPING SETS normalization](docs/src/incremental/grouping_set_normalization.md)
+defines schema-exact ordinary aggregate branches, typed internal grouping identity
+and UNION ALL under existing Optd rules/physical states. Real/synthetic NULL,
+duplicate sets and empty grand totals retain separate state. The nine actual
+TPC-DS ROLLUP queries are Q5/Q14/Q18/Q22/Q67/Q70/Q77/Q80/Q86, each with an existing
+directed fixture manifest. Source/design review is complete; implementation and
+all acceptance remain pending. No dependency, format or numerical guard change.
