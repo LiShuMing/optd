@@ -38,7 +38,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | verified |
-| R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | pending |
+| R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | in_progress |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
@@ -853,3 +853,14 @@ mdBook with the R01a wrapper and project book output exited 0, log
 `target/roadmap-r03a-docs-20261031.log`. **R03a is verified locally.** Implementation
 is the local commit titled `Maintain retractable MIN/MAX through counted value indexes`;
 no push. Next owner: this task, R03b DISTINCT membership state.
+
+
+### R03b — design and implementation lane
+
+Claimed by this task after R03a `0c30be5`.
+[Reference-counted DISTINCT aggregates](docs/src/incremental/distinct_aggregate_state.md)
+defines membership zero crossings under existing accumulator plans, normalized
+DISTINCT grouping with refcounts, mixed exact native aggregates, optional measured
+work and a fresh TPC-DS Q28 strict SQL witness. Local source/design review is
+complete; implementation and all acceptance gates remain pending. Design is
+committed before implementation; no dependency or persisted format change.
