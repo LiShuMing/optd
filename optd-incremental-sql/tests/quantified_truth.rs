@@ -4,6 +4,8 @@
 mod correlated;
 #[path = "quantified_truth/null_policies.rs"]
 mod null_policies;
+#[path = "quantified_truth/reuse.rs"]
+mod reuse;
 
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -594,7 +596,7 @@ async fn volatile_subqueries_and_expansion_overflow_refuse_without_publication()
         format!(
             "SELECT {} FROM a",
             (0..65)
-                .map(|i| format!("k IN (SELECT k FROM b) AS m{i}"))
+                .map(|i| format!("k IN (SELECT k FROM b WHERE k>={i}) AS m{i}"))
                 .collect::<Vec<_>>()
                 .join(",")
         ),

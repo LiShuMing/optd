@@ -286,3 +286,17 @@ untouched partitions grow 8 -> 512. A parenthesized direct NULL-safe regression
 fails against the archived prior source and passes with this implementation.
 Commands, source identity, complete gate results and remaining acceptance limits
 are recorded in ROADMAP.md. Binding sharing and R04b/R06 completion remain separate.
+
+## 15. Node-local quantified binding reuse
+
+The section-11 normalizer design now shares complete typed identical membership
+bindings within one Projection/Filter. IN and NOT IN reference the same positive
+truth; NOT is applied per caller. Different expressions/plans and separate scopes
+remain independent. The map is never iterated for observable output.
+
+Two and 65 repeated observations each retain one member/flag state pair and one
+match-count join, verified with exact independent output and NULL-transition delta.
+The 65-distinct-binding expansion guard remains enforced. All 23 quantified-truth
+tests pass; ROADMAP.md records the full gate and actual bucket-work observations.
+This reduces duplicate plan/state work without changing the impact contract or
+certifying full R04b/R06, original TPC SQL, source ingestion or performance.

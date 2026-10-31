@@ -3,7 +3,7 @@
 //! This module only constructs logical expressions. Existing aggregate/join rules
 //! own state and delta execution, including the real global impact of NULL flags.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::DataType;
@@ -92,11 +92,18 @@ pub(crate) fn normalize(plan: LogicalPlan) -> crate::Result<LogicalPlan> {
             LogicalPlan::Projection(projection) => {
                 let mut input = projection.input.as_ref().clone();
                 let mut changed = false;
+                let mut bindings = HashMap::new();
                 let expressions = projection
                     .expr
                     .into_iter()
                     .map(|expression| {
-                        rewrite_expression(expression, &mut input, &mut names, &mut changed)
+                        rewrite_expression(
+                            expression,
+                            &mut input,
+                            &mut names,
+                            &mut bindings,
+                            &mut changed,
+                        )
                     })
                     .collect::<Result<Vec<_>>>()?;
                 if !changed {
@@ -120,8 +127,14 @@ pub(crate) fn normalize(plan: LogicalPlan) -> crate::Result<LogicalPlan> {
                 let schema = filter.input.schema().clone();
                 let mut input = filter.input.as_ref().clone();
                 let mut changed = false;
-                let predicate =
-                    rewrite_expression(filter.predicate, &mut input, &mut names, &mut changed)?;
+                let mut bindings = HashMap::new();
+                let predicate = rewrite_expression(
+                    filter.predicate,
+                    &mut input,
+                    &mut names,
+                    &mut bindings,
+                    &mut changed,
+                )?;
                 let filtered = LogicalPlanBuilder::from(input).filter(predicate)?.build()?;
                 if changed {
                     Ok(Transformed::yes(restore(
@@ -143,17 +156,33 @@ fn rewrite_expression(
     expression: Expr,
     input: &mut LogicalPlan,
     names: &mut RewriteContext,
+    bindings: &mut HashMap<InSubquery, Expr>,
     changed: &mut bool,
 ) -> Result<Expr> {
     Ok(expression
         .transform_up(|expression| {
-            let Expr::InSubquery(subquery) = expression else {
+            let Expr::InSubquery(mut subquery) = expression else {
                 return Ok(Transformed::no(expression));
             };
-            let relation = expand(input.clone(), subquery, names)?;
-            *input = relation.input;
+            // Every helper join preserves original rows and columns. A complete
+            // typed key can therefore reuse positive truth within this boundary;
+            // no binding escapes into another node or correlated scope.
+            let negated = subquery.negated;
+            subquery.negated = false;
+            let truth = if let Some(truth) = bindings.get(&subquery) {
+                truth.clone()
+            } else {
+                let relation = expand(input.clone(), subquery.clone(), names)?;
+                *input = relation.input;
+                bindings.insert(subquery, relation.truth.clone());
+                relation.truth
+            };
             *changed = true;
-            Ok(Transformed::yes(relation.truth))
+            Ok(Transformed::yes(if negated {
+                Expr::Not(Box::new(truth))
+            } else {
+                truth
+            }))
         })?
         .data)
 }
@@ -279,7 +308,7 @@ fn expand(
     let joined = correlation::apply_join_policy(joined, &keys)?;
     let matched = Expr::Column(Column::from_name(matched_name)).is_not_null();
     // Nonnullable comparisons can never produce UNKNOWN, including on empty S.
-    let mut relation = if nullable && !keys.is_empty() {
+    let relation = if nullable && !keys.is_empty() {
         partition_flags::append_truth(
             joined,
             compared,
@@ -304,9 +333,6 @@ fn expand(
             truth: matched,
         }
     };
-    if subquery.negated {
-        relation.truth = Expr::Not(Box::new(relation.truth));
-    }
     Ok(relation)
 }
 

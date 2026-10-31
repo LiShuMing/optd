@@ -1691,3 +1691,68 @@ R01a wrapper/target/TMPDIR records **322 default / 336 Iceberg passed**, 2/3 ign
 fmt and both all-target Clippy modes pass. Log
 `target/roadmap-r04b-null-policy-gates-20261031.log`. mdBook and final diff check
 exit 0 (`...-docs-20261031.log`). All NULL-policy verification sessions are terminal.
+
+### R04b — node-local repeated membership binding reuse
+
+Reviewed design `3388dd5`, truth-normalization section 11, is implemented as a
+Projection/Filter-local map keyed by complete typed InSubquery with negation
+canonicalized to false. Positive truth is bound once; each caller applies its own
+NOT. Only keyed lookup/insertion occurs, never observable HashMap iteration.
+Original immutability validation still precedes rewriting. No binding crosses a
+node or subquery scope; existing helper joins preserve original rows and columns.
+
+The regression is RED before the change: two identical observations allocate four
+aggregate states instead of two (exit 101, 0 passed/1 failed,
+`target/roadmap-r04b-binding-reuse-red-20261031.log`). GREEN checks 2 and 65 repeated
+IN/NOT IN observations with exactly two aggregate states and one match-count join,
+independent output and signed NULL transition. Distinct compared expressions and
+different subqueries retain independent truth. The overflow refusal now uses 65
+distinct subqueries; it still preserves epoch/publication, rather than weakening
+the expansion budget. All **23 quantified-truth tests** pass, including ordinary
+and mixed-policy partition oracles, SQL/recovery, alias/schema and refusal gates
+(`...-focused-20261031.log`). Private Iceberg rustdoc exits 0
+(`...-rustdoc-20261031.log`). Complete gates and actual scope counts follow below.
+
+R04b/R06 remain open; no new full-TPC or controlled performance qualification.
+
+Scope rerun `target/roadmap-r04b-binding-reuse-scope-20261031.log` exits 0:
+for the same ordinary correlated first-NULL change, peer visits are now **4 at
+both 8 and 512 untouched partitions**, versus 12 before sharing; output delta is
+still exactly two rows and keyed full scans/snapshot evaluations remain zero.
+This is measured operator work, not an end-to-end latency/memory/I/O benchmark.
+mdBook exits 0 (`...-docs-20261031.log`); all source edits are frozen for final gates.
+
+Fresh final-source SQL witness runner is built with the R01a wrapper/target/TMPDIR
+and `cargo +1.95.0 build --locked -p optd-incremental-sql --example benchmark_sql_database`.
+`python3 target/roadmap-r04b-truth-final-witness-20261031.py` exits 0: unchanged
+repository Q10 and Q45 source hashes match fixture SQL, each completes three
+nonempty SQL DML rounds with exact outputs, reopen, output history and base-table
+checks; both strict plans qualify with no complete-node recompute. Boolean
+mark-count nodes execute on every round. Frozen binary/source/manifest/report
+hashes and commands live in `target/roadmap-r04b-truth-final-live-20261031/`.
+These are two directed, nonstandard-data **relational_core** witnesses; outer
+ordering/limits follow that named benchmark profile. They do not certify original
+SQL ordering/Top-K, Q35, full TPC coverage, standard scale or controlled performance.
+
+Final complete wrapper `bash scripts/agent-check.sh sql` exits 0: **324 default /
+338 Iceberg passed**, with 2/3 existing ignored; fmt and both all-target Clippy
+modes pass. Log `target/roadmap-r04b-binding-reuse-gates-20261031.log`. Private
+Iceberg rustdoc and final mdBook also exit 0; final `git diff --check` is clean.
+All final validation processes have exited. Local commit only; no push.
+
+### Owner-requested one-hour stop
+
+Owner requested one additional hour starting 2026-10-31 10:55:07 UTC, with a hard
+stop at 11:55:07 UTC (`target/roadmap-stop-deadline-20261031.md`). New functionality
+is frozen after the four qualified truth-normalization slices above. Stop after
+recording final evidence and the local commit; pause the active goal without
+marking it complete. Preserve all unrelated pre-existing working-tree changes.
+
+Ledger is still **13/31 verified, 1 in_progress (R04b), 17 pending**. Next work is
+R04b's remaining context/directed-query gates plus R06's reusable impact contract;
+Q35 remains blocked on R03e's numerical aggregate qualification. Other open rows
+retain their original acceptance criteria: variance/floating aggregates, ranges,
+specialized windows/Top-K, delta checkpoints/operator restore/history compaction,
+native source ingestion, algorithm choice/templates, complete work-scope/long-run/
+controlled-performance checks, engineering contracts and SQL product extensions.
+This time-bounded iteration does not certify the complete project or all TPC SQL.
