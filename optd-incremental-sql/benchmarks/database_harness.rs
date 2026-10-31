@@ -34,8 +34,8 @@ fn literal(a: &ArrayRef, i: usize) -> Result<String> {
 fn insert(name: &str, b: &RecordBatch) -> Result<Vec<String>> {
     let mut statements = Vec::new();
     // Keep binder expression counts and SQL buffers bounded even for larger fixtures.
-    for start in (0..b.num_rows()).step_by(64) {
-        let rows = (start..(start + 64).min(b.num_rows()))
+    for start in (0..b.num_rows()).step_by(1024) {
+        let rows = (start..(start + 1024).min(b.num_rows()))
             .map(|i| {
                 Ok(format!(
                     "({})",
@@ -356,7 +356,7 @@ mod tests {
         .await?;
         assert_eq!(result["status"], "pass");
         assert_eq!(result["completed_rounds"], 3);
-        // Two INSERT batches still publish one initial data commit.
+        // Initial data is published once, independently of INSERT chunking.
         assert_eq!(result["bootstrap_epoch"], 3);
         let script = fs::read_to_string(result["sql_script"].as_str().ok_or("script path")?)?;
         let mut db = SqlSession::open(dir.path().join("script-replay")).await?;
