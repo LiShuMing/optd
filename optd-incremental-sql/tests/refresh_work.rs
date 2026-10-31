@@ -96,7 +96,8 @@ async fn fixed_delta_separates_full_sources_leaf_updates_and_required_root_outpu
             .unwrap();
         let work = &candidate.stats().work;
         assert_eq!(work.sources.map_rebuilds, 1);
-        assert_eq!(work.sources.old_row_entries_copied, n);
+        assert_eq!(work.sources.old_row_entries_copied, 0);
+        assert_eq!(work.cache_work.source_state.updates, 1);
         assert_eq!(work.sources.materializations, 0);
         assert!(work.caches.map_rebuilds > 0);
         // A touched leaf can split into two new caches at the 256-entry boundary.
@@ -313,8 +314,9 @@ async fn split_changes_rebuild_each_source_once_and_cancel_without_rebuilding() 
             ])
             .await
             .unwrap();
-        assert_eq!(candidate.stats().work.sources.map_rebuilds, 1);
-        assert_eq!(candidate.stats().work.sources.old_row_entries_copied, n);
+        assert_eq!(candidate.stats().work.cache_work.source_state.updates, 1);
+        assert_eq!(candidate.stats().work.sources.map_rebuilds, 3);
+        assert_eq!(candidate.stats().work.sources.old_row_entries_copied, 1);
         let mut expected = rows(n);
         expected[1] = (1, 14);
         expected.push((0, 3));
@@ -372,8 +374,9 @@ async fn interleaved_two_source_changes_share_one_rebuild_per_source() {
         ])
         .await
         .unwrap();
-    assert_eq!(candidate.stats().work.sources.map_rebuilds, 2);
-    assert_eq!(candidate.stats().work.sources.old_row_entries_copied, 2 * n);
+    assert_eq!(candidate.stats().work.cache_work.source_state.updates, 2);
+    assert_eq!(candidate.stats().work.sources.map_rebuilds, 4);
+    assert_eq!(candidate.stats().work.sources.old_row_entries_copied, 2);
     let mut t = rows(n);
     t[0] = (0, 5);
     let mut u = rows(n);
@@ -465,7 +468,8 @@ async fn signed_prefixes_can_be_negative_when_the_final_relation_is_valid() {
         BTreeMap::from([("t".into(), batch(&expected))]),
     )
     .await;
-    assert_eq!(candidate.stats().work.sources.map_rebuilds, 1);
+    assert_eq!(candidate.stats().work.cache_work.source_state.updates, 1);
+    assert_eq!(candidate.stats().work.sources.map_rebuilds, 2);
     maintained.acknowledge(candidate).unwrap();
     assert_eq!(
         bag(&maintained.tables().unwrap()["t"]),

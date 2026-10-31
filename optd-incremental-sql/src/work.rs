@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Error, Result};
 
 /// Relation-map rebuilding and cache materialization at the owning scope.
-/// Raw sources use complete maps; maintained caches and SQL targets use leaf maps.
+/// Raw sources use hash-collision bucket maps; maintained caches and SQL targets use leaf maps.
 ///
 /// Row entries count distinct complete rows, not expanded multiplicities. Array
 /// bytes are Arrow's reported buffer sizes for materialized batches, not measured
@@ -96,14 +96,14 @@ impl StateCopyWork {
 /// unknown; it must not be interpreted as measured zero.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct RefreshWork {
-    /// Full raw source Bag rebuilds; sources are not Arrow-materialized here.
+    /// Actual raw source collision-bucket map rebuilds; no Arrow expansion.
     pub sources: RelationWork,
     /// Changed cache-leaf map rebuilds and their Arrow materializations.
     /// Complete concatenations and replacement bootstrap have separate counters.
     pub caches: RelationWork,
     /// State-directory copies across candidate and physical-state preparation.
     pub state_copies: StateCopyWork,
-    /// Extended cache diagnostics share one allocation, keeping existing public
+    /// Extended source/cache diagnostics share one allocation, keeping existing public
     /// refresh-enum variants compact without changing their field types.
     #[serde(flatten)]
     pub cache_work: Box<CacheRelationWork>,
@@ -112,12 +112,53 @@ pub struct RefreshWork {
 /// Actual maintained relation update, demand and replacement boundaries.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CacheRelationWork {
+    /// Raw-source validation, shared updates and demanded complete Bag collection.
+    /// Kept in this existing boxed group to preserve public refresh-enum sizes.
+    pub source_state: SourceStateWork,
     /// Actual maintained node row-leaf update and directory work.
     pub cache_blocks: RowBlockWork,
     /// Complete node concatenations demanded by snapshots, ordering or root output.
     pub complete_caches: RowMaterializationWork,
     /// Arrow collection and leaf bootstrap for complete physical replacements.
     pub replacement_bootstrap: RowBootstrapWork,
+}
+
+/// Actual weighted source work, excluding bootstrap and external snapshot/export IO.
+/// Hash collisions enlarge a touched bucket; their historical copies appear in sources.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SourceStateWork {
+    /// Nonempty consolidated source updates, regardless of touched bucket count.
+    pub updates: usize,
+    /// Exact incoming rows probed for ordered-prefix validation.
+    pub validation_probes: usize,
+    /// Collision buckets updated once per consolidated source change.
+    pub touched_buckets: usize,
+    /// Shared source-directory tree nodes actually copied along changed paths.
+    pub directory_entries_copied: usize,
+    /// Complete Bag cache misses demanded by graph SourceRead expressions.
+    pub snapshot_collections: usize,
+    /// Distinct rows copied into those complete Bags (not expanded multiplicities).
+    pub snapshot_entries_collected: usize,
+}
+impl SourceStateWork {
+    /// Account for one successful incoming-row prefix probe.
+    pub(crate) fn record_validation_probe(&mut self) -> Result<()> {
+        add(&mut self.validation_probes, 1)
+    }
+    /// Account for one rebuilt exact collision bucket.
+    pub(crate) fn record_touched_bucket(&mut self) -> Result<()> {
+        add(&mut self.touched_buckets, 1)
+    }
+    /// Record a consolidated update and measured path copies.
+    pub(crate) fn record_update(&mut self, copies: usize) -> Result<()> {
+        add(&mut self.updates, 1)?;
+        add(&mut self.directory_entries_copied, copies)
+    }
+    /// Record only actual snapshot misses; cache hits pass zeroes.
+    pub(crate) fn record_collection(&mut self, misses: usize, entries: usize) -> Result<()> {
+        add(&mut self.snapshot_collections, misses)?;
+        add(&mut self.snapshot_entries_collected, entries)
+    }
 }
 
 /// Checked addition keeps diagnostic counters from silently wrapping.

@@ -20,6 +20,7 @@ use crate::metrics::{AccumulatorWork, GroupWork, KeyedWork};
 use crate::planner::plan::{ApplyMode, Operation, PhysicalStep, RelationOperator};
 use crate::planner::SnapshotVersion;
 use crate::row_blocks::RowBlocks;
+use crate::source_state::SourceState;
 use crate::{Error, Result};
 
 pub(crate) async fn execute(ctx: &SessionContext, plan: LogicalPlan) -> Result<RecordBatch> {
@@ -83,7 +84,7 @@ pub(crate) struct Bindings<'a> {
     pub(crate) before: &'a [Relation],
     pub(crate) after: &'a [Relation],
     pub(crate) source_deltas: &'a BTreeMap<String, Bag>,
-    pub(crate) source_after: &'a BTreeMap<String, Bag>,
+    pub(crate) source_after: &'a BTreeMap<String, SourceState>,
     pub(crate) keyed: &'a [Option<KeyedState>],
     pub(crate) groups: &'a [Option<GroupState>],
     pub(crate) accumulators: &'a [Option<AccumulatorState>],
@@ -156,7 +157,7 @@ impl Value {
         }
     }
 }
-fn source<'a>(tables: &'a BTreeMap<String, Bag>, name: &str) -> Result<&'a Bag> {
+fn source<'a, T>(tables: &'a BTreeMap<String, T>, name: &str) -> Result<&'a T> {
     let reference = TableReference::from(name);
     tables
         .get(name)
@@ -276,11 +277,15 @@ pub(crate) async fn run(
                 })?)
             }
             Operation::SourceRead { name, delta, .. } => {
-                let after = source(bindings.source_after, name)?;
                 Value::Relation(RelationValue::from_signed(if *delta {
                     source(bindings.source_deltas, name)?.clone()
                 } else {
-                    after.clone()
+                    let snapshot = source(bindings.source_after, name)?.snapshot()?;
+                    refresh_work
+                        .cache_work
+                        .source_state
+                        .record_collection(snapshot.collections, snapshot.copied_entries)?;
+                    snapshot.bag
                 })?)
             }
             Operation::Empty(schema) => {

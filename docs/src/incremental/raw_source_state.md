@@ -1,6 +1,6 @@
 # Shared weighted raw-source state
 
-**Status:** accepted · 2026-10-31; implementation pending
+**Status:** accepted · 2026-10-31; source-sharing stage implemented and locally verified
 **Scope:** R02d source-sharing stage, after maintained-node cache commit `db822fa`.
 Deferred duplicate-leaf expansion and complete R02d acceptance remain separate.
 
@@ -103,3 +103,28 @@ requiring Arrow row encodings. A full source snapshot must not masquerade as a
 changed-row lookup; its actual collection is separately attributed. The only
 claimed bound holds the affected collision bucket fixed, as required by R10a.
 This records local source/design review, not independent review or implementation.
+
+## 9. Observed implementation evidence
+
+`SourceState` now shares immutable weighted collision buckets and AVL directory
+paths. Incoming-row prefix checks precede net consolidation. A full SourceRead
+collects the exact complete Bag on cache miss; ordinary delta reads do not.
+`RefreshWork.sources` counts actual rebuilt bucket maps and historical entries;
+`source_state` diagnostics count source updates, probes, buckets, path copies and
+complete snapshot collection. The latter shares the existing boxed diagnostics
+allocation (its Rust field remains `cache_work` for public compatibility).
+
+Fixed one-row SUM refreshes at 1024/8192 input rows copy 1/1 historical source
+entries and 9/13 directory nodes, with one source update, one validation probe,
+one touched bucket and zero full snapshot collections. The previous implementation
+fails the same bounded-source-copy assertion at 1024 entries. Historical cache leaf
+copy/materialization remains 514/516 rows; duplicate-leaf expansion remains pending.
+
+Five unit tests include forced collisions, NULL, duplicates, moves, absent/final
+deletes, extreme weights/prefix overflow, floating signed-zero/NaN identity and
+1500-step exact-map oracles for each of normal/constant hashing, retaining and
+discarding revisions. Four integration tests compare independent SQL endpoints,
+exercise huge unread weights and check explicit fetched-source snapshot accounting.
+Full gate commands/results and frozen-binary TPC witness identities are in ROADMAP's
+R02d source-sharing record. These verify this source stage, not complete R02d,
+full-TPC coverage, durable operator-state sharing or performance qualification.

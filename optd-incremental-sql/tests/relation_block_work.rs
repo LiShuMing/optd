@@ -39,7 +39,14 @@ async fn fixed_delta_and_fixed_root_output_copy_only_touched_cache_leaves() {
             .await
             .unwrap();
         let work = &candidate.stats().work;
-        assert_eq!(work.sources.old_row_entries_copied, n); // Remaining raw-source cost.
+        assert!(work.sources.old_row_entries_copied <= 1, "n={n} {work:?}");
+        assert_eq!(work.cache_work.source_state.updates, 1);
+        assert_eq!(work.cache_work.source_state.validation_probes, 1);
+        assert_eq!(work.cache_work.source_state.touched_buckets, 1);
+        assert_eq!(work.cache_work.source_state.snapshot_collections, 0);
+        assert!(
+            work.cache_work.source_state.directory_entries_copied <= 3 * (n.ilog2() as usize + 1)
+        );
         assert!(
             work.caches.old_row_entries_copied <= 3 * 256 + 1,
             "n={n} {work:?}"
@@ -126,4 +133,30 @@ async fn stage_one_exposes_remaining_eager_duplicate_leaf_expansion() {
         let expected = concat_batches(&schema, &frame.collect().await.unwrap()).unwrap();
         assert_eq!(candidate.contents(), &expected);
     }
+}
+
+#[tokio::test]
+async fn fetched_source_records_demanded_complete_bag_collection() {
+    // Equal duplicates give unordered LIMIT unambiguous row membership.
+    let input = concat_batches(&batch(1).schema(), &[batch(1), batch(1), batch(1)]).unwrap();
+    let view = SqlView::new(
+        "SELECT v FROM t LIMIT 2",
+        BTreeMap::from([("t".into(), input)]),
+    )
+    .await
+    .unwrap();
+    let candidate = view
+        .prepare(&[TableChange {
+            table: "t".into(),
+            rows: batch(1),
+            weights: vec![-2],
+        }])
+        .await
+        .unwrap();
+    assert_eq!(candidate.contents(), &batch(1));
+    let work = &candidate.stats().work.cache_work.source_state;
+    assert_eq!(work.snapshot_collections, 1);
+    assert_eq!(work.snapshot_entries_collected, 1);
+    assert_eq!(work.updates, 1);
+    assert_eq!(view.contents().unwrap().num_rows(), 2);
 }

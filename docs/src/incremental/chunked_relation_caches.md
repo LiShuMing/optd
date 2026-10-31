@@ -1,6 +1,6 @@
 # Chunked maintained relations and lazy complete caches
 
-**Status:** accepted · 2026-10-31; implementation pending
+**Status:** accepted · 2026-10-31; maintained-node and raw-source sharing stages delivered; lazy leaves pending
 **Scope:** ROADMAP R02d. Reuse immutable row blocks for positive raw sources and
 operator relations; keep signed transient changes as Bags. No persisted format,
 rule admission, ordering, numeric-contract or dependency change.
@@ -133,3 +133,10 @@ fields. This keeps the existing public Iceberg refresh enum and its field types
 compact as counters grow; it does not box or share mutable operator state. Old
 `database::TableBlockWork`, `TableBootstrapWork` and `TableMaterializationWork`
 imports remain explicit re-exports of the neutral work definitions.
+
+The subsequent [weighted raw-source stage](raw_source_state.md) replaces complete
+raw Bags with shared exact collision buckets and demand-only complete Bag caches.
+Its new source-update counter preserves R02a's one-update-per-source contract;
+`sources.map_rebuilds` now measures actual bucket maps. Stage-one descriptions of
+complete raw-source rebuilds above are historical. Deferred duplicate-leaf expansion
+and SQL-provider laziness remain outstanding; R02d is still in progress.

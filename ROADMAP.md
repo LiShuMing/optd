@@ -489,3 +489,70 @@ row volume, and full checkpoints/recovery still rebuild/write complete state.
 No full TPC or controlled performance qualification was run. Implementation is a
 local, reviewable first stage; continue source-state sharing and leaf laziness before
 marking R02d verified, then proceed through the remaining roadmap.
+
+
+### R02d — shared weighted raw-source stage
+
+Design: [shared weighted raw-source state](docs/src/incremental/raw_source_state.md).
+Source revisions now share exact full-row hash-collision buckets and AVL directory
+paths, without Arrow encoding or expansion during raw-weight updates. Prefix checks
+probe only incoming rows, then each nonempty source net delta updates its touched
+buckets once. Complete SourceRead/export demand collects and caches a Bag; demanded
+Arrow output retains its existing canonical ordering and safety budgets. Huge unread
+positive multiplicities remain admitted and retractable. No format/dependency or
+rule-eligibility change is included.
+
+`RefreshWork.sources` now measures actual bucket-map rebuilds/history copies;
+`source_state` separately records consolidated source updates, incoming-row probes,
+touched buckets, actual directory copies and graph-demanded full Bag collections.
+It shares the existing boxed `cache_work` allocation to retain public Iceberg enum
+field types/sizes. External snapshot/export/checkpoint Bag collection and source
+physical-expression expansion remain explicit scope exclusions; their work is not
+reported as measured zero. Hash collisions can enlarge a touched bucket: bounds
+hold the affected collision-bucket size fixed.
+
+**Verified regression:** the same fixed-delta/fixed-SUM-root integration test failed
+before the source change (exit 101, copied 1024 historical source entries) and passes
+afterward. Logs: `target/roadmap-r02d-source-red-20261031.log` and
+`target/roadmap-r02d-source-measurements-20261031.log`. At 1024/8192 source rows,
+actual historical source entries copied are **1/1**, source-directory node copies
+**9/13**, source updates/probes/touched buckets **1/1/1**, complete source Bag
+collections **0/0**. Maintained cache history copies/materialized rows remain
+514/516; required root concatenation remains one row/one miss. Necessary full
+SourceRead has a separate integration assertion for actual collection.
+
+Five unit cases cover constant-hash collision equality, duplicate/NULL/key moves,
+final/absent deletes, signed-zero/NaN payload identity, prefix overflow, unread
+`i64::MAX` storage/retraction, and independent exact-map oracles for 1500 changes
+each with normal/constant hashing, discarded candidates and retained roots.
+Four integration cases cover scaling, independent SQL, huge unread weights,
+remaining eager duplicate expansion and fetched-source collection accounting.
+Existing custom-rule, SQL atomicity/retry/reopen and process-death cases also pass.
+
+Commands use the R01a wrapper/target/TMPDIR and Rust 1.95.0 locked offline setup.
+`bash scripts/agent-check.sh sql` exited 0: fmt, both Clippy configurations,
+**208 default tests passed / 2 ignored**, **222 Iceberg tests passed / 3 ignored**.
+Log: `target/roadmap-r02d-source-gates-final-20261031.log`. The initial gate's
+Clippy rejection of a test's manual modulo predicate is retained in
+`target/roadmap-r02d-source-gates-20261031.log`; it was fixed before the final full
+run. The private-rustdoc command from R01a exited 0, log
+`target/roadmap-r02d-source-rustdoc-20261031.log`. mdBook and 38 report-tool Python
+tests exited 0, logs `target/roadmap-r02d-source-docs-20261031.log` and
+`target/roadmap-r02d-source-tools-20261031.log`.
+
+After all feature jobs completed, explicitly built the default
+`benchmark_sql_database` example and copied it into a fresh immutable execution
+artifact root. TPC-H Q1 / TPC-DS Q1 each pass strict planning, three SQL DML rounds,
+independent full SQL, reopen and output-delta replay. Artifacts and exact per-query
+commands: `target/roadmap-r02d-source-live-20261031/`; the runner hash agrees before
+and after execution. Source HEAD/diff/new-module/Cargo.lock identities, report
+hashes, aggregate wrappers and the numeric work audit are preserved there. Build
+and run logs: `target/roadmap-r02d-source-bench-build-20261031.log` and
+`target/roadmap-r02d-source-witness-20261031.log`. These are two small current-binary
+witnesses, not full TPC or performance qualification. Both qualification flags stay
+false.
+
+This is a local-only implementation increment following design commit `25f6afe`.
+**R02d remains in progress**: duplicate leaf weights still expand eagerly, and SQL
+provider demand/leaf attribution must be completed. R03 onward, full qualification,
+checkpoint/durable operator-state work and the rest of the ledger remain pending.

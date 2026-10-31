@@ -19,6 +19,7 @@ mod keyed_state;
 mod metrics;
 pub mod planner;
 mod row_blocks;
+mod source_state;
 pub mod source_vector;
 mod state_directory;
 pub mod store;
@@ -37,7 +38,7 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use metrics::AccumulatorWork;
 pub use planner::Strategy;
-pub use work::{CacheRelationWork, RefreshWork, RelationWork, StateCopyWork};
+pub use work::{CacheRelationWork, RefreshWork, RelationWork, SourceStateWork, StateCopyWork};
 
 #[cfg(all(test, feature = "iceberg"))]
 mod dependency_contract {

@@ -275,32 +275,16 @@ impl Bag {
         self.combine(other, i64::checked_add)
     }
 
-    /// Validate an ordered source update by probing only its incoming rows.
-    ///
-    /// Staging deltas before one full-map update must retain the overflow checks
-    /// of sequential source updates, even when later changes cancel. Negative
-    /// intermediate weights remain valid; only the final relation is validated.
-    /// Schemas are checked even for empty or internally canceled changes.
-    pub(crate) fn check_staged_addition(
-        &self,
-        staged: Option<&Self>,
-        incoming: &Self,
-    ) -> Result<()> {
-        if self.schema != incoming.schema || staged.is_some_and(|s| self.schema != s.schema) {
-            return Err(Error::Invalid("bag schemas differ".into()));
-        }
-        for (row, weight) in incoming.rows.iter() {
-            let committed = self.rows.get(row).copied().unwrap_or_default();
-            let staged_weight = staged
-                .and_then(|bag| bag.rows.get(row))
-                .copied()
-                .unwrap_or_default();
-            committed
-                .checked_add(staged_weight)
-                .and_then(|current| current.checked_add(*weight))
-                .ok_or(Error::Overflow)?;
-        }
-        Ok(())
+    /// Borrow exact complete rows without sorting, encoding or expanding weights.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&[ScalarValue], i64)> {
+        self.rows
+            .iter()
+            .map(|(row, weight)| (row.as_slice(), *weight))
+    }
+
+    /// Probe one exact row; hash collisions are resolved by ScalarValue equality.
+    pub(crate) fn weight(&self, row: &[ScalarValue]) -> i64 {
+        self.rows.get(row).copied().unwrap_or_default()
     }
 
     /// Subtract directly with checked arithmetic, including `MIN - MIN == 0`.

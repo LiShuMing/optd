@@ -23,6 +23,7 @@ use crate::keyed_state::KeyedState;
 use crate::planner::plan::{self, StateSpec};
 use crate::planner::{IncrementalOptimizer, IncrementalPlan, RuleContext, Strategy};
 use crate::row_blocks::RowBlocks;
+use crate::source_state::SourceState;
 use crate::store::Snapshot;
 use crate::{Error, Result};
 
@@ -46,7 +47,7 @@ pub use crate::metrics::{GroupWork, KeyedWork, NodeStats, RefreshStats};
 pub struct PreparedSqlRefresh {
     owner: u64,
     before: u64,
-    tables: BTreeMap<String, Bag>,
+    tables: BTreeMap<String, SourceState>,
     states: Vec<Relation>,
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
@@ -85,7 +86,7 @@ pub struct SqlView {
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
     accumulators: Vec<Option<AccumulatorState>>,
-    tables: BTreeMap<String, Bag>,
+    tables: BTreeMap<String, SourceState>,
     ctx: SessionContext,
 }
 
@@ -140,7 +141,7 @@ impl SqlView {
             tables: candidate
                 .tables
                 .iter()
-                .map(|(name, bag)| Ok((name.clone(), bag.to_batch()?)))
+                .map(|(name, bag)| Ok((name.clone(), bag.snapshot()?.bag.to_batch()?)))
                 .collect::<Result<_>>()?,
             output: candidate.contents().clone(),
             delta: candidate.delta()?,
@@ -179,7 +180,7 @@ impl SqlView {
         let mut source = BTreeMap::new();
         for (name, batch) in tables {
             ctx.register_batch(&name, batch.clone())?;
-            source.insert(name, Bag::from_batch(&batch)?);
+            source.insert(name, SourceState::new(Bag::from_batch(&batch)?)?);
         }
         let analyzed = ctx.state().create_logical_plan(sql).await?;
         // Check volatility before optimizations can constant-fold a stable
@@ -270,7 +271,11 @@ impl SqlView {
         };
         for id in 0..out.nodes.len() {
             let batch = if let LogicalPlan::TableScan(scan) = &out.nodes[id].plan {
-                let table = out.source_for(scan, &out.tables)?.to_batch()?;
+                let table = out
+                    .source_for(scan, &out.tables)?
+                    .snapshot()?
+                    .bag
+                    .to_batch()?;
                 out.eval_scan(scan, table).await?
             } else {
                 out.eval_full(id, &out.states).await?
@@ -358,7 +363,7 @@ impl SqlView {
     pub fn tables(&self) -> Result<BTreeMap<String, RecordBatch>> {
         self.tables
             .iter()
-            .map(|(n, b)| Ok((n.clone(), b.to_batch()?)))
+            .map(|(n, b)| Ok((n.clone(), b.snapshot()?.bag.to_batch()?)))
             .collect()
     }
     /// SQL definition bound to this generation.
@@ -462,8 +467,8 @@ impl SqlView {
     fn source_for<'a>(
         &self,
         scan: &TableScan,
-        tables: &'a BTreeMap<String, Bag>,
-    ) -> Result<&'a Bag> {
+        tables: &'a BTreeMap<String, SourceState>,
+    ) -> Result<&'a SourceState> {
         tables
             .get(&scan.table_name.to_string())
             .or_else(|| tables.get(scan.table_name.table()))
@@ -545,7 +550,7 @@ impl SqlView {
                 .ok_or_else(|| Error::Invalid(format!("unknown changed table {}", change.table)))?;
             let delta = Bag::from_weighted(&change.rows, &change.weights)?;
             let staged = source_deltas.get(&change.table);
-            old.check_staged_addition(staged, &delta)?;
+            old.check_staged_addition(staged, &delta, &mut stats.work.cache_work.source_state)?;
             let combined = match staged {
                 Some(previous) => previous.add(&delta)?,
                 None => delta,
@@ -560,9 +565,11 @@ impl SqlView {
             // Every name was bound above; apply the atomic net change once,
             // sharing the committed source unchanged when the net change is zero.
             let old = &self.tables[name];
-            let next = old.add(delta)?;
-            next.validate_relation()?;
-            stats.work.sources.record_rebuild(old.len())?;
+            let next = old.apply(
+                delta,
+                &mut stats.work.sources,
+                &mut stats.work.cache_work.source_state,
+            )?;
             tables.insert(name.clone(), next);
         }
         // State candidates share immutable directory roots; mutations account path copies.
