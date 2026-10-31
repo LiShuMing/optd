@@ -10,6 +10,9 @@ use crate::RelationWork;
 /// before downstream filtering. They are neither disk reads nor CPU row visits.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectorWork {
+    /// Actual weighted base-table leaf demand, unknown in historical receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_reads: Option<crate::RowReadWork>,
     /// Successful source batches actually yielded, including zero-row batches.
     pub source_batches: usize,
     /// Expanded rows in those source batches.
@@ -37,6 +40,9 @@ pub struct DmlTargetWork {
     /// Measured leaf maintenance, absent in receipts predating block snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_update: Option<TableBlockWork>,
+    /// Distinct-row identity and boundary encoding, without multiplicity expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaf_validation: Option<crate::RowEncodingWork>,
 }
 
 /// Measured statement work, distinct from view maintenance and durable storage.
@@ -60,6 +66,7 @@ impl From<crate::work::RowUpdateWork> for DmlTargetWork {
         Self {
             delta_update: work.delta_update,
             block_update: Some(work.block_update),
+            leaf_validation: Some(work.leaf_validation),
             ..Default::default()
         }
     }

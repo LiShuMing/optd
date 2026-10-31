@@ -39,7 +39,8 @@ pub use error::{Error, Result};
 pub use metrics::AccumulatorWork;
 pub use planner::Strategy;
 pub use work::{
-    CacheRelationWork, RefreshWork, RelationWork, RowEncodingWork, SourceStateWork, StateCopyWork,
+    CacheRelationWork, RefreshWork, RelationWork, RowEncodingWork, RowReadWork, SourceStateWork,
+    StateCopyWork,
 };
 
 #[cfg(all(test, feature = "iceberg"))]

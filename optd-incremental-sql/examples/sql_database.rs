@@ -16,8 +16,8 @@ fn response(result: SqlResponse) -> Result<Value> {
         json!({"epoch":result.epoch,"output":output,"commit":result.commit,"replayed":result.replayed,
         "execution_work": {"dml":executed.map(|r| &r.dml),
             "maintenance":executed.map(|r| &r.maintenance),
-            "receipt_scope":if result.replayed {"original_request"} else if executed.is_some() {"current_execution"} else {"unmeasured"},
-            "read_selector":null,"create_mv_bootstrap_internal":null}}),
+            "receipt_scope":if result.replayed {"original_request"} else if executed.is_some() {"current_execution"} else if result.table_reads.is_some() {"current_read"} else {"unmeasured"},
+            "base_table_reads":result.table_reads,"read_selector":null,"create_mv_bootstrap_internal":null}}),
     )
 }
 

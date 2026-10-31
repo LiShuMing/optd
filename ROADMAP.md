@@ -36,7 +36,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | verified |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
-| R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | in_progress |
+| R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | pending |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | pending |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
@@ -681,3 +681,101 @@ Implementation is local-only. **R02d remains in progress**. Next implement maint
 NULL metadata, projected weighted range conversion, fetch-aware SQL table streams
 and optional selector/SELECT/store leaf-demand work as specified by the accepted
 design. SQL production tables and providers are still eager at this milestone.
+
+
+### R02d — lazy SQL table leaves and fetch-aware scans
+
+Final implementation stage of design `4001396`,
+[lazy SQL table scans](docs/src/incremental/sql_table_leaf_demand.md).
+Production SQL tables now retain weighted lazy leaves. Maintained exact row and
+Arrow logical-NULL metadata change only with replaced leaves. `Bag::range_batch`
+skips weights and projects before expanded output allocation. Owned `RowCursor`
+uses strict directory successors and preserves immutable statement epochs.
+`RowTable` registration/planning never collects or expands leaf vectors. Physical
+fetch and later `with_fetch` cap actual synchronous poll-time conversion, including
+high duplicate weights. Zero-column projections keep explicit row counts.
+Complete leaf caches are reused; partial/projected misses do not fill them.
+Provider statistics stay absent, preserving CREATE MV dependency discovery;
+physical row/NULL statistics retain COUNT optimizations and lazy physical bytes
+remain unknown. A strict prefix never inherits full-table NULL counts.
+
+Actual successful table demand is an optional `RowReadWork` on SELECT and DML
+selectors; targets expose optional distinct `leaf_validation`. The CLI reports
+`base_table_reads` separately from unmeasured selector CPU/view reads. StoreWork's
+optional `table_leaf_demand` and `table_leaf_validation` distinguish checkpoint
+leaf expansion from restore encoding. Checked intervals cover all new counters;
+old absent diagnostics remain unknown and original retry receipts retain their
+work identity. Range positional probes and ordering rows are separate counts;
+positive/count preflight visits and temporary sort/scalar bytes remain excluded.
+Partial misses can repeat bounded-leaf sorting; no complete CPU or allocation
+measurement is claimed.
+
+**Verified RED/green:** the eager SQL factory expanded 100,000 identical bootstrap
+rows (expected zero); the regression failed before switching production policy.
+Log: `target/roadmap-r02d-row-provider-red-20261031.log`. Lazy bootstrap and a
+following one-row insertion each validate one distinct value and expand zero rows.
+New tests cover 80 deterministic weighted revisions against an independent integer
+vector; dictionary value/key NULLs, struct parent/child validity and NULL/empty
+lists against independent Arrow arrays; projected/chunked/filter/scalar-subquery
+SQL against a separate MemTable; metadata-only COUNT/eliminated reads; late fetch;
+zero columns; independent old/new cursors; cache partial/full boundaries; counter
+overflow/fused errors; retained snapshots, retry/reopen and historical absence.
+The existing persistent-directory BTreeMap oracle now also checks strict successors.
+
+**Verified fixed-work SQL regression**, table sizes 1,024 / 8,192, one inserted row:
+
+| Boundary | 1,024 rows | 8,192 rows |
+| --- | ---: | ---: |
+| Target historical distinct entries copied | 256 | 256 |
+| Target distinct rows validated | 257 | 257 |
+| Target write-time expanded rows | 0 | 0 |
+| Transaction LIMIT 1 expanded rows / range probes | 1 / 1 | 1 / 1 |
+| Transaction LIMIT 1 distinct ordering rows | 256 | 256 |
+| Checkpoint leaf-demand expanded rows | 257 | 257 |
+| Complete checkpoint concatenated/written rows | 1,025 | 8,193 |
+
+Two SQL tests also verify a 32,768-duplicate relation's repeated LIMIT 1 requests
+each expand one row without populating its complete cache, plus rollback,
+persisted request identity, restart and output-history correctness. Targeted
+commands use the R01a wrapper/target/TMPDIR with
+`cargo +1.95.0 test --offline --locked -p optd-incremental-sql --test sql_table_scans --test table_blocks --test dml_work`:
+exit 0, 13 passed. Log:
+`target/roadmap-r02d-row-provider-targeted-20261031.log`.
+Old eager target-materialization assertions were updated to the intended zero and
+paired with distinct-validation/checkpoint-demand assertions; no SQL result,
+strict-plan or failure guard was relaxed.
+
+**Verified final gates:** using the R01a Rust 1.95.0 locked offline wrapper,
+target and TMPDIR, `bash scripts/agent-check.sh sql` exited 0: fmt, both Clippy
+configurations, **226 default passed / 2 ignored**, **240 Iceberg passed / 3
+ignored**. Log: `target/roadmap-r02d-row-provider-final-gates-20261031.log`.
+The final run follows the last explicit-import/comment cleanup; no source changes
+follow it. Private rustdoc with the R01a warnings-denied command exited 0, log
+`target/roadmap-r02d-row-provider-rustdoc-20261031.log`. mdBook exited 0, log
+`target/roadmap-r02d-row-provider-docs-20261031.log`. The same wrapper with
+`bash scripts/agent-check.sh sql-tools` exited 0: fixture-hash verification and
+39 report-tool tests, log `target/roadmap-r02d-row-provider-tools-20261031.log`.
+
+After every feature job ended, explicitly built the default example with
+`cargo +1.95.0 build --offline --locked -p optd-incremental-sql --example benchmark_sql_database`
+and froze a runner in fresh `target/roadmap-r02d-row-provider-live-20261031/`.
+The wrapper plus `python3 target/roadmap-r02d-row-provider-witness-20261031.py`
+exited 0: TPC-H Q1/TPC-DS Q1 each pass strict planning, three SQL DML rounds,
+independent full SQL, reopen and output-log replay. The unified numeric-work audit
+also passes. Exact commands, separate database roots, source HEAD/diff and new
+production-file hashes, Cargo.lock, runner/report hashes and the before/after
+binary identity are preserved. Logs:
+`target/roadmap-r02d-row-provider-bench-build-20261031.log`,
+`target/roadmap-r02d-row-provider-witness-20261031.log`.
+These are two small `relational_core` witnesses; full-TPC and performance/
+end-to-end-delta-work qualification remain incomplete and their flags stay false.
+
+**R02d is verified locally:** source/graph/table revisions share weighted state,
+small writes rebuild bounded leaves, demand boundaries expand only requested
+chunks or explicitly required complete snapshots, comparison/canceled transactions
+avoid expansion, and source/graph/SQL/store work remain separately attributable.
+Full checkpoint concatenation/file writes remain visible and belong to R07;
+predicate filters may still require complete scans. No universal changed-key
+complexity, allocation-traffic or performance claim is made. Implementation is
+local-only. Next owner: this task, R03a ordered reference-counted MIN/MAX state;
+R03 and later items retain their own acceptance gates.

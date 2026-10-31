@@ -11,6 +11,7 @@ mod sql;
 mod sql_session;
 mod store;
 mod store_work;
+mod table_provider;
 mod table_rows;
 mod transaction_workspace;
 

@@ -8,7 +8,6 @@ use datafusion::arrow::compute::{cast_with_options, concat_batches, CastOptions}
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::TableReference;
-use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{DdlStatement, Expr, LogicalPlan, Volatility};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::parser::{DFParser, Statement as DFStatement};
@@ -16,6 +15,7 @@ use datafusion::sql::sqlparser::ast::{ObjectName, Statement};
 
 use super::dml_compiler::TransactionMode;
 use super::store::DatabaseSnapshot;
+use super::table_provider::{RowTable, TableReadCounter};
 use crate::bag::Bag;
 use crate::error::invalid;
 use crate::{Result, TableChange};
@@ -82,11 +82,25 @@ pub(super) enum RelationScope {
 }
 
 pub(super) fn context(snapshot: &DatabaseSnapshot, scope: RelationScope) -> Result<SessionContext> {
+    Ok(measured_context(snapshot, scope)?.context)
+}
+
+/// Metadata-bound relations and a counter for only their actually demanded table chunks.
+pub(super) struct TableContext {
+    pub(super) context: SessionContext,
+    pub(super) table_reads: Arc<TableReadCounter>,
+}
+
+pub(super) fn measured_context(
+    snapshot: &DatabaseSnapshot,
+    scope: RelationScope,
+) -> Result<TableContext> {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+    let table_reads = Arc::new(TableReadCounter::default());
     for (name, t) in &snapshot.tables {
         ctx.register_table(
             TableReference::bare(name.as_str()),
-            Arc::new(MemTable::try_new(t.rows.schema(), vec![t.rows.batches()?])?),
+            Arc::new(RowTable::new(t.rows.clone(), Arc::clone(&table_reads))),
         )?;
     }
     if scope == RelationScope::AllRelations {
@@ -94,7 +108,10 @@ pub(super) fn context(snapshot: &DatabaseSnapshot, scope: RelationScope) -> Resu
             ctx.register_batch(TableReference::bare(name.as_str()), v.output.clone())?;
         }
     }
-    Ok(ctx)
+    Ok(TableContext {
+        context: ctx,
+        table_reads,
+    })
 }
 
 pub(super) fn reads(plan: &LogicalPlan) -> Result<BTreeSet<String>> {

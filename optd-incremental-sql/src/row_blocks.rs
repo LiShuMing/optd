@@ -18,6 +18,9 @@ use crate::work::{
 };
 use crate::{Error, Result};
 
+mod cursor;
+pub(crate) use cursor::RowCursor;
+
 /// Bound historical distinct-entry copying; expanded duplicate rows may be larger.
 const BLOCK_ENTRIES: usize = 256;
 
@@ -28,9 +31,10 @@ enum RowOrder {
     SingleLeaf,
 }
 
-/// SQL targets retain their eager contract until measured lazy providers are ready.
+/// Production consumers demand Arrow leaves explicitly; tests retain an eager oracle.
 #[derive(Clone, Copy)]
 enum LeafCachePolicy {
+    #[cfg(test)]
     OnUpdate,
     OnDemand,
 }
@@ -41,6 +45,7 @@ struct RowBlock {
     batch: Mutex<Option<RecordBatch>>,
     row_count: usize,
     scalar_bytes: usize,
+    null_counts: Vec<usize>,
 }
 
 /// Leaf construction separates identity encoding from actual Arrow expansion.
@@ -63,6 +68,7 @@ struct RowSnapshot {
     blocks: StateDirectory<Arc<RowBlock>>,
     row_count: usize,
     scalar_bytes: usize,
+    null_counts: Vec<usize>,
     order: RowOrder,
     leaf_policy: LeafCachePolicy,
     // Flatten only at consumers that require one batch. No lock crosses await.
@@ -96,7 +102,7 @@ pub(crate) struct RowUpdate {
 impl RowBlocks {
     /// Bootstrap once from an imported/created batch; later statements use leaves.
     pub(crate) fn from_batch(batch: RecordBatch) -> Result<RowBootstrap> {
-        Self::bootstrap(batch, LeafCachePolicy::OnUpdate)
+        Self::bootstrap(batch, LeafCachePolicy::OnDemand)
     }
 
     /// Graph consumers propagate weighted deltas without expanding updated leaves.
@@ -132,6 +138,7 @@ impl RowBlocks {
             blocks: StateDirectory::new(),
             row_count: volume.rows,
             scalar_bytes: volume.scalar_bytes,
+            null_counts: vec![0; batch.num_columns()],
             order,
             leaf_policy,
             flat: Mutex::new(Some(batch)),
@@ -152,6 +159,7 @@ impl RowBlocks {
                 .checked_add(built.materialization.materialized_array_bytes as u64)
                 .ok_or(Error::Overflow)?;
             leaf_validation.absorb(&built.validation)?;
+            add_null_counts(&mut snapshot.null_counts, &built.block.null_counts)?;
             snapshot.blocks.insert(built.key, Arc::new(built.block));
         }
         Ok(RowBootstrap {
@@ -183,10 +191,9 @@ impl RowBlocks {
         self.0.schema.fields().len()
     }
 
-    /// SQL MemTables consume their eager leaves; propagate any cache/conversion error.
-    /// Graph callers use recorded complete-demand boundaries instead.
-    pub(crate) fn batches(&self) -> Result<Vec<RecordBatch>> {
-        Ok(self.leaf_batches()?.batches)
+    /// Cached exact logical NULL totals; reading metadata never walks row leaves.
+    pub(crate) fn null_counts(&self) -> &[usize] {
+        &self.0.null_counts
     }
 
     fn leaf_batches(&self) -> Result<LeafBatches> {
@@ -297,6 +304,7 @@ impl RowBlocks {
             blocks: self.0.blocks.clone(),
             row_count: self.num_rows(),
             scalar_bytes: self.0.scalar_bytes,
+            null_counts: self.0.null_counts.clone(),
             order: self.0.order.clone(),
             leaf_policy: self.0.leaf_policy,
             flat: Mutex::new(None),
@@ -363,6 +371,7 @@ impl RowBlocks {
                 let built = make_block(leaf, &next.order, next.leaf_policy)?;
                 work.delta_update.absorb(&built.materialization)?;
                 work.leaf_validation.absorb(&built.validation)?;
+                add_null_counts(&mut next.null_counts, &built.block.null_counts)?;
                 if next
                     .blocks
                     .insert(built.key, Arc::new(built.block))
@@ -442,6 +451,9 @@ fn prepare_block(
             .scalar_bytes
             .checked_sub(old.scalar_bytes)
             .ok_or(Error::Overflow)?;
+        for (count, old) in next.null_counts.iter_mut().zip(&old.null_counts) {
+            *count = count.checked_sub(*old).ok_or(Error::Overflow)?;
+        }
     }
     let after = before.add(delta)?;
     after.validate_relation()?;
@@ -458,24 +470,32 @@ fn prepare_block(
     Ok(after)
 }
 
-/// Preflight exact identity before publication, expanding only eager SQL leaves.
+/// Preflight exact identity before publication, expanding only the test reference policy.
 fn make_block(rows: Bag, order: &RowOrder, policy: LeafCachePolicy) -> Result<BlockBuild> {
     let volume = rows.materialization_volume()?;
-    let mut materialization = RelationWork::default();
     let mut validation = RowEncodingWork::default();
-    let (boundary_batch, cached) = match policy {
+    let (boundary_batch, cached, null_counts) = match policy {
+        #[cfg(test)]
         LeafCachePolicy::OnUpdate => {
             let batch = rows.to_batch()?;
-            materialization.record_materialization(&batch)?;
-            (batch.clone(), Some(batch))
+            let null_counts = batch
+                .columns()
+                .iter()
+                .map(|a| a.logical_null_count())
+                .collect();
+            (batch.clone(), Some(batch), null_counts)
         }
         LeafCachePolicy::OnDemand => {
             // Bag retains its exact sort-encoding tie checks without expanding weights.
-            let batch = rows.distinct_batch()?;
-            validation.record(&batch)?;
-            (batch, None)
+            let distinct = rows.distinct_rows()?;
+            validation.record(&distinct.batch)?;
+            (distinct.batch, None, distinct.null_counts)
         }
     };
+    let mut materialization = RelationWork::default();
+    if let Some(batch) = &cached {
+        materialization.record_materialization(batch)?;
+    }
     let key = match order {
         RowOrder::SingleLeaf => Vec::new(),
         RowOrder::Encoded(converter) => {
@@ -493,10 +513,19 @@ fn make_block(rows: Bag, order: &RowOrder, policy: LeafCachePolicy) -> Result<Bl
             batch: Mutex::new(cached),
             row_count: volume.rows,
             scalar_bytes: volume.scalar_bytes,
+            null_counts,
         },
         materialization,
         validation,
     })
+}
+
+/// Combine only replaced-leaf metadata; untouched directory payloads remain borrowed.
+fn add_null_counts(total: &mut [usize], incoming: &[usize]) -> Result<()> {
+    for (count, add) in total.iter_mut().zip(incoming) {
+        *count = count.checked_add(*add).ok_or(Error::Overflow)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

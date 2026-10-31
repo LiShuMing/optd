@@ -45,6 +45,24 @@ impl RelationWork {
     }
 }
 
+/// Successful SQL row-leaf demand, separate from delivered batches and durable IO.
+/// Partial failed conversions, scalar allocations and Bag preflight visits are excluded;
+/// preflight and sorting are bounded to the same distinct-entry leaf as each range miss.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowReadWork {
+    /// Nonempty leaf chunks demanded, including hits on complete leaf caches.
+    pub leaf_chunks: usize,
+    /// Chunks obtained by slicing an already complete Arrow leaf cache.
+    pub cache_hits: usize,
+    /// Weighted entries inspected to locate and emit uncached row ranges.
+    pub stored_entries_visited: usize,
+    /// Distinct rows encoded to establish canonical order for uncached ranges.
+    /// Temporary sorting buffer sizes and scalar allocations are excluded.
+    pub ordering_rows: usize,
+    /// Actual expanded projected batches built for cache misses.
+    pub materialization: RelationWork,
+}
+
 /// Actual directory entries cloned while preparing one candidate refresh.
 ///
 /// Counts include each actual shared tree-node clone on modified paths, including
@@ -129,7 +147,7 @@ pub struct CacheRelationWork {
 }
 
 /// Distinct-row validation/encoding at a retained graph leaf, without weight expansion.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowEncodingWork {
     /// Successful distinct leaf boundary batches encoded.
     pub batches: usize,

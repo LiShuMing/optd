@@ -234,7 +234,8 @@ impl DatabaseStore {
     /// Import tables once per loaded snapshot, accounting actual block bootstrap.
     fn table_rows(&self, payload: &Payload) -> Result<TableRows> {
         let imported = TableRows::from_batch(self.batch(payload, PayloadKind::Table)?)?;
-        self.work.table_bootstrap(&imported.work)?;
+        self.work
+            .table_bootstrap(&imported.work, &imported.leaf_validation)?;
         Ok(imported.rows)
     }
 
@@ -401,7 +402,8 @@ impl DatabaseStore {
                 }
                 None => {
                     let materialized = t.rows.materialize()?;
-                    self.work.table_materialization(&materialized.work)?;
+                    self.work
+                        .table_materialization(&materialized.work, &materialized.leaf_work)?;
                     payload(
                         PayloadKind::Table,
                         format!("table-{}.arrow", t.id),

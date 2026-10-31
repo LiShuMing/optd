@@ -11,6 +11,8 @@ use datafusion::common::ScalarValue;
 
 use crate::{Error, Result};
 
+mod range;
+
 /// Maximum rows in one local input or expanded bag materialization.
 ///
 /// This reference backend rejects larger expansions before allocating Arrow
@@ -52,6 +54,12 @@ pub(crate) struct EncodedBagRows<'a> {
 pub(crate) struct MaterializationVolume {
     pub(crate) rows: usize,
     pub(crate) scalar_bytes: usize,
+}
+
+/// Canonical distinct rows and exact weighted logical validity from that encoding.
+pub(crate) struct DistinctRows {
+    pub(crate) batch: RecordBatch,
+    pub(crate) null_counts: Vec<usize>,
 }
 
 impl Bag {
@@ -387,12 +395,6 @@ impl Bag {
     pub(crate) fn to_batch(&self) -> Result<RecordBatch> {
         check_row_limit(self.total()?)?;
         materialize(self.schema(), &self.sorted_entries()?, true)
-    }
-
-    /// Validate canonical row identity and encode each distinct row exactly once.
-    /// Positive leaf admission uses this without expanding duplicate multiplicities.
-    pub(crate) fn distinct_batch(&self) -> Result<RecordBatch> {
-        materialize(self.schema(), &self.sorted_entries()?, false)
     }
 
     /// Encode one distinct row per change and append the signed Int64 weight.

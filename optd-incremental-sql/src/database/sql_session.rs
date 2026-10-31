@@ -401,8 +401,9 @@ impl SqlSession {
                     .as_ref()
                     .map(|t| &t.snapshot)
                     .unwrap_or(&self.committed);
-                let ctx = sql::context(snapshot, RelationScope::AllRelations)?;
-                let plan = sql::plan_query(&ctx, &stmt.to_string()).await?;
+                let binding = sql::measured_context(snapshot, RelationScope::AllRelations)?;
+                let ctx = &binding.context;
+                let plan = sql::plan_query(ctx, &stmt.to_string()).await?;
                 sql::reject_mv_reads(
                     snapshot,
                     &plan,
@@ -412,8 +413,9 @@ impl SqlSession {
                         TransactionMode::Autocommit
                     },
                 )?;
-                let rows = sql::collect(&ctx, plan).await?;
+                let rows = sql::collect(ctx, plan).await?;
                 Ok(SqlResponse {
+                    table_reads: Some(binding.table_reads.snapshot()?),
                     epoch: self.epoch(),
                     rows: Some(rows),
                     commit: None,

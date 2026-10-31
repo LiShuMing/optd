@@ -1,6 +1,6 @@
 # Lazy SQL table scans and weighted table comparison
 
-**Status:** accepted · 2026-10-31; weighted comparison/root-reuse increment verified; provider/range stages pending
+**Status:** accepted · 2026-10-31; weighted comparison/root reuse and lazy table/provider increment verified locally
 **Scope:** Final R02d SQL table/provider stage after graph-leaf commit `d31e71a`.
 Checkpoint payload formats, native source ingestion and durable operator states
 remain R07/R08. No rule-admission, numeric-contract or dependency changes.
@@ -191,6 +191,55 @@ commands and identities are in ROADMAP and
 `target/roadmap-r02d-table-reuse-live-20261031`. This increment adds no diagnostic
 schema, so report-tool tests were not rerun; the live numeric work audit passed.
 
-SQL tables/providers remain eager. NULL metadata, projected range conversion,
-fetch-aware streaming and scan/export diagnostic extensions above are still
-pending, as is complete R02d acceptance and the rest of the roadmap.
+At the comparison/root-reuse milestone, SQL tables/providers remained eager.
+The following increment implements the remaining table/provider stages; complete
+R02d acceptance uses the verification gates recorded below and in ROADMAP.
+
+
+## 10. Lazy table/provider implementation
+
+Production tables now retain weighted lazy leaves, as graph caches already do.
+Only replaced leaves contribute to maintained row and logical-NULL metadata.
+NULL counts use Arrow logical validity on the already encoded distinct boundary
+batch, weighted by the same canonical entries; no scalar NULL heuristic or
+unchanged-leaf traversal is used. An eager policy remains test-only.
+
+`Bag::range_batch` skips positive weights as scalars and projects selected rows
+before allocating expanded output columns. `RowCursor` owns an immutable revision
+and a strict-successor key/offset, without collecting leaf handles. A source poll
+converts at most its remaining fetch/configured batch bound. Physical `with_fetch`
+changes that source's cap; unpolled/dropped streams create no producer work.
+Complete canonical leaf reads may populate the existing full cache. Partial or
+projected misses do not impersonate full-cache fills. Partial misses may re-encode
+at most one bounded leaf's distinct order each time; `ordering_rows` reports this,
+while temporary sort/scalar buffer bytes and positive/count preflight visits
+remain outside these counters. Preflight also touches only the same bounded
+distinct leaf; range probes are not a total SQL CPU or memory-access measurement.
+
+Provider/logical statistics remain absent, preserving CREATE MV dependency binding.
+Physical statistics use maintained exact row/NULL totals and unknown physical
+bytes. Strict-prefix NULL counts are unknown unless zero is provable. COUNT
+metadata optimization is retained. SQL registration and planning retain metadata
+and roots without traversing/expanding stored leaves.
+
+Actual demand is reported through `RowReadWork`: leaf chunks, complete-cache hits,
+weighted entries inspected, distinct ordering rows and newly materialized projected
+batches/rows/Arrow bytes. SELECT exposes optional `SqlResponse.table_reads`; the
+CLI labels it `base_table_reads`. DML's optional selector `table_reads` stays
+separate from delivered source batches. Targets expose optional `leaf_validation`.
+StoreWork separates optional `table_leaf_demand` during checkpoint export from
+`table_leaf_validation` during restore, alongside full concatenation and file IO.
+Current executions report measured zero; missing historical fields remain unknown.
+Store interval arithmetic and complete counter events remain checked/atomic.
+
+A RED test on the eager SQL factory observed 100,000 expanded bootstrap rows for
+100,000 identical values. Lazy construction and the following one-row insertion
+now each validate one distinct value and expand zero rows. Independent Arrow
+NULL tests cover dictionary value/key NULLs, nested struct parent/child validity
+and list NULL/empty values. Random weighted updates/ranges use an integer-vector
+oracle; SQL cases use a separate DataFusion MemTable reference, and snapshot/retry/
+reopen checks verify immutable epochs and diagnostic identities.
+
+Verification commands, actual gate results, fixed-work measurements, fresh frozen
+TPC witnesses and exclusions are recorded in ROADMAP. R02d status is gated there;
+this implementation text does not itself certify full TPC coverage or performance.

@@ -44,6 +44,30 @@ class UnifiedWork(unittest.TestCase):
     def verification(self, source):
         return source["queries"][0]["profiles"][0]["verification"]
 
+    def test_lazy_table_work_keeps_validation_scan_export_and_legacy_absence_separate(self):
+        source = self.fixture()
+        rounds = self.verification(source)["rounds"]
+        for round_ in rounds:
+            round_["commit"] = {"maintenance": {}, "dml": [{"execution": {
+                "selector": {"table_reads": {"materialization": {"materialized_rows": 1},
+                    "ordering_rows": 256}},
+                "target": {"leaf_validation": {"rows": 257},
+                    "delta_update": {"materialized_rows": 0}}}}]}
+            round_["storage_work"] = {"table_leaf_demand": {"materialized_rows": 257},
+                "table_leaf_validation": {"rows": 0}}
+        work = audit(source)["observed_work"]
+        self.assertEqual(work["dml.execution.selector.table_reads.materialization.materialized_rows"], 3)
+        self.assertEqual(work["dml.execution.target.leaf_validation.rows"], 771)
+        self.assertEqual(work["dml.execution.target.delta_update.materialized_rows"], 0)
+        self.assertEqual(work["storage_work.table_leaf_demand.materialized_rows"], 771)
+        for round_ in rounds:
+            del round_["commit"]["dml"][0]["execution"]["selector"]["table_reads"]
+            del round_["commit"]["dml"][0]["execution"]["target"]["leaf_validation"]
+            del round_["storage_work"]["table_leaf_demand"]
+            del round_["storage_work"]["table_leaf_validation"]
+        work = audit(source)["observed_work"]
+        self.assertFalse(any("table_reads" in key or "leaf_validation" in key or "leaf_demand" in key for key in work))
+
     def test_sql_database_work_keeps_transaction_verification_and_recovery_separate(self):
         source = self.fixture()
         verification = self.verification(source)

@@ -39,6 +39,8 @@ pub struct CommitReport {
 
 /// Result of a SQL statement or an identified write transaction.
 pub struct SqlResponse {
+    /// Actual base-table chunk demand for SELECT; excludes views and other SQL work.
+    pub table_reads: Option<crate::RowReadWork>,
     /// Committed epoch (or the original outcome's epoch for a replayed request).
     pub epoch: u64,
     /// SELECT output, read from a single database/session snapshot.
@@ -53,6 +55,7 @@ impl SqlResponse {
     pub(super) fn empty(epoch: u64) -> Self {
         Self {
             epoch,
+            table_reads: None,
             rows: None,
             commit: None,
             replayed: false,
@@ -61,6 +64,7 @@ impl SqlResponse {
     pub(super) fn committed(report: CommitReport, replayed: bool) -> Self {
         Self {
             epoch: report.epoch,
+            table_reads: None,
             rows: None,
             commit: Some(report),
             replayed,

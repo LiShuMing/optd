@@ -114,6 +114,21 @@ impl<V> StateDirectory<V> {
         Some((&node.key, &node.value))
     }
 
+    /// Find the next leaf without collecting directory handles or borrowing a cursor stack.
+    pub(crate) fn successor(&self, key: &[u8]) -> Option<(&Vec<u8>, &V)> {
+        let mut cursor = self.root.as_deref();
+        let mut found = None;
+        while let Some(node) = cursor {
+            if key < node.key.as_slice() {
+                found = Some((&node.key, &node.value));
+                cursor = node.left.as_deref();
+            } else {
+                cursor = node.right.as_deref();
+            }
+        }
+        found
+    }
+
     /// Traverse one borrowed immutable revision in ascending byte-key order.
     pub(crate) fn iter(&self) -> DirectoryIter<'_, V> {
         let mut iter = DirectoryIter { stack: Vec::new() };
@@ -428,6 +443,14 @@ mod tests {
         for k in [0, 1, 7, 64, 127, 512, 1025, u64::MAX] {
             assert_eq!(d.get(&key(k)), m.get(&key(k)));
             assert_eq!(d.predecessor(&key(k)), m.range(..=key(k)).next_back());
+            assert_eq!(
+                d.successor(&key(k)),
+                m.range((
+                    std::ops::Bound::Excluded(key(k)),
+                    std::ops::Bound::Unbounded
+                ))
+                .next()
+            );
         }
     }
     #[test]

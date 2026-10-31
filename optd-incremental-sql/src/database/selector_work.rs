@@ -24,6 +24,7 @@ use futures::Stream;
 
 use super::dml_work::SelectorWork;
 use super::store::DatabaseSnapshot;
+use super::table_provider::{RowTable, TableReadCounter};
 use crate::bag::Bag;
 use crate::error::invalid;
 use crate::{Error, Result};
@@ -39,6 +40,7 @@ pub(super) struct SelectedRows {
 pub(super) struct MeasuredSelector {
     pub(super) context: SessionContext,
     counter: Arc<SourceCounter>,
+    table_reads: Arc<TableReadCounter>,
 }
 
 impl MeasuredSelector {
@@ -46,11 +48,12 @@ impl MeasuredSelector {
         let context =
             SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
         let counter = Arc::new(SourceCounter::default());
+        let table_reads = Arc::new(TableReadCounter::default());
         for (name, table) in &snapshot.tables {
             context.register_table(
                 name.as_str(),
                 Arc::new(CountedTable {
-                    input: MemTable::try_new(table.rows.schema(), vec![table.rows.batches()?])?,
+                    input: Arc::new(RowTable::new(table.rows.clone(), Arc::clone(&table_reads))),
                     counter: Arc::clone(&counter),
                 }),
             )?;
@@ -59,15 +62,19 @@ impl MeasuredSelector {
             context.register_table(
                 name.as_str(),
                 Arc::new(CountedTable {
-                    input: MemTable::try_new(
+                    input: Arc::new(MemTable::try_new(
                         view.output.schema(),
                         vec![vec![view.output.clone()]],
-                    )?,
+                    )?),
                     counter: Arc::clone(&counter),
                 }),
             )?;
         }
-        Ok(Self { context, counter })
+        Ok(Self {
+            context,
+            counter,
+            table_reads,
+        })
     }
 
     /// Execute one optimized selector with the same providers, including subqueries.
@@ -77,6 +84,7 @@ impl MeasuredSelector {
         let physical = frame.create_physical_plan().await?;
         let batches = physical_plan::collect(physical, self.context.task_ctx()).await?;
         let mut work = self.counter.snapshot()?;
+        work.table_reads = Some(self.table_reads.snapshot()?);
         work.output_batches = batches.len();
         work.output_rows = batches.iter().try_fold(0usize, |rows, batch| {
             rows.checked_add(batch.num_rows()).ok_or(Error::Overflow)
@@ -90,7 +98,7 @@ impl MeasuredSelector {
 /// Delegate snapshot semantics and place the counter only on actual table scans.
 #[derive(Debug)]
 struct CountedTable {
-    input: MemTable,
+    input: Arc<dyn TableProvider>,
     counter: Arc<SourceCounter>,
 }
 

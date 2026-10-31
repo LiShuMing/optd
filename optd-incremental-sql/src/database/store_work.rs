@@ -122,6 +122,12 @@ pub struct StoreWork {
     /// Actual table conversion while restoring current or historical snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_bootstrap: Option<TableBootstrapWork>,
+    /// Actual lazy leaf expansions demanded by table checkpoint exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_leaf_demand: Option<crate::RelationWork>,
+    /// Distinct-row identity encoding while restoring table leaves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_leaf_validation: Option<crate::RowEncodingWork>,
 }
 
 impl Default for StoreWork {
@@ -139,6 +145,8 @@ impl Default for StoreWork {
             manifests_visited: 0,
             table_materialization: Some(TableMaterializationWork::default()),
             table_bootstrap: Some(TableBootstrapWork::default()),
+            table_leaf_demand: Some(crate::RelationWork::default()),
+            table_leaf_validation: Some(crate::RowEncodingWork::default()),
         }
     }
 }
@@ -199,6 +207,24 @@ impl StoreWork {
                 .as_ref()
                 .zip(before.table_bootstrap.as_ref())
                 .map(|(a, b)| a.since(b))
+                .transpose()?,
+            table_leaf_demand: self
+                .table_leaf_demand
+                .as_ref()
+                .zip(before.table_leaf_demand.as_ref())
+                .map(|(a, b)| relation_since(a, b))
+                .transpose()?,
+            table_leaf_validation: self
+                .table_leaf_validation
+                .as_ref()
+                .zip(before.table_leaf_validation.as_ref())
+                .map(|(a, b)| -> Result<crate::RowEncodingWork> {
+                    Ok(crate::RowEncodingWork {
+                        batches: subtract_entries(a.batches, b.batches)?,
+                        rows: subtract_entries(a.rows, b.rows)?,
+                        array_bytes: subtract_entries(a.array_bytes, b.array_bytes)?,
+                    })
+                })
                 .transpose()?,
         })
     }
@@ -287,7 +313,11 @@ impl StoreWorkCounter {
         Ok(())
     }
 
-    pub(super) fn table_materialization(&self, work: &TableMaterializationWork) -> Result<()> {
+    pub(super) fn table_materialization(
+        &self,
+        work: &TableMaterializationWork,
+        leaves: &crate::RelationWork,
+    ) -> Result<()> {
         self.record(|w| {
             let next = w
                 .table_materialization
@@ -295,11 +325,19 @@ impl StoreWorkCounter {
                 .ok_or_else(|| invalid("live counter lacks table materialization domain"))?;
             add(&mut next.misses, work.misses)?;
             add(&mut next.rows, work.rows)?;
-            add(&mut next.array_bytes, work.array_bytes)
+            add(&mut next.array_bytes, work.array_bytes)?;
+            w.table_leaf_demand
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks leaf demand domain"))?
+                .absorb(leaves)
         })
     }
 
-    pub(super) fn table_bootstrap(&self, work: &TableBootstrapWork) -> Result<()> {
+    pub(super) fn table_bootstrap(
+        &self,
+        work: &TableBootstrapWork,
+        validation: &crate::RowEncodingWork,
+    ) -> Result<()> {
         self.record(|w| {
             let next = w
                 .table_bootstrap
@@ -312,7 +350,11 @@ impl StoreWorkCounter {
             add(
                 &mut next.materialized_array_bytes,
                 work.materialized_array_bytes,
-            )
+            )?;
+            w.table_leaf_validation
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks leaf validation domain"))?
+                .absorb(validation)
         })
     }
 
@@ -374,6 +416,31 @@ impl StoreWorkCounter {
 fn subtract(after: u64, before: u64) -> Result<u64> {
     after.checked_sub(before).ok_or_else(|| {
         invalid("store work counters decreased; snapshots must come from the same session in order")
+    })
+}
+
+fn subtract_entries(after: usize, before: usize) -> Result<usize> {
+    after
+        .checked_sub(before)
+        .ok_or_else(|| invalid("store entry counters decreased"))
+}
+
+fn relation_since(
+    after: &crate::RelationWork,
+    before: &crate::RelationWork,
+) -> Result<crate::RelationWork> {
+    Ok(crate::RelationWork {
+        map_rebuilds: subtract_entries(after.map_rebuilds, before.map_rebuilds)?,
+        old_row_entries_copied: subtract_entries(
+            after.old_row_entries_copied,
+            before.old_row_entries_copied,
+        )?,
+        materializations: subtract_entries(after.materializations, before.materializations)?,
+        materialized_rows: subtract_entries(after.materialized_rows, before.materialized_rows)?,
+        materialized_array_bytes: subtract_entries(
+            after.materialized_array_bytes,
+            before.materialized_array_bytes,
+        )?,
     })
 }
 
@@ -450,12 +517,21 @@ mod legacy_table_domains {
             .unwrap()
             .remove("table_materialization");
         value.as_object_mut().unwrap().remove("table_bootstrap");
+        value.as_object_mut().unwrap().remove("table_leaf_demand");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("table_leaf_validation");
         let old: StoreWork = serde_json::from_value(value.clone()).unwrap();
         assert!(old.table_materialization.is_none());
         assert!(old.table_bootstrap.is_none());
+        assert!(old.table_leaf_demand.is_none());
+        assert!(old.table_leaf_validation.is_none());
         assert_eq!(serde_json::to_value(&old).unwrap(), value);
         let interval = StoreWork::default().since(&old).unwrap();
         assert!(interval.table_materialization.is_none());
         assert!(interval.table_bootstrap.is_none());
+        assert!(interval.table_leaf_demand.is_none());
+        assert!(interval.table_leaf_validation.is_none());
     }
 }

@@ -29,8 +29,7 @@ async fn values_and_selective_updates_expose_changed_leaf_work_as_untouched_rows
         assert_eq!(w["execution"]["selector"]["source_rows"], 0);
         assert_eq!(w["execution"]["selector"]["source_batches"], 0);
         assert_eq!(w["execution"]["new_image_rows"], 1);
-        // R02b intentionally removes the full target Arrow-to-Bag conversion;
-        // leaf copies/materialization remain measured below.
+        // Target writes copy bounded weighted leaves and validate only distinct rows.
         assert_eq!(w["execution"]["target"]["collected_rows"], 0);
         assert_eq!(w["execution"]["target"]["distinct_entries"], 0);
         assert_eq!(w["execution"]["target"]["delta_update"]["map_rebuilds"], 1);
@@ -40,8 +39,9 @@ async fn values_and_selective_updates_expose_changed_leaf_work_as_untouched_rows
         );
         assert_eq!(
             w["execution"]["target"]["delta_update"]["materialized_rows"],
-            n + 1
+            0
         );
+        assert_eq!(w["execution"]["target"]["leaf_validation"]["rows"], n + 1);
 
         let w = work(&mut db, "UPDATE t SET k=k+10 WHERE k=0").await;
         assert_eq!(w["affected_rows"], 1);
