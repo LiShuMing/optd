@@ -59,6 +59,7 @@
   - [Shared weighted raw-source state](incremental/raw_source_state.md)
   - [Lazy maintained relation leaves](incremental/lazy_relation_leaves.md)
   - [Lazy SQL table scans](incremental/sql_table_leaf_demand.md)
+  - [Retractable MIN/MAX value indexes](incremental/extrema_value_indexes.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)

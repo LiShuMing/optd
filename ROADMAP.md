@@ -37,7 +37,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | verified |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
-| R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | pending |
+| R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | in_progress |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | pending |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
@@ -779,3 +779,13 @@ predicate filters may still require complete scans. No universal changed-key
 complexity, allocation-traffic or performance claim is made. Implementation is
 local-only. Next owner: this task, R03a ordered reference-counted MIN/MAX state;
 R03 and later items retain their own acceptance gates.
+
+
+### R03a — design and implementation lane
+
+Claimed by this task. [Retractable MIN/MAX value indexes](docs/src/incremental/extrema_value_indexes.md)
+defines counted shared value directories under the existing accumulator rewrite,
+exact nonfloating type/NULL contracts, optional actual work, independent oracles
+and fresh TPC-H Q15/TPC-DS Q23 acceptance. Local source/design review is complete;
+implementation and all R03a acceptance gates remain pending. No new package or
+persisted format is proposed. Design is committed before implementation.
