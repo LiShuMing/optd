@@ -165,3 +165,37 @@ alias safety share the same normalizer. Test actual access counters while growin
 untouched partitions, and prove a partition-wide transition changes unchanged
 comparison keys in exactly that partition. Unsupported correlations must still
 refuse before any publication or request receipt.
+
+## 10. NULL-safe and mixed correlation policies: reviewed follow-on
+
+**Status:** accepted implementation design · 2026-10-31 after key-policy and
+truth-case review. This section is a separate follow-on to ordinary equality.
+
+Recognize only direct `inner_column IS NOT DISTINCT FROM outer_column` in addition
+to ordinary equality, retaining an explicit per-key Ordinary/NullSafe policy.
+Comparison membership itself always retains SQL `=` semantics. Unknown/computed
+policies remain refused. No new physical state or runtime interpretation is needed.
+
+DataFusion's typed join has one NULL-equality policy for its whole key vector.
+For an all-ordinary correlation, preserve the existing ordinary joins unchanged.
+If any correlation key is NULL-safe, remove right rows having NULL in any
+*ordinary* correlation key before building both member and flag relations, then
+use NullEqualsNull for both joins. Such removed rows can match no outer row under
+that ordinary predicate. Remaining ordinary right keys are non-NULL, so enabling
+NULL equality cannot create a match for an outer ordinary NULL key. The NULL-safe
+keys now compare correctly, including NULL/NULL. This proves mixed vectors.
+
+The member relation separately filters NULL compared values before grouping.
+Its compared join key is therefore non-NULL, so whole-vector NullEqualsNull cannot
+turn a scalar NULL comparison into a true member match. Flags use only correlation
+keys. Matched/empty/UNKNOWN/false CASE ordering is unchanged: a NULL-safe matching
+partition containing only NULL compared values produces UNKNOWN, never TRUE;
+a missing partition produces FALSE even for a NULL compared scalar.
+
+Qualify each NULL-policy combination against independent partition truth, including
+both NULL keys, mixed vectors, first/last NULL values, duplicate counts, absent
+partitions, two-source moves, signed prefixes, SQL writes and retry/reopen/history.
+Keep the ordinary scope regression; add fixed-delta growing-untouched NULL-safe
+partition checks. Replace only the newly qualified direct NULL-safe refusal case
+with exact oracle tests; retain computed NULL-safe, range and row-changing scope
+refusals. Full R04b/R06/numerical/performance gates remain independent.
