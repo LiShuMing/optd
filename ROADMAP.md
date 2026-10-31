@@ -34,7 +34,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R01c | P0 | Store and recovery work accounting | Record reused/written payloads and actual file bytes, metadata/history reads and bootstrap/recovery work; retries do not impersonate fresh execution | verified |
 | R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | verified |
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
-| R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | pending |
+| R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | in_progress |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | pending |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | pending |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | pending |
@@ -317,3 +317,11 @@ Implementation is local-only.
 R02b: review the immutable transaction-table block design, implement bounded
 changed-leaf updates and snapshot binding, and prove statement work separately
 from remaining directory copying and full checkpoint materialization.
+
+
+R02b design review is complete:
+[immutable transaction table blocks](docs/src/incremental/transaction_table_blocks.md).
+Use shared bounded sorted leaves, preserve no-converter singleton admission and
+final-state UPDATE checks, measure directory clones and checkpoint flattening
+separately. Implementation and regression gates remain outstanding; no source
+representation change or efficiency improvement is claimed yet.
