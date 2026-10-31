@@ -53,6 +53,11 @@ For an uncorrelated `e IN S(v)`, construct:
 4. CASE in order: true match => TRUE; empty => FALSE; NULL left or has_null =>
    UNKNOWN; otherwise FALSE. Apply NOT to the complete nullable result for NOT IN.
 
+When both original comparison operands are nonnullable, membership equals the
+nonnullable matched marker's IS NOT NULL test even for empty S. Omit the flags
+branch in that proven case; this avoids an unnecessary global dependency and
+preserves the original nonnullable Boolean field.
+
 Remove helper columns at the original node boundary and preserve original output
 expression names/qualifiers/types/nullability/metadata. Allocate helper names
 against all existing names, including nested plans and expression aliases. Refuse
@@ -114,3 +119,49 @@ range/global cost selection require subsequent evidence. A globally affected
 bucket can contain all preserved rows; necessary output and avoidable intermediate
 work must remain separately measurable. Full-TPC and controlled performance are
 independent R10 gates.
+
+## 9. Correlated equality partitions: reviewed follow-on
+
+**Status:** accepted implementation design · 2026-10-31 after local typed-plan and
+algebra review. This section precedes correlated source changes and does not claim
+correlated implementation acceptance.
+
+Start with a single compared output over a Projection/Filter/SubqueryAlias chain
+ending in one uncorrelated input. Extract only conjunctive `inner_column =
+outer_column` predicates with identical qualified equality types and ordinary
+NULL equality. Keep every inner-only predicate. Reject outer references in any
+other position, non-equality/null-safe predicates, correlated aggregate/window/
+limit/distinct/set/join boundaries, unproved scope or comparison coercion. Bounds
+cover extracted keys, original expressions, generated copies and helper names.
+No outer reference may remain in the extracted relation.
+
+Carry each extracted inner key through projections with fresh hidden aliases and
+through alias boundaries with its new qualifier. Preserve the original compared
+output as position zero. Build a compared relation with unique helper columns
+for value and correlation keys; the parent input retains the outer key columns.
+
+Group distinct non-NULL members by `(correlation keys, compared value)` and LEFT
+JOIN original rows on all keys plus the scalar comparison. Group total/non-NULL
+counts by correlation keys, project only a nonnullable presence marker and
+`has_null`, then LEFT JOIN these flags using correlation keys alone. A missing
+flags row is an empty comparison partition, including a NULL ordinary outer key.
+CASE ordering stays matched TRUE, absent partition FALSE, left NULL/partition
+has_null UNKNOWN, otherwise FALSE. NOT negates the complete result. If both
+compared operands are nonnullable, the matched marker alone remains sufficient.
+
+The two joins intentionally have different scopes: member changes touch comparison
+keys inside one partition; first/last partition NULL or empty transitions may
+change all preserved comparison keys in that partition. Unchanged partitions must
+never be looked up or recomputed because another partition's flag changed.
+Duplicate count changes with unchanged member/flag truth emit no downstream delta.
+These concrete joins prove execution scope only; reusable R06 descriptors remain
+required separately.
+
+Qualify projection and negative/disjunctive predicates with independent nested-loop
+partition truth and signed prefixes; cover composite/NULL correlation keys,
+filtered values, missing/all-NULL partitions, duplicates, key moves and two-source
+atomic epochs. SQL selectors/INSERT SELECT/CREATE, retry/reopen/history and schema/
+alias safety share the same normalizer. Test actual access counters while growing
+untouched partitions, and prove a partition-wide transition changes unchanged
+comparison keys in exactly that partition. Unsupported correlations must still
+refuse before any publication or request receipt.
