@@ -1461,3 +1461,9 @@ work. No full-TPC or performance qualification and no push.
 
 Final mdBook build and `git diff --check` exited 0; book log:
 `target/roadmap-r04b-quantified-docs-20261031.log`.
+
+Admission repair is committed locally as `42011e0`. Next claimed slice:
+Boolean mark-count transitions, designed in mark_joins.md section 10 after review
+of typed schemas and existing prepared/count state. Separate rule identity and
+explicit flag replacement preserve the optimizer/execution boundary. R04b remains
+in_progress until three-valued/correlated and directed-query gates all qualify.

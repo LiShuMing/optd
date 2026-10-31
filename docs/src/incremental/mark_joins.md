@@ -150,3 +150,59 @@ query is reported passed. Q35 retains its independent numerical AVG blocker.
 
 Mark execution remains unimplemented and R04b stays in_progress. No full-TPC,
 standard-scale or controlled performance certification follows from admission.
+
+## 10. Boolean mark-count slice: reviewed transition design
+
+**Status:** accepted · 2026-10-31 after typed schema, index and emitter review.
+**Scope:** the pinned Boolean LeftMark/RightMark relational operators only. SQL
+admission in section 9 stays mandatory. Observable quantified UNKNOWN and global
+NULL dependencies remain R04b/R06 work; Boolean qualification cannot close R04b.
+
+Register a separately named `builtin.boolean_mark_join` version 1 at priority 20.
+Its matcher accepts only mark types with the same qualified, nonempty equikey
+scope, deterministic expressions and non-NULL-aware contract as match-count
+state. Keep `builtin.match_count_join@2` restricted to the seven qualified
+outer/semi/anti types. Both declare `Maintenance::MatchJoin` and lower to existing
+Optd PrepareIndex/MaintainMatchJoin/CompleteIndex with operator-bound index state.
+No SQL-string classification in rules/runtime and no new persistence format.
+The existing scoped alternative may remain available only with the same scope
+proof; removing the mark rule must preserve strict correctness and clear plans.
+
+Pinned public typed builders and physical join schema utilities agree: LeftMark
+outputs left fields followed by one nonnullable Boolean `mark`; RightMark outputs
+right fields followed by that field. Test both by executing actual typed plans,
+not just assuming RightMark symmetry. Key NULLs do not match ordinary equality;
+NULL-safe equikeys may match. Residual TRUE alone contributes to match counts.
+Boolean mark remains nonnullable even for NULL input rows and NULL residuals.
+
+Extend the output policy with explicit preserved-side mark behavior. An own
+preserved-row delta emits that row plus its fixed-peer positivity, with original
+multiplicity. Peer count zero crossings retract the old marked row and insert
+the new marked row. Both flags have membership one: subtracting semi/anti
+membership indicators cannot implement this replacement. Non-preserved rows emit
+nothing unless they change preserved peer flags. Consolidate all peer count
+changes in each one-sided stage before crossings; multiplicities count matching
+peer rows but never multiply the preserved row by pair cardinality. Stage order
+stays delta-left/before-right then after-left/delta-right, including both-side
+inserts/deletes and moved keys. Share crossing/own emission between pure and
+residual algorithms so the seven existing join orientations retain their laws.
+
+For pure keys with unchanged positivity, no unchanged peer entries need visiting.
+At a zero crossing visit only affected-key preserved rows and account both output
+contributions. Residuals still evaluate changed-distinct-row times fixed-peer
+candidates and retain per-full-row counts; do not repeat unchanged/unchanged pairs.
+Keep candidate-private failure/discard/stale semantics and actual count-map,
+input-bucket, materialization and directory-copy measurements. Reopen rebuilds
+count state from committed inputs; R07 state persistence is separate.
+
+Acceptance: RED strict EXISTS/positive-IN disjunction plans; independent Boolean
+nested-loop oracles over both orientations/predicates, duplicates/NULL, first/last
+matches, both-side signed key moves and complete delta-prefix replay. Execute
+actual typed LeftMark and RightMark bootstrap kernels, verify field order/type and
+nullability, and compare incremental state output against the independent oracle.
+Add pure hot-key/no-crossing and fixed-delta/growing-untouched scope regressions,
+residual cancellation/failure/isolation coverage and default SQL CREATE/DML,
+identified retry, atomic multi-source writes, reopen/history. Re-run both feature
+gates and fresh frozen Q10/Q45 witnesses; retain Q35 numerical blockers. Keep
+UNKNOWN-sensitive SQL refused and no-equikey/global joins explicit. Record every
+remaining gate without promoting this slice to full R04b or performance acceptance.
