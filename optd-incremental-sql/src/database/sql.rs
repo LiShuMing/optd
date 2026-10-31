@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::compute::{cast, concat_batches};
+use datafusion::arrow::compute::{cast_with_options, concat_batches, CastOptions};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::TableReference;
@@ -140,7 +140,16 @@ pub(super) fn typed(batch: &RecordBatch, schema: SchemaRef) -> Result<RecordBatc
         .iter()
         .zip(schema.fields())
         .map(|(a, f)| {
-            let a = cast(a, f.data_type())?;
+            // SQL assignment casts must fail on invalid input or overflow. Arrow's
+            // default safe cast silently substitutes NULL even for nullable targets.
+            let a = cast_with_options(
+                a,
+                f.data_type(),
+                &CastOptions {
+                    safe: false,
+                    ..Default::default()
+                },
+            )?;
             if !f.is_nullable() && a.null_count() != 0 {
                 return Err(invalid("NULL violates NOT NULL column"));
             }

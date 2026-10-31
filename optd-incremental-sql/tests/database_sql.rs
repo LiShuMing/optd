@@ -440,3 +440,31 @@ async fn failed_commit_and_script_parse_leave_transaction_aborted_until_rollback
         expected(&[&["1", "2"]])
     );
 }
+
+#[tokio::test]
+async fn nullable_update_target_casts_reject_overflow_and_invalid_text_atomically() {
+    let root = tempfile::tempdir().unwrap();
+    let mut db = SqlSession::open(root.path()).await.unwrap();
+    db.execute_script("CREATE TABLE t(a INT,p DECIMAL(5,2)); INSERT INTO t VALUES (1,1.25); CREATE MATERIALIZED VIEW m AS SELECT a,p FROM t").await.unwrap();
+    let epoch = db.epoch();
+    for statement in [
+        "UPDATE t SET a=2147483648",
+        "UPDATE t SET a='invalid'",
+        "UPDATE t SET p=1000.00",
+    ] {
+        assert!(
+            db.execute(statement).await.is_err(),
+            "{statement} must reject rather than silently write NULL"
+        );
+        assert_eq!(db.epoch(), epoch);
+        assert_eq!(
+            values(&mut db, "SELECT a,p FROM t").await,
+            expected(&[&["1", "1.25"]])
+        );
+        assert_eq!(
+            values(&mut db, "SELECT a,p FROM m").await,
+            expected(&[&["1", "1.25"]])
+        );
+    }
+    db.verify_output_history().unwrap();
+}
