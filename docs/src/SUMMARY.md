@@ -56,6 +56,7 @@
   - [Immutable transaction table blocks](incremental/transaction_table_blocks.md)
   - [Shared state directories](incremental/shared_state_directories.md)
   - [Chunked maintained relations](incremental/chunked_relation_caches.md)
+  - [Shared weighted raw-source state](incremental/raw_source_state.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)
