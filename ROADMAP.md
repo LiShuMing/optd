@@ -54,7 +54,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R08 | P1 | Incremental source ingestion | Read changed files/native changes rather than both full endpoints; qualify delete-file semantics and source provenance separately from host-local atomicity | pending |
 | R09a | P2 | Physical algorithm alternatives and cost selection | Compare qualified delta/indexed/scoped algorithms using measured state and change sizes; strict mode never silently selects full recomputation | pending |
 | R09b | P2 | Reusable execution templates | Avoid repeatedly planning/materializing local DataFusion expressions; inputs remain epoch-correct and task-isolated | pending |
-| R09c | P1 | Plan preflight and complete blockers | Enumerate every blocking node with precise function/type/scope reason before CREATE MV; unsupported plans publish nothing | pending |
+| R09c | P1 | Plan preflight and complete blockers | Enumerate every blocking node with precise function/type/scope reason before CREATE MV; unsupported plans publish nothing | in_progress |
 | R10a | P0 | Scaling and work-scope regressions | Hold changes, bucket size and required output fixed; grow untouched data; assert source reads, state copies, materialization and writes separately | pending |
 | R10b | P1 | Long-running randomized SQL/recovery loops | Mix transactions, duplicate/NULL/key moves, hot keys, window peers, discarded candidates and deterministic crash points; independent SQL and delta-prefix oracles | pending |
 | R10c | P1 | Controlled performance qualification | Record machine, source/data/binary identities and isolated state; compare full vs incremental at multiple change ratios; no performance claim from correctness durations | pending |
@@ -998,3 +998,13 @@ the Q22 loop remains explicitly dependent on R03e. Implementation commit is titl
 `Normalize grouping sets into schema-exact incremental aggregate branches`;
 no push. Next owner: this task, R09c planning preflight before further algorithm
 qualification, so refused queries expose complete blockers without bootstrap work.
+
+
+### R09c — design and implementation lane
+
+Claimed after R03c 733a0eb, ahead of further maintenance algorithms so qualification
+can identify all remaining blockers without executing a non-strict bootstrap.
+[Complete plan preflight](docs/src/incremental/plan_preflight.md) defines shared
+schema-bound rule/Optd compilation, complete deterministic reports, exact admission
+reasons and strict refusal before CREATE source materialization/publication. Local
+source/design review is complete; implementation and verification remain pending.
