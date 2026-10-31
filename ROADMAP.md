@@ -1756,3 +1756,26 @@ specialized windows/Top-K, delta checkpoints/operator restore/history compaction
 native source ingestion, algorithm choice/templates, complete work-scope/long-run/
 controlled-performance checks, engineering contracts and SQL product extensions.
 This time-bounded iteration does not certify the complete project or all TPC SQL.
+
+### Owner-authorized snapshot publication (2026-10-31)
+
+After the one-hour stop, the owner explicitly requested recording the current
+runtime status and all unfinished work, committing every current working-tree
+change with a Gmail identity, and pushing the result to the main branch. This
+supersedes earlier local-only delivery restrictions for this publication task;
+it does not resume feature development or close any outstanding roadmap gate.
+
+[Current status and complete change inventory](docs/src/incremental/project_status_20261031.md)
+records the paused goal, final default/Iceberg gates, scoped-work measurements,
+directed Q10/Q45 SQL evidence, all 18 unfinished rows, and every one of the five
+tracked changes and nine previously untracked documents. Preserve their historical
+evidence and DML comment-only difference; include them all in the snapshot commit.
+Generated build/database/log artifacts remain local, with locations and key hashes
+recorded. New author/committer: `shuming.li <ming.moriarty@gmail.com>`.
+
+Fetched GitHub main at `7b945efef0ed550f6062eec353899f81c476a5f3`; the task HEAD
+`1445036` is 63 commits ahead and has no divergent mainline commits. Publication
+target is `origin` / `refs/heads/main` via an ordinary fast-forward push. Confirm
+the actual result by comparing remote main with the final local commit after
+push; this preparation record is not remote publication evidence. Ledger remains
+**13 verified, 1 in_progress, 17 pending**.

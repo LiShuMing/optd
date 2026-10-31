@@ -1,8 +1,15 @@
 # Rule-based Incremental Plan Rewriting
 
+> **Current status (2026-10-31):** This document records its original design and verification checkpoint. See the [current project status](project_status_20261031.md) for implemented capabilities, open gates, and the owner-authorized publication scope. Historical result counts and local-only notes below retain their original meaning.
+
 **Status:** accepted · 2026-10-29 (three independent agent reviews; clarifications incorporated)
 **Scope:** extensible typed SQL maintenance planning, executable signed-change expressions,
 explicit recomputation, plan explanation and recovery with caller-selected rules.
+
+The [Optd plan/execution design](optd_plan_execution.md) supersedes this document's
+interpreter and dependency decisions as of 2026-10-30. `Maintenance` and
+`DeltaExpr` remain compatibility-rule input; expanded Optd logical/physical
+plans now determine execution. The registry and transaction contracts remain.
 
 ## 1. Problem
 

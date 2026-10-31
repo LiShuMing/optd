@@ -15,17 +15,13 @@ use datafusion::sql::sqlparser::ast::{
 };
 use std::collections::BTreeMap;
 
-/// Selects whether source reads may include committed materialized views.
+/// Explicit transactions cannot read materialized views that reflect committed state.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransactionMode {
-    /// Reads use committed tables and views from the same snapshot.
     Autocommit,
-    /// Tables include pending writes, so committed view reads would be stale.
     Explicit,
 }
 
-/// Complete target-schema row images, evaluated together from one input snapshot.
-/// INSERT has no old rows; DELETE has no new rows; UPDATE retains both images.
 struct RowImages {
     table: String,
     old: RecordBatch,
@@ -54,8 +50,6 @@ fn target(table: &TableWithJoins) -> Result<String> {
     Ok(n)
 }
 
-/// A candidate table replacement and its consolidated `new - old` signed changes.
-/// Work separates logical dependencies from measured delivery and target replacement.
 pub(super) struct DmlResult {
     pub table: String,
     pub rows: TableRows,
@@ -63,10 +57,6 @@ pub(super) struct DmlResult {
     pub work: DmlWork,
 }
 
-/// Compiles one DML statement against an immutable transaction snapshot.
-///
-/// Compilation may scan and materialize source relations; this is separate from
-/// incremental view maintenance. No table, view or durable state is mutated.
 pub(super) struct DmlCompiler<'a> {
     snapshot: &'a DatabaseSnapshot,
     selector: selector_work::MeasuredSelector,
@@ -74,7 +64,6 @@ pub(super) struct DmlCompiler<'a> {
 }
 
 impl<'a> DmlCompiler<'a> {
-    /// Bind the snapshot's tables and views; enforce view-read policy during compile.
     pub(super) fn new(snapshot: &'a DatabaseSnapshot, mode: TransactionMode) -> Result<Self> {
         Ok(Self {
             snapshot,
@@ -83,11 +72,6 @@ impl<'a> DmlCompiler<'a> {
         })
     }
 
-    /// Evaluate one supported INSERT, DELETE or UPDATE into a replacement and delta.
-    ///
-    /// Images must match the target schema. UPDATE assignments all read the old
-    /// row, including when one assignment refers to another assigned column.
-    /// Errors discard local work and leave the borrowed snapshot unchanged.
     pub(super) async fn compile(self, statement: &Statement) -> Result<DmlResult> {
         let RowImages {
             table,
@@ -144,7 +128,6 @@ impl<'a> DmlCompiler<'a> {
         })
     }
 
-    /// Evaluate VALUES/SELECT once; strict typing supplies complete inserted rows.
     async fn compile_insert(&self, statement: &Statement) -> Result<RowImages> {
         let Statement::Insert(insert) = statement else {
             return Err(invalid("expected INSERT statement"));
@@ -206,8 +189,6 @@ impl<'a> DmlCompiler<'a> {
             source_work: selected.work,
         })
     }
-
-    /// Select complete old rows, preserving duplicate multiplicities for retraction.
     async fn compile_delete(&self, statement: &Statement) -> Result<RowImages> {
         let Statement::Delete(delete) = statement else {
             return Err(invalid("expected DELETE statement"));
@@ -251,8 +232,6 @@ impl<'a> DmlCompiler<'a> {
             source_work: selected.work,
         })
     }
-
-    /// Project old and new images together so every assignment sees the old row.
     async fn compile_update(&self, statement: &Statement) -> Result<RowImages> {
         let Statement::Update(update) = statement else {
             return Err(invalid("expected UPDATE statement"));

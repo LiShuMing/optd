@@ -1,5 +1,7 @@
 # Inspect and Extend Incremental Plans
 
+> **Current status (2026-10-31):** This document records its original design and verification checkpoint. See the [current project status](project_status_20261031.md) for implemented capabilities, open gates, and the owner-authorized publication scope. Historical result counts and local-only notes below retain their original meaning.
+
 The typed SQL backend compiles its optimized logical graph into an executable
 maintenance plan. Each graph node selects one rule from an
 `IncrementalOptimizer`; the selected replacement controls refresh execution.
@@ -47,6 +49,35 @@ report the selected rule and the actual maintenance work.
 `DurableSqlView` and `IcebergSqlView` expose their typed SQL view through
 `view()`, so inspect them with
 `view.view().incremental_plan().explain()`.
+
+## Inspect and transform the Optd plans
+
+`view.incremental_plan().programs()` exposes the actual `CompiledProgram` for
+each original relation. `logical` and `physical` are
+`optd_core::nodes::ArcPlanNode<IncrementalNode>`; `steps` are the verified
+physical instructions, with repeated subtrees sharing one execution. `state`
+declares the typed index independently of runtime SQL classification.
+
+Register an ordinary Optd
+`Rule<IncrementalNode, HeuristicsOptimizer<IncrementalNode>>` using
+`IncrementalOptimizer::with_plan_rule(Arc::new(rule))`. These logical rules run
+after scoped-snapshot expansion and before physical implementation. Their
+results must be materialized, typed, bounded logical trees with valid versioned
+bindings and state wiring. They never run during refresh. The existing
+`IncrementalRule` API below is retained as a compatibility frontend and compiled
+into the same plans; its `DeltaExpr` is no longer interpreted by the executor.
+
+An outer join's actual plan contains `ProjectKeys`, one shared `PrepareIndex`,
+Before/After `IndexLookup` operations, `EvaluateSnapshot`, signed `Sum/Negate`
+and `CompleteIndex`. Window Before uses `CachedOutput`. Group maintenance has
+separate preparation, lookup, aggregate application and completion operations.
+Self-contained `RelationOperator` templates retain qualified SQL expressions and
+schema-only input ports, without the original table providers.
+
+See [the accepted architecture](optd_plan_execution.md) and
+`tests/optd_plans.rs` for an executable Optd rule that replaces the two-term
+inner-join formula with three terms and checks its signed result against
+independent full SQL.
 
 ## Default rules
 
