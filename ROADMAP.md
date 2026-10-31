@@ -35,7 +35,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R01d | P0 | Unified SQL/benchmark work reports | Separate semantics, strict planning, affected scope, source/state/materialization/storage work and controlled performance; unknown measurements remain unknown | verified |
 | R02a | P1 | Consolidate table changes before rebuilding source state | One net update per changed source; cancellation skips source rebuild; preserve absent-row and atomic-batch validation | verified |
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | verified |
-| R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | in_progress |
+| R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | pending |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | pending |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | pending |
@@ -374,3 +374,56 @@ witnesses passed. No full TPC matrix or controlled performance rerun occurred;
 `performance_qualified=false`. Directory copies, batch-header clones, retained flat
 caches, full history/bootstrap and full checkpoint writes remain. Implementation is
 local-only; next work is R02c, followed by the remaining ledger.
+
+
+### R02c — shared ordered state directories
+
+Design: [shared state directories](docs/src/incremental/shared_state_directories.md).
+Implemented an internal persistent AVL directory for table leaves, aggregate groups,
+accumulators and join/window input/output indexes. Root clones share branches;
+updates copy only shared nodes on changed paths and balancing siblings. Exclusive
+nodes move their entries. Count copies immediately around explicit clones following
+`Arc::try_unwrap`, not a racy ownership-size estimate. Record completed physical
+updates, including window output mutation; empty/canceled candidates copy zero.
+
+**Verified regression:** the new `state_directory_work` test failed on the old code:
+512 accumulator entries copied for one changed key among 256 (bound 36), exit 101,
+`target/roadmap-r02c-red-20261031.log`. An initial test borrow typo failed compilation,
+retained separately as `target/roadmap-r02c-test-compile-20261031.log`. After the
+implementation, focused tests passed (exit 0): 55 unit cases including four directory
+cases in `target/roadmap-r02c-green-fixed-20261031.log` plus the later full gate;
+13 refresh, one multi-family scaling and three SQL table-block cases in
+`target/roadmap-r02c-focused-final-20261031.log`. The earlier unit log contains 54
+cases before the additional clone-boundary test; final complete gates include 55.
+
+Scaling holds one affected key/bucket fixed: 256/2048 unrelated-key inputs copy
+8/11 directory entries respectively for grouped MIN, SUM accumulator and outer
+join; window input/output each copies 8/11. Independent SQL endpoints match.
+A separate BTreeMap oracle checks 4000 mixed operations, exact balance/height/length,
+predecessors, retained roots and complete deletion. Shared payload/copy bounds are
+checked up to 65536 keys. A counted-value oracle independently verifies every actual
+entry clone across 2048 monotone insertions/interior deletions and rotations.
+
+The old full-directory cost assertions were intentionally replaced by path bounds;
+concurrent updates to different keys may now have different path lengths. Their
+source/cache equality and per-candidate work stability remain asserted, including
+failed/stale candidates. Initial adaptation failures are retained in
+`target/roadmap-r02c-existing-costs-20261031.log` and
+`target/roadmap-r02c-focused-20261031.log`; no semantic expectations were regenerated.
+
+Commands use R01a's wrapper/toolchain/target/TMPDIR. Focused:
+`cargo +1.95.0 test --offline --locked -p optd-incremental-sql --lib --test state_directory_work --test refresh_work --test table_blocks -- --nocapture`.
+`bash scripts/agent-check.sh sql` exited 0: format, both Clippy modes, 199 default
+tests (2 ignored), 213 Iceberg tests (3 ignored), including process-death recovery.
+Log `target/roadmap-r02c-gates-20261031.log`. Private rustdoc, mdBook and 38 Python
+tool tests exited 0; logs `target/roadmap-r02c-rustdoc-20261031.log`,
+`target/roadmap-r02c-docs-final-20261031.log`, `target/roadmap-r02c-tools-20261031.log`.
+Selected strict SQL TPC-H Q1/TPC-DS Q1 passed three DML rounds, independent SQL,
+reopen and delta history using the R02b commands with fresh R02c artifact roots.
+Reports, binary/report hashes and work audit: `target/roadmap-r02c-live-20261031/`.
+
+This removes full directory cloning, not source/cache Bag rebuilding, selector
+scans, per-bucket work, Arrow flattening, bootstrap/history or checkpoint costs.
+Directory allocations and tree comparisons are not allocator-byte or CPU counters.
+No full TPC matrix or controlled performance qualification was run. Local-only
+implementation; next work is R02d and all remaining ledger entries.

@@ -23,12 +23,12 @@ pub struct SelectorWork {
     pub output_rows: usize,
 }
 
-/// Changed-leaf work, distinct from full-table directory copying and checkpoint IO.
+/// Changed-leaf and actual directory path-copy work, distinct from checkpoint IO.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableBlockWork {
     /// Installed nonempty leaves before this statement (size, not access work).
     pub total_blocks_before: usize,
-    /// Shared directory entries copied into a private candidate.
+    /// Shared old tree-node entries actually cloned on modified paths.
     pub directory_entries_copied: usize,
     /// Leaf ranges visited, including insertion into an empty table.
     pub touched_blocks: usize,

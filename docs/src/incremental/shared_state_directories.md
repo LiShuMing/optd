@@ -31,9 +31,10 @@ external dependencies or an unbounded overlay chain.
 ## 4. Decision
 
 Introduce `StateDirectory<V>` with `Vec<u8>` keys and cloned values (all production
-values are Arc payloads). Nodes hold key, value, two Arc branches and checked
-structural height/length invariants. A snapshot clone only shares its root. Insert,
-replace and remove copy shared nodes on the modified search path using Arc ownership;
+values are Arc payloads). Nodes hold key, value, two Arc branches and cached
+structural height/length invariants bounded by addressable owned nodes. A snapshot clone only shares its root. Insert,
+replace and remove copy shared nodes on the modified search path using `Arc::try_unwrap`;
+an explicit clone counts even if another owner concurrently drops its root;
 rotations may additionally copy shared sibling roots. Ordered iteration and
 predecessor lookup read shared nodes. Empty/missing-key removal must avoid copies.
 

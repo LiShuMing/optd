@@ -566,18 +566,7 @@ impl SqlView {
             stats.work.sources.record_rebuild(old.len())?;
             tables.insert(name.clone(), next);
         }
-        for state in self.groups.iter().flatten() {
-            stats
-                .work
-                .state_copies
-                .record_groups(state.total_groups())?;
-        }
-        for state in self.keyed.iter().flatten() {
-            state.record_copy(&mut stats.work.state_copies)?;
-        }
-        for state in self.accumulators.iter().flatten() {
-            state.record_copy(&mut stats.work.state_copies)?;
-        }
+        // State candidates share immutable directory roots; mutations account path copies.
         let mut states = self.states.clone();
         let mut groups = self.groups.clone();
         let mut keyed = self.keyed.clone();

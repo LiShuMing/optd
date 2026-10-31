@@ -160,7 +160,10 @@ async fn aggregate_directory_copies_are_separate_from_one_touched_group() {
                 .unwrap();
             let stats = candidate.stats();
             if accumulator {
-                assert_eq!(stats.work.state_copies.accumulator_entries, 2 * n);
+                assert!(stats.work.state_copies.accumulator_entries > 0);
+                assert!(
+                    stats.work.state_copies.accumulator_entries <= 2 * (n.ilog2() as usize + 1)
+                );
                 assert_eq!(stats.work.state_copies.group_entries, 0);
                 let work = stats
                     .nodes
@@ -170,7 +173,8 @@ async fn aggregate_directory_copies_are_separate_from_one_touched_group() {
                 assert_eq!(work.touched_groups, 1);
                 assert_eq!(work.historical_input_rows, 0);
             } else {
-                assert_eq!(stats.work.state_copies.group_entries, 2 * n);
+                assert!(stats.work.state_copies.group_entries > 0);
+                assert!(stats.work.state_copies.group_entries <= 2 * (n.ilog2() as usize + 1));
                 assert_eq!(stats.work.state_copies.accumulator_entries, 0);
                 let work = stats
                     .nodes
@@ -203,10 +207,8 @@ async fn keyed_input_and_cached_window_output_directory_copies_are_visible() {
         .prepare(&[change(&[(0, 3)], &[1])])
         .await
         .unwrap();
-    assert_eq!(
-        candidate.stats().work.state_copies.keyed_input_entries,
-        4 * n
-    );
+    let copied = candidate.stats().work.state_copies.keyed_input_entries;
+    assert!(copied > 0 && copied <= 2 * (n.ilog2() as usize + 1));
     assert_eq!(candidate.stats().work.state_copies.window_output_entries, 0);
     let mut expected = rows(n);
     expected.push((0, 3));
@@ -219,14 +221,10 @@ async fn keyed_input_and_cached_window_output_directory_copies_are_visible() {
         .prepare(&[change(&[(0, 3)], &[1])])
         .await
         .unwrap();
-    assert_eq!(
-        candidate.stats().work.state_copies.keyed_input_entries,
-        2 * n
-    );
-    assert_eq!(
-        candidate.stats().work.state_copies.window_output_entries,
-        2 * n
-    );
+    let copied = candidate.stats().work.state_copies.keyed_input_entries;
+    assert!(copied > 0 && copied <= 2 * (n.ilog2() as usize + 1));
+    let copied = candidate.stats().work.state_copies.window_output_entries;
+    assert!(copied > 0 && copied <= 2 * (n.ilog2() as usize + 1));
     check_oracle(
         sql,
         &candidate,
@@ -243,8 +241,8 @@ async fn empty_and_consolidated_zero_changes_skip_relation_rebuilds() {
         let work = &candidate.stats().work;
         assert_eq!(work.sources, Default::default());
         assert_eq!(work.caches, Default::default());
-        // The current implementation still eagerly copies the installed directory.
-        assert_eq!(work.state_copies.accumulator_entries, 12);
+        // Empty candidates share immutable roots and copy no directory entries.
+        assert_eq!(work.state_copies, Default::default());
         assert!(candidate.stats().nodes.is_empty());
         maintained.acknowledge(candidate).unwrap();
     }
@@ -259,7 +257,11 @@ async fn concurrent_and_failed_candidates_do_not_share_accounting_or_mutate_stat
     let (a, b) = tokio::join!(maintained.prepare(&a), maintained.prepare(&b));
     let a = a.unwrap();
     let b = b.unwrap();
-    assert_eq!(a.stats().work, b.stats().work);
+    assert_eq!(a.stats().work.sources, b.stats().work.sources);
+    assert_eq!(a.stats().work.caches, b.stats().work.caches);
+    // Different changed keys can have different AVL path lengths. Each counter
+    // belongs to its own candidate and must survive another candidate's failure.
+    let other_work = b.stats().work.clone();
     let work = a.stats().work.clone();
     assert!(maintained
         .prepare(&[change(&[(99, 99)], &[-1])])
@@ -268,6 +270,7 @@ async fn concurrent_and_failed_candidates_do_not_share_accounting_or_mutate_stat
     assert_eq!(maintained.epoch(), 0);
     assert_eq!(maintained.contents().unwrap().num_rows(), 12);
     assert_eq!(a.stats().work, work);
+    assert_eq!(b.stats().work, other_work);
     maintained.acknowledge(a).unwrap();
     assert!(maintained.acknowledge(b).is_err());
     assert_eq!(maintained.epoch(), 1);
@@ -283,7 +286,7 @@ async fn sql_commit_and_identified_retry_retain_additive_refresh_work_json() {
     let report = result.commit.unwrap();
     let json = &report.maintenance["m"]["work"];
     assert_eq!(json["sources"]["map_rebuilds"], 1);
-    assert_eq!(json["state_copies"]["accumulator_entries"], 4);
+    assert_eq!(json["state_copies"]["accumulator_entries"], 1);
     let _public_type: RefreshWork = Default::default();
     drop(session);
     let mut reopened = SqlSession::open(root.path()).await.unwrap();

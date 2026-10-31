@@ -16,6 +16,7 @@ use crate::bag::Bag;
 use crate::group_state::{encode_keys, supported_key, KeyPolicy};
 use crate::metrics::AccumulatorWork;
 use crate::planner::plan::RelationOperator;
+use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
 type Key = Vec<u8>;
@@ -107,20 +108,20 @@ struct Entry {
 
 /// Exact retractable aggregates, retaining states rather than historical input rows.
 ///
-/// Candidates share untouched entries through `Arc`; cloning still copies the
-/// complete map directory. Only changed groups rebuild accumulator values.
+/// Candidates share directory branches and untouched entries through `Arc`.
+/// Only changed paths and groups rebuild directory nodes and accumulator values.
 #[derive(Clone, Debug)]
 pub(crate) struct AccumulatorState {
     schema: SchemaRef,
     keys: Vec<Arc<dyn PhysicalExpr>>,
     functions: Vec<AggregateFunctionExpr>,
-    entries: BTreeMap<Key, Arc<Entry>>,
+    entries: StateDirectory<Arc<Entry>>,
 }
 
 impl AccumulatorState {
-    /// Account for one group-directory clone, excluding shared accumulator cells.
+    /// Account actual path copies after updating, excluding shared accumulator cells.
     pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
-        work.record_accumulators(self.entries.len())
+        work.record_accumulators(self.entries.copied_entries()?)
     }
 
     /// Bootstrap a planner-qualified aggregate from its complete positive input.
@@ -164,7 +165,7 @@ impl AccumulatorState {
             schema: operator.schema(),
             keys,
             functions,
-            entries: BTreeMap::new(),
+            entries: StateDirectory::new(),
         };
         if state.keys.is_empty() {
             let entry = state.empty_entry(Vec::new())?;

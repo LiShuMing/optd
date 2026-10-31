@@ -28,7 +28,10 @@ async fn fixed_write_copies_only_one_bounded_leaf_as_untouched_blocks_grow() {
         assert_eq!(target["collected_rows"], 0);
         assert_eq!(target["distinct_entries"], 0);
         assert_eq!(target["block_update"]["touched_blocks"], 1);
-        assert_eq!(target["block_update"]["directory_entries_copied"], n / 256);
+        let copies = target["block_update"]["directory_entries_copied"]
+            .as_u64()
+            .unwrap() as usize;
+        assert!(copies > 0 && copies <= 4 * ((n / 256).ilog2() as usize + 1));
         assert_eq!(target["delta_update"]["old_row_entries_copied"], 256);
         assert_eq!(target["delta_update"]["materialized_rows"], 257);
         // Full checkpoint flattening remains separate from statement-local leaf work.

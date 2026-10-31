@@ -13,6 +13,7 @@ use super::dml_work::{DmlTargetWork, TableBlockWork};
 use super::store_work::{TableBootstrapWork, TableMaterializationWork};
 use crate::bag::{self, Bag};
 use crate::error::invalid;
+use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
 /// Bound historical distinct-entry copying; expanded duplicate rows may be larger.
@@ -35,7 +36,7 @@ struct TableBlock {
 /// Contents of one immutable table revision, shared across catalog clones.
 struct TableSnapshot {
     schema: SchemaRef,
-    blocks: BTreeMap<Vec<u8>, Arc<TableBlock>>,
+    blocks: StateDirectory<Arc<TableBlock>>,
     row_count: usize,
     scalar_bytes: usize,
     order: RowOrder,
@@ -92,7 +93,7 @@ impl TableRows {
         };
         let mut snapshot = TableSnapshot {
             schema: batch.schema(),
-            blocks: BTreeMap::new(),
+            blocks: StateDirectory::new(),
             row_count: volume.rows,
             scalar_bytes: volume.scalar_bytes,
             order,
@@ -218,7 +219,7 @@ impl TableRows {
                 },
             });
         }
-        // Directory entries are shared payload pointers. R02c replaces this clone.
+        // Share the immutable root; only modified directory paths are copied.
         let mut next = TableSnapshot {
             schema: self.schema(),
             blocks: self.0.blocks.clone(),
@@ -227,7 +228,6 @@ impl TableRows {
             order: self.0.order.clone(),
             flat: Mutex::new(None),
         };
-        blocks_work.directory_entries_copied = self.0.blocks.len();
         let mut work = DmlTargetWork::default();
         let mut prepared = Vec::new();
         match &self.0.order {
@@ -250,8 +250,7 @@ impl TableRows {
                     let block_key = self
                         .0
                         .blocks
-                        .range(..=row.key)
-                        .next_back()
+                        .predecessor(&row.key)
                         .or_else(|| self.0.blocks.first_key_value())
                         .map(|(k, _)| k.clone())
                         .unwrap_or_default();
@@ -301,6 +300,7 @@ impl TableRows {
             .len()
             .checked_sub(blocks_work.touched_existing_blocks)
             .ok_or(Error::Overflow)?;
+        blocks_work.directory_entries_copied = next.blocks.copied_entries()?;
         work.block_update = Some(blocks_work);
         Ok(TableUpdate {
             rows: Self(Arc::new(next)),
@@ -417,8 +417,8 @@ mod tests {
         ));
         let unchanged_key = before.0.blocks.keys().nth(4).unwrap();
         assert!(Arc::ptr_eq(
-            &before.0.blocks[unchanged_key],
-            &after.rows.0.blocks[unchanged_key]
+            before.0.blocks.get(unchanged_key).unwrap(),
+            after.rows.0.blocks.get(unchanged_key).unwrap()
         ));
         assert!(crate::store::batches_equal(
             &before.materialize()?.batch,
@@ -519,7 +519,8 @@ mod tests {
         // Exercise the fallback independently of Arrow's current supported-type list.
         let snapshot = Arc::get_mut(&mut before.0).unwrap();
         snapshot.order = RowOrder::SingleLeaf;
-        let block = snapshot.blocks.pop_first().unwrap().1;
+        let key = snapshot.blocks.first_key_value().unwrap().0.clone();
+        let block = snapshot.blocks.remove(&key).unwrap();
         snapshot.blocks.insert(Vec::new(), block);
         let delta = Bag::from_weighted(&ints(vec![Some(1), Some(2)]), &[-1, 1])?;
         let after = before.apply(&delta)?.rows;

@@ -256,7 +256,7 @@ pub(crate) async fn run(
                     .ok_or_else(|| Error::Invalid("missing aggregate accumulator state".into()))?;
                 let (positive, negative) = inputs[0].relation()?.bag.signed_parts()?;
                 let (next, delta, work) = index.update(&positive, &negative)?;
-                index.record_copy(&mut refresh_work.state_copies)?;
+                next.record_copy(&mut refresh_work.state_copies)?;
                 next_accumulator = Some(next);
                 accumulator_work = Some(work);
                 Value::Relation(RelationValue::from_signed(delta)?)
@@ -317,7 +317,6 @@ pub(crate) async fn run(
                 let index = bindings.keyed[spec.id]
                     .as_ref()
                     .ok_or_else(|| Error::Invalid("missing physical index".into()))?;
-                index.record_copy(&mut refresh_work.state_copies)?;
                 let update = index.prepare(
                     &changes
                         .iter()
@@ -441,6 +440,7 @@ pub(crate) async fn run(
                         &projected.negative_keys,
                     )?;
                 }
+                update.state.record_copy(&mut refresh_work.state_copies)?;
                 next_keyed = Some(update.state);
                 Value::Relation(output.clone())
             }
@@ -449,9 +449,6 @@ pub(crate) async fn run(
                 let index = bindings.groups[*state]
                     .as_ref()
                     .ok_or_else(|| Error::Invalid("missing group index".into()))?;
-                refresh_work
-                    .state_copies
-                    .record_groups(index.total_groups())?;
                 let update =
                     index.prepare(&p.positive, &p.positive_keys, &p.negative, &p.negative_keys)?;
                 group_work = Some(GroupWork {
@@ -484,6 +481,7 @@ pub(crate) async fn run(
                     .ok_or_else(|| Error::Invalid("missing completed groups".into()))?;
                 let output = inputs[1].relation()?.batch()?;
                 let (index, delta) = update.finish(&output)?;
+                index.record_copy(&mut refresh_work.state_copies)?;
                 if let Some(work) = &mut group_work {
                     work.total_groups_after = index.total_groups();
                     work.aggregate_output_rows = output.num_rows();

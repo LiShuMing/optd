@@ -10,6 +10,7 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES, MAX_MATERIALIZED_ROWS};
 use crate::group_state::{encode_keys, partition};
 use crate::planner::SnapshotVersion;
+use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
 type Key = Vec<u8>;
@@ -24,16 +25,16 @@ struct Bucket {
 
 /// Complete per-key input buckets for joins or partitioned windows.
 ///
-/// Prepared candidates share untouched bucket payloads through `Arc`; cloning
-/// still copies the map directories. Window output buckets preserve the actual
+/// Prepared candidates share directory branches and untouched bucket payloads.
+/// Only modified paths are copied. Window output buckets preserve the actual
 /// committed result, since reevaluating peers could choose a different row order.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyedState {
     schemas: Vec<SchemaRef>,
     key_types: Vec<DataType>,
-    inputs: Vec<BTreeMap<Key, Arc<Bucket>>>,
+    inputs: Vec<StateDirectory<Arc<Bucket>>>,
     // Window Before is committed output, not a potentially tie-reassigning run.
-    outputs: Option<(SchemaRef, BTreeMap<Key, Arc<Bag>>)>,
+    outputs: Option<(SchemaRef, StateDirectory<Arc<Bag>>)>,
 }
 
 /// Isolated index candidate and the union of changed keys across all input ports.
@@ -66,7 +67,7 @@ fn check_keys(rows: &RecordBatch, keys: &RecordBatch, types: &[DataType]) -> Res
     Ok(())
 }
 
-fn buckets(rows: &RecordBatch, keys: &RecordBatch) -> Result<BTreeMap<Key, Arc<Bucket>>> {
+fn buckets(rows: &RecordBatch, keys: &RecordBatch) -> Result<StateDirectory<Arc<Bucket>>> {
     let mut indices: BTreeMap<Key, Vec<u32>> = BTreeMap::new();
     for (i, key) in encode_keys(keys)?.into_iter().enumerate() {
         indices
@@ -115,13 +116,13 @@ fn merge(schema: &SchemaRef, batches: Vec<RecordBatch>) -> Result<RecordBatch> {
 }
 
 impl KeyedState {
-    /// Account for one directory clone; shared bucket payloads are not copied.
+    /// Account actual input/output path copies after all candidate updates finish.
     pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
         for input in &self.inputs {
-            work.record_keyed_input(input.len())?;
+            work.record_keyed_input(input.copied_entries()?)?;
         }
         if let Some((_, outputs)) = &self.outputs {
-            work.record_window_output(outputs.len())?;
+            work.record_window_output(outputs.copied_entries()?)?;
         }
         Ok(())
     }
@@ -152,7 +153,7 @@ impl KeyedState {
             let outputs = partition(rows, keys)?
                 .into_iter()
                 .map(|(k, v)| (k, Arc::new(v)))
-                .collect::<BTreeMap<_, _>>();
+                .collect::<StateDirectory<_>>();
             if indexes.len() != 1 || indexes[0].keys().ne(outputs.keys()) {
                 return Err(invalid(
                     "window output partitions differ from input partitions",
@@ -172,7 +173,7 @@ impl KeyedState {
 
     /// Count indexed keys per input port, rather than rows or bytes read.
     pub(crate) fn totals(&self) -> Vec<usize> {
-        self.inputs.iter().map(BTreeMap::len).collect()
+        self.inputs.iter().map(StateDirectory::len).collect()
     }
 
     /// Consolidate signed changes and replace only buckets whose contents change.
@@ -311,7 +312,7 @@ impl KeyedUpdate<'_> {
     ///
     /// Only affected partitions may change. Validation can fail after earlier
     /// candidate buckets changed; discard this candidate on error. Installed state
-    /// remains untouched because this update owns its separate map directories.
+    /// remains untouched because this update shares immutable branches and owns changed paths.
     pub(crate) fn apply_window_delta(
         &mut self,
         pos: &RecordBatch,

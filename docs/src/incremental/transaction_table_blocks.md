@@ -75,7 +75,9 @@ never hold it across await. Return a named materialization result carrying the
 actual cache-miss work, so shared hits do not report another materialization.
 Count actual store-side table materialization separately from statement updates.
 R07a will remove complete changed-relation checkpoint writes; R02b must not claim it.
-Directory cloning remains proportional to leaf count and is measured for R02c.
+The initial R02b directory clone is proportional to leaf count and measured.
+[Shared state directories](shared_state_directories.md) replaces it with actual
+path copying in R02c; full checkpoint and bootstrap work remains.
 
 Extend DML target diagnostics with touched/split/reused leaf and directory-copy
 counts, and count historical entries actually copied/materialized at leaf boundaries.

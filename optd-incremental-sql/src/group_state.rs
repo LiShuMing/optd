@@ -10,6 +10,7 @@ use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::arrow::row::{RowConverter, SortField};
 
 use crate::bag::Bag;
+use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
 type GroupKey = Vec<u8>;
@@ -32,7 +33,7 @@ pub(crate) struct GroupState {
     input_schema: SchemaRef,
     key_schema: SchemaRef,
     output_schema: SchemaRef,
-    groups: BTreeMap<GroupKey, Arc<GroupBucket>>,
+    groups: StateDirectory<Arc<GroupBucket>>,
 }
 
 /// A candidate with materialized input only for groups whose multiset changed.
@@ -63,7 +64,7 @@ impl GroupState {
         check_pair(input, projected_keys)?;
         let inputs = partition(input, projected_keys)?;
         let mut outputs = output_groups(aggregate_output, &projected_keys.schema())?;
-        let mut groups = BTreeMap::new();
+        let mut groups = StateDirectory::new();
         for (key, input) in inputs {
             let output = outputs.remove(&key).ok_or_else(|| {
                 Error::Invalid("aggregate output omitted an existing group".into())
@@ -130,6 +131,11 @@ impl GroupState {
             touched,
             aggregate_input_rows,
         })
+    }
+
+    /// Account actual directory path copies after finishing the candidate.
+    pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
+        work.record_groups(self.groups.copied_entries()?)
     }
 
     /// Count installed SQL groups, including NULL-key and all-NULL-value groups.
@@ -451,7 +457,7 @@ mod tests {
             before
                 .groups
                 .iter()
-                .filter(|(key, bucket)| Arc::ptr_eq(bucket, &after.groups[*key]))
+                .filter(|(key, bucket)| Arc::ptr_eq(bucket, after.groups.get(key).unwrap()))
                 .count(),
             99
         );
@@ -479,7 +485,7 @@ mod tests {
         assert!(before
             .groups
             .iter()
-            .all(|(key, bucket)| Arc::ptr_eq(bucket, &same.groups[key])));
+            .all(|(key, bucket)| Arc::ptr_eq(bucket, same.groups.get(key).unwrap())));
         let changed = prepare(
             &before,
             &[(Some(3), Some(8)), (None, None)],
@@ -767,7 +773,7 @@ mod tests {
         let mut state = state(&[(Some(1), Some(1))])?;
         let key = state.groups.keys().next().unwrap().clone();
         let row = input(&[(Some(1), Some(1))]);
-        let output = state.groups[&key].output.clone();
+        let output = state.groups.get(&key).unwrap().output.clone();
         state.groups.insert(
             key,
             Arc::new(GroupBucket {
@@ -793,7 +799,7 @@ mod tests {
         let changed = RecordBatch::try_new(schema, columns)?;
         let mut wide_state = GroupState::try_new(&wide, &keys(&wide), &wide, BINARY)?.unwrap();
         let key = wide_state.groups.keys().next().unwrap().clone();
-        let output = wide_state.groups[&key].output.clone();
+        let output = wide_state.groups.get(&key).unwrap().output.clone();
         wide_state.groups.insert(
             key,
             Arc::new(GroupBucket {

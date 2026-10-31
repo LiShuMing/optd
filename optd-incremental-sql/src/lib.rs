@@ -19,6 +19,7 @@ mod keyed_state;
 mod metrics;
 pub mod planner;
 pub mod source_vector;
+mod state_directory;
 pub mod store;
 mod work;
 

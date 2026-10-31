@@ -47,8 +47,9 @@ impl RelationWork {
 
 /// Actual directory entries cloned while preparing one candidate refresh.
 ///
-/// Counts include eager candidate copies and subsequent copies made by state
-/// preparation. Each clone counts separately. Shared `Arc` bucket contents,
+/// Counts include each actual shared tree-node clone on modified paths, including
+/// rotation siblings and delete successors. Root clones and new entries are zero.
+/// Shared `Arc` bucket contents,
 /// container capacity, pointer bytes and copied vector headers are excluded.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct StateCopyWork {
@@ -63,22 +64,22 @@ pub struct StateCopyWork {
 }
 
 impl StateCopyWork {
-    /// Count one group-directory clone at its operation boundary.
+    /// Record actual group-directory path copies after candidate updates.
     pub(crate) fn record_groups(&mut self, entries: usize) -> Result<()> {
         add(&mut self.group_entries, entries)
     }
 
-    /// Count one keyed input-directory clone without traversing bucket payloads.
+    /// Record actual keyed input path copies without traversing payloads.
     pub(crate) fn record_keyed_input(&mut self, entries: usize) -> Result<()> {
         add(&mut self.keyed_input_entries, entries)
     }
 
-    /// Count one window output-directory clone.
+    /// Record actual window output path copies after the output delta.
     pub(crate) fn record_window_output(&mut self, entries: usize) -> Result<()> {
         add(&mut self.window_output_entries, entries)
     }
 
-    /// Count one accumulator-directory clone without serializing its states.
+    /// Record actual accumulator path copies without serializing its states.
     pub(crate) fn record_accumulators(&mut self, entries: usize) -> Result<()> {
         add(&mut self.accumulator_entries, entries)
     }
