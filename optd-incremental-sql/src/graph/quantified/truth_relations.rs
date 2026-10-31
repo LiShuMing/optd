@@ -276,6 +276,7 @@ fn expand(
     let joined = LogicalPlanBuilder::from(input)
         .join_with_expr_keys(members, JoinType::Left, (left_keys, right_keys), None)?
         .build()?;
+    let joined = correlation::apply_join_policy(joined, &keys)?;
     let matched = Expr::Column(Column::from_name(matched_name)).is_not_null();
     // Nonnullable comparisons can never produce UNKNOWN, including on empty S.
     let mut relation = if nullable && !keys.is_empty() {

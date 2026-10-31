@@ -1655,3 +1655,39 @@ Ordinary correlated slice mdBook and `git diff --check` both exit 0; book log
 `target/roadmap-r04b-correlated-truth-docs-20261031.log`. All verification sessions
 are terminal. NULL-safe and reuse designs are already committed as `731251d` and
 `3388dd5`; neither design entry certifies implementation.
+
+### R04b — NULL-safe and mixed equality correlation policies
+
+The separately reviewed section-10 design (`731251d`) is implemented using an
+explicit per-correlation-key Ordinary/NullSafe policy. For mixed vectors, inner
+rows with NULL ordinary keys are excluded before whole-vector NullEqualsNull
+joins. Compared membership values still exclude NULL: scalar IN retains ordinary
+SQL equality and its TRUE/FALSE/UNKNOWN result. Members and partition flags share
+the same typed join policy; existing incremental operators execute the plan.
+
+The corrected regression fails against an exact `git archive 4057b86` baseline
+(0 passed/1 failed, exit 101), then passes after the change. Baseline production
+module/Cargo.lock hashes and copied regression identity are recorded in
+`target/roadmap-r04b-null-policy-baseline-identity-20261031.json`; RED log is
+`...-corrected-red-20261031.log`. Earlier unparenthesized SQL probes bound a
+different expression and are retained only as setup evidence, not semantic RED.
+
+Independent oracle checks cover all four two-key policy combinations across
+**128 signed epochs**, including duplicate/first/last NULL members and two-source
+moves. Four durable views pass six SQL write rounds with retry/reopen/history.
+For each of the three NULL-safe policies, increasing untouched partitions 8 ->
+512 preserves peer-visit counts and exactly two output-delta rows, with no keyed
+full scan or snapshot evaluation. Three matrix tests pass in
+`target/roadmap-r04b-null-policy-focused-20261031.log`; the separate scalar-NULL
+regression and complete gate results are recorded below before local commit.
+Private Iceberg rustdoc exits 0 (`...-rustdoc-20261031.log`).
+
+R04b remains in_progress and R06 pending: **13/31 verified, 1 in_progress,
+17 pending**. Computed/range/row-changing correlations, Q35 numerical qualification,
+full TPC and end-to-end performance remain unqualified. Local only, no push.
+
+NULL-policy complete gates exit 0: `bash scripts/agent-check.sh sql` with the same
+R01a wrapper/target/TMPDIR records **322 default / 336 Iceberg passed**, 2/3 ignored;
+fmt and both all-target Clippy modes pass. Log
+`target/roadmap-r04b-null-policy-gates-20261031.log`. mdBook and final diff check
+exit 0 (`...-docs-20261031.log`). All NULL-policy verification sessions are terminal.

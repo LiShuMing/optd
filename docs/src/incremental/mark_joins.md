@@ -270,3 +270,19 @@ visits at 12 and output delta rows at 2 for the fixed hot partition. Default/Ice
 complete gates pass 318/332 tests, with 2/3 existing ignored. These observations
 are recorded in ROADMAP.md; NULL-safe/mixed policies, binding sharing, reusable R06
 impact descriptors and numerical/TPC/performance completion remain separate.
+
+## 14. NULL-safe and mixed correlation policies
+
+The section-10 truth-normalization design now extends direct correlation keys to
+IS NOT DISTINCT FROM. Per-key policy is retained while ordinary-key NULL rows
+are filtered from mixed-policy inner relations before typed NullEqualsNull joins.
+The member relation still excludes NULL compared values, preserving scalar
+UNKNOWN independently of correlation equality. No executor or durable format is
+added. Computed/range/row-changing scopes remain refused before publication.
+
+Independent tests cover four policies, 128 signed epochs, four views across six
+durable SQL write/retry/reopen/history rounds, and fixed hot-partition work while
+untouched partitions grow 8 -> 512. A parenthesized direct NULL-safe regression
+fails against the archived prior source and passes with this implementation.
+Commands, source identity, complete gate results and remaining acceptance limits
+are recorded in ROADMAP.md. Binding sharing and R04b/R06 completion remain separate.

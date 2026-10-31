@@ -1,7 +1,7 @@
-//! Prove and extract ordinary equality correlations without crossing row-changing nodes.
+//! Prove and extract typed equality correlations without crossing row-changing nodes.
 
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, DFSchema, DataFusionError, ExprSchema, Result};
+use datafusion::common::{Column, DFSchema, DataFusionError, ExprSchema, NullEquality, Result};
 use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Operator};
 
 use super::{comparison_type, RewriteContext};
@@ -9,10 +9,18 @@ use super::{comparison_type, RewriteContext};
 const MAX_CORRELATION_DEPTH: usize = 64;
 const MAX_CORRELATION_KEYS: usize = 16;
 
+/// NULL policy belongs to each original correlation predicate, not the scalar IN.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Equality {
+    Ordinary,
+    NullSafe,
+}
+
 /// The outer lookup column and its corresponding inner relation column.
 pub(super) struct CorrelationKey {
     pub(super) outer: Column,
     pub(super) inner: Column,
+    pub(super) equality: Equality,
 }
 
 /// Position zero still denotes the original compared output; keys are carried
@@ -28,13 +36,47 @@ pub(super) fn extract(
     outer_schema: &DFSchema,
     context: &mut RewriteContext,
 ) -> Result<PartitionInput> {
-    let input = pull(plan, outer_schema, context, 0)?;
+    let mut input = pull(plan, outer_schema, context, 0)?;
     if input.keys.is_empty() || contains_outer(&input.plan)? {
         return Err(refusal(
             "no complete equality-key proof for the remaining outer references",
         ));
     }
+    if input
+        .keys
+        .iter()
+        .any(|key| key.equality == Equality::NullSafe)
+    {
+        // These rows cannot satisfy an ordinary correlation against any outer
+        // row. Removing them makes whole-vector NULL-safe equality sound even
+        // for mixed policies, without inventing sentinel values or new state.
+        let ordinary_valid = input
+            .keys
+            .iter()
+            .filter(|key| key.equality == Equality::Ordinary)
+            .map(|key| Expr::Column(key.inner.clone()).is_not_null())
+            .reduce(Expr::and);
+        if let Some(predicate) = ordinary_valid {
+            input.plan = LogicalPlanBuilder::from(input.plan)
+                .filter(predicate)?
+                .build()?;
+        }
+    }
     Ok(input)
+}
+
+/// Members exclude NULL compared values; flags omit the comparison key entirely.
+/// Thus enabling NULL equality for correlation never makes scalar NULL = NULL true.
+pub(super) fn apply_join_policy(plan: LogicalPlan, keys: &[CorrelationKey]) -> Result<LogicalPlan> {
+    let LogicalPlan::Join(mut join) = plan else {
+        return Err(refusal(
+            "expected a typed equality join for correlation policy",
+        ));
+    };
+    if keys.iter().any(|key| key.equality == Equality::NullSafe) {
+        join.null_equality = NullEquality::NullEqualsNull;
+    }
+    Ok(LogicalPlan::Join(join))
 }
 
 fn pull(
@@ -84,7 +126,12 @@ fn pull(
                         pending.push(*binary.left.clone());
                         continue;
                     }
-                    if binary.op == Operator::Eq {
+                    let equality = match binary.op {
+                        Operator::Eq => Some(Equality::Ordinary),
+                        Operator::IsNotDistinctFrom => Some(Equality::NullSafe),
+                        _ => None,
+                    };
+                    if let Some(equality) = equality {
                         let pair = match (binary.left.as_ref(), binary.right.as_ref()) {
                             (Expr::Column(inner), Expr::OuterReferenceColumn(field, outer))
                             | (Expr::OuterReferenceColumn(field, outer), Expr::Column(inner)) => {
@@ -109,15 +156,14 @@ fn pull(
                             input.keys.push(CorrelationKey {
                                 outer: outer.clone(),
                                 inner: inner.clone(),
+                                equality,
                             });
                             continue;
                         }
                     }
                 }
                 if expression_contains_outer(&expression)? {
-                    return Err(refusal(
-                        "non-equality, NULL-safe or computed correlation predicate",
-                    ));
+                    return Err(refusal("non-equality or computed correlation predicate"));
                 }
                 inner_terms.push(expression);
             }

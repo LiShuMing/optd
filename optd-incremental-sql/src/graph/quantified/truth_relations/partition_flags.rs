@@ -54,6 +54,7 @@ pub(super) fn append_truth(
     let joined = LogicalPlanBuilder::from(input)
         .join_with_expr_keys(flags, JoinType::Left, (left_keys, right_keys), None)?
         .build()?;
+    let joined = super::correlation::apply_join_policy(joined, keys)?;
     let empty = Expr::Column(Column::from_name(presence_name)).is_null();
     let unknown = left_value
         .is_null()

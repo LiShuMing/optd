@@ -2,6 +2,8 @@
 
 #[path = "quantified_truth/correlated.rs"]
 mod correlated;
+#[path = "quantified_truth/null_policies.rs"]
+mod null_policies;
 
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};

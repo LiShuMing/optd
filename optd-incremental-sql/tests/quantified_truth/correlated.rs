@@ -8,9 +8,9 @@ use optd_incremental_sql::{SqlView, Strategy, TableChange};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-type Row = (Option<i64>, Option<i64>, Option<i64>);
+pub(super) type Row = (Option<i64>, Option<i64>, Option<i64>);
 
-fn batch(rows: &[Row]) -> RecordBatch {
+pub(super) fn batch(rows: &[Row]) -> RecordBatch {
     let fields = ["p", "q", "v"]
         .into_iter()
         .map(|name| Field::new(name, DataType::Int64, true))
@@ -32,7 +32,7 @@ fn batch(rows: &[Row]) -> RecordBatch {
     .unwrap()
 }
 
-fn tables(data: &[Vec<Row>; 2]) -> BTreeMap<String, RecordBatch> {
+pub(super) fn tables(data: &[Vec<Row>; 2]) -> BTreeMap<String, RecordBatch> {
     ["a", "b"]
         .into_iter()
         .zip(data)
@@ -528,7 +528,7 @@ async fn unproved_correlation_boundaries_refuse_without_publication_or_receipts(
         "SELECT MAX(b.v) FROM b WHERE b.p=a.p",
         "SELECT b.v FROM b WHERE b.p=a.p LIMIT 1",
         "SELECT DISTINCT b.v FROM b WHERE b.p=a.p",
-        "SELECT b.v FROM b WHERE b.p IS NOT DISTINCT FROM a.p",
+        "SELECT b.v FROM b WHERE b.p IS NOT DISTINCT FROM a.p+1",
         "SELECT b.v FROM b WHERE b.p>=a.p",
         "SELECT b.v FROM b WHERE b.p=a.p+1",
         "SELECT b.v+a.v FROM b WHERE b.p=a.p",
@@ -561,4 +561,39 @@ async fn unproved_correlation_boundaries_refuse_without_publication_or_receipts(
         .await
         .unwrap();
     assert!(!response.replayed);
+}
+
+#[tokio::test]
+async fn null_safe_partition_keeps_scalar_null_comparison_unknown() {
+    let data = [
+        vec![
+            (None, Some(1), Some(1)),
+            (None, Some(1), Some(2)),
+            (None, Some(1), None),
+        ],
+        vec![(None, Some(1), Some(1)), (None, Some(1), None)],
+    ];
+    let sql="SELECT a.p,a.q,a.v,a.v IN (SELECT b.v FROM b WHERE (b.p IS NOT DISTINCT FROM a.p) AND (b.q=a.q)) AS m FROM a";
+    let view = SqlView::new_with_optimizer(
+        sql,
+        tables(&data),
+        IncrementalOptimizer::default().require_incremental(),
+    )
+    .await
+    .unwrap();
+    let reference = Rows::from([
+        (
+            vec!["NULL".into(), "1".into(), "1".into(), "true".into()],
+            1,
+        ),
+        (
+            vec!["NULL".into(), "1".into(), "2".into(), "NULL".into()],
+            1,
+        ),
+        (
+            vec!["NULL".into(), "1".into(), "NULL".into(), "NULL".into()],
+            1,
+        ),
+    ]);
+    assert_eq!(values(&view.contents().unwrap(), false), reference);
 }
