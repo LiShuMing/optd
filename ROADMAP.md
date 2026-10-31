@@ -39,7 +39,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | verified |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | verified |
-| R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | in_progress |
+| R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | verified |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
 | R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | pending |
@@ -943,5 +943,58 @@ defines schema-exact ordinary aggregate branches, typed internal grouping identi
 and UNION ALL under existing Optd rules/physical states. Real/synthetic NULL,
 duplicate sets and empty grand totals retain separate state. The nine actual
 TPC-DS ROLLUP queries are Q5/Q14/Q18/Q22/Q67/Q70/Q77/Q80/Q86, each with an existing
-directed fixture manifest. Source/design review is complete; implementation and
-all acceptance remain pending. No dependency, format or numerical guard change.
+directed fixture manifest. Source/design review and implementation are complete. No dependency, format or
+numerical guard change. Each original grouping-set node now becomes ordinary
+aggregate branches with typed identity projections and UNION ALL; singleton sets
+return their projection directly. Metadata, qualifiers, nullable keys, duplicate
+occurrence ordinals and empty grand totals preserve the original SQL schema.
+Rules produce plans; existing Optd accumulator/scoped operators execute them.
+
+
+**Verified RED/green:** exact ROLLUP selected whole-node recomputation before the
+normalizer, log `target/roadmap-r03c-red-20261031.log`; after lowering it selects
+ordinary accumulator branches, log `target/roadmap-r03c-green-20261031.log`.
+Nine integration cases plus library tests cover independent full physical SQL and
+schema comparison, an 80-epoch independent integer grouping-identity oracle,
+synthetic/real NULLs, computed and NOT NULL keys, metadata, duplicate sets including
+ordinal IDs above eight bits, ROLLUP/CUBE/mixed/singleton sets, GROUPING argument
+order, HAVING, DISTINCT, mixed extrema, empty grand totals, key moves, failed and
+discarded candidates, signed output replay, SQL DML/retry/reopen/history. Fixed
+changes at 1,024 / 8,192 untouched keys consume zero historical aggregate input
+rows per qualified branch with bounded copied directory paths. Float AVG remains
+explicitly refused. The initial metadata and singleton-UNION failures are retained
+in `target/roadmap-r03c-metadata-20261031.log` and
+`target/roadmap-r03c-gates-20261031.log`; the latter is not a successful gate.
+
+**Verified final gates:** R01a wrapper, project target/TMPDIR, Rust 1.95.0 and
+locked offline dependencies with `bash scripts/agent-check.sh sql` exited 0:
+fmt, both warnings-denied Clippy configurations, **257 default passed / 2 ignored**,
+**271 Iceberg passed / 3 ignored**. Log:
+`target/roadmap-r03c-final-gates-20261031.log`. Private rustdoc exited 0, log
+`target/roadmap-r03c-rustdoc-20261031.log`. SQL tools/fixture hashes exited 0:
+**41 tool tests**, log `target/roadmap-r03c-tools-20261031.log`.
+
+After feature jobs ended, the explicitly built default runner was frozen with
+unchanged before/after binary hashes. R01a wrapper with
+`python3 target/roadmap-r03c-grouping-witness-20261031.py` exited 0 and independently
+classified all nine directed `relational_core` queries. **Q5/Q14/Q18/Q67/Q70/Q77/
+Q80/Q86 passed** strict planning, three SQL DML/full-oracle rounds, nonempty and
+changed output, reopen and output-history replay. **Q22 was refused before rounds**:
+its five normalized aggregate branches require Float64 AVG. This is the remaining
+R03e numerical qualification dependency, not a grouping-set identity failure or
+a passing SQL loop. The explicit five blockers are retained in
+`target/roadmap-r03c-grouping-live-20261031/qualification-summary.json`.
+The unified work report currently selects semantic-pass profiles and reports
+unknown for this refusal; the explicit qualification summary is authoritative for
+its known strict rejection. R09c must expose blockers before executing probes.
+
+Artifacts, command receipts, source/SQL/lockfile/report identities and isolated
+database roots: `target/roadmap-r03c-grouping-live-20261031/`.
+Log: `target/roadmap-r03c-witness-20261031.log`. No full TPC matrix, standard-scale
+or controlled performance qualification is claimed; performance and end-to-end
+delta-work flags remain false. mdBook exited 0, log
+`target/roadmap-r03c-docs-20261031.log`. **R03c implementation is verified locally**;
+the Q22 loop remains explicitly dependent on R03e. Implementation commit is titled
+`Normalize grouping sets into schema-exact incremental aggregate branches`;
+no push. Next owner: this task, R09c planning preflight before further algorithm
+qualification, so refused queries expose complete blockers without bootstrap work.

@@ -196,7 +196,9 @@ impl SqlView {
             }
             Ok(TreeNodeRecursion::Continue)
         })?;
-        let plan = graph::normalize_distinct(ctx.state().optimize(&analyzed)?)?;
+        let plan = graph::normalize_grouping_sets(graph::normalize_distinct(
+            ctx.state().optimize(&analyzed)?,
+        )?)?;
         let mut nodes = Vec::new();
         let root = graph::add_node(&plan, &mut nodes, &mut HashMap::new())?;
         if root + 1 != nodes.len() {

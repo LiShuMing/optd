@@ -1,6 +1,6 @@
 # Incremental GROUPING SETS through ordinary aggregate branches
 
-**Status:** accepted · 2026-10-31; local source/design review, implementation pending
+**Status:** accepted · 2026-10-31; implemented and locally verified; Q22 retains the R03e Float64 AVG blocker
 **Scope:** R03c GROUPING SETS / ROLLUP / CUBE normalization with exact grouping
 identity, existing accumulator and scoped algorithms, and independent TPC-DS
 qualification. No dependency, numerical policy, persisted format or SQL membership
@@ -73,7 +73,9 @@ expressions and the original aggregate expressions. Then project:
 * the exact typed internal grouping identity, including its duplicate ordinal;
 * branch aggregate outputs at their original positions/names.
 
-Use UNION ALL with the original aggregate schema. Branch position/internal identity
+Use UNION ALL with the original aggregate schema; a single occurrence returns its
+identity projection directly, since a union requires at least two inputs.
+Branch position/internal identity
 separate synthetic NULL groups from real NULL groups. Identical branch plans may
 share execution, but repeated union ports preserve their SQL output multiplicity.
 Never use distinct UNION or discard internal identity because the outer SELECT
@@ -156,5 +158,27 @@ DataFusion's grouping schema/internal identity contract, original nine SQL files
 and existing directed fixture manifests (all nine are present). The critical
 tradeoffs are explicit logical fanout, schema-exact typed NULL/ID projections,
 duplicate occurrences, empty grand-total behavior and refusing unrelated types.
-The normalization never substitutes a simpler benchmark query. Source/design
-review is complete; implementation and every new acceptance gate remain pending.
+The normalization never substitutes a simpler benchmark query. Source/design review is complete. Implementation and local verification are
+recorded below; source review alone is not their acceptance evidence.
+
+
+## 9. Implementation and observed verification
+
+Logical lowering lives in `optd-incremental-sql/src/graph/grouping_sets.rs`, called
+before graph/rule compilation. It preserves field metadata in aliases, projects
+NOT NULL keys through a nullable typed expression where required, and avoids a
+single-input UNION. No runtime interpreter or new persisted state was added.
+
+The R03c record in `ROADMAP.md` contains exact environment/commands and failure
+logs. Final default/Iceberg gates exited 0 (257/271 passed, 2/3 ignored), as did
+warnings-denied private rustdoc, 41 report tools/fixture checks and mdBook. Nine
+integration cases include independent full physical SQL/schema and randomized
+integer-identity oracles, SQL recovery/history and fixed-delta scope assertions.
+
+Fresh frozen-runner qualification independently classified all nine named queries:
+eight passed three strict SQL/full-oracle rounds with reopen/history; Q22 was
+refused for five Float64 AVG branches (R03e). The refusal has zero rounds and is
+not counted as success. Explicit classification and source/binary/command/report
+identities are under `target/roadmap-r03c-grouping-live-20261031/`.
+This evidence covers directed local fixtures and grouping-set normalization;
+full-TPC, floating qualification and controlled performance remain separate gates.

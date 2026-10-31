@@ -5,6 +5,9 @@ use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::logical_expr::{Distinct, Expr, LogicalPlan, LogicalPlanBuilder, Volatility};
 use std::collections::HashMap;
 
+mod grouping_sets;
+pub(crate) use grouping_sets::normalize as normalize_grouping_sets;
+
 #[derive(Clone)]
 pub(crate) struct Node {
     pub(crate) plan: LogicalPlan,

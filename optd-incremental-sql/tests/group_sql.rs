@@ -244,9 +244,8 @@ async fn one_of_100_groups_reports_actual_work_and_survives_delete_restart_reins
 }
 
 #[tokio::test]
-async fn float_keys_float_arguments_and_grouping_sets_report_fallback() {
+async fn float_keys_and_float_arguments_report_fallback() {
     for sql in [
-        "SELECT k, SUM(v) AS total FROM t GROUP BY GROUPING SETS ((k), ())",
         "SELECT CAST(k AS DOUBLE) AS fk, SUM(v) AS total FROM t GROUP BY CAST(k AS DOUBLE)",
         "SELECT k, SUM(CAST(v AS DOUBLE)) AS total FROM t GROUP BY k",
         // Coercion changes the aggregate argument type even without a SQL cast.
