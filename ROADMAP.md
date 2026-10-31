@@ -619,3 +619,10 @@ Implementation is local-only. **R02d remains in progress**: SQL table leaves and
 providers are eager and no-op comparison still consumes eager batches. The next
 stage must make table/provider demand explicit and measured before R02d can be
 verified. All other pending roadmap acceptance criteria remain required.
+
+
+Next R02d design: [lazy SQL table scans](docs/src/incremental/sql_table_leaf_demand.md),
+accepted locally before implementation. It specifies weighted comparison and net-zero
+root restoration, maintained NULL metadata, fetch-aware range cursors, optional
+SELECT/DML/store demand diagnostics, and complete regression/gate requirements.
+Implementation and R02d completion remain pending; this design is not a new PASS.
