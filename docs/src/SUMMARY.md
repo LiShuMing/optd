@@ -63,6 +63,7 @@
   - [Reference-counted DISTINCT aggregates](incremental/distinct_aggregate_state.md)
   - [Incremental GROUPING SETS normalization](incremental/grouping_set_normalization.md)
   - [Incremental plan preflight](incremental/plan_preflight.md)
+  - [Match-count outer/semi/anti joins](incremental/match_count_joins.md)
   - [Overview](./incremental/overview.md)
   - [Δ Source — Where the Changes Come From](./incremental/change_capture.md)
   - [CDC Output to Iceberg — Protocol v1](./incremental/iceberg_cdc_output.md)

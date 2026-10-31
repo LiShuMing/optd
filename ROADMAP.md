@@ -42,7 +42,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | verified |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
-| R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | pending |
+| R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | in_progress |
 | R04b | P1 | Mark joins | Maintain TRUE/FALSE/UNKNOWN with correlated/null semantics; qualify TPC-DS Q10/Q35/Q45 | pending |
 | R04c | P2 | Non-equality joins and range indexes | Rules prove affected ranges; exact deletes and boundary movement tests; explicit refusal when no sound scope is available | pending |
 | R05a | P2 | Window-specific physical maintenance | Partition aggregates use accumulators; finite frames use ordered ranges; ranking tracks affected positions; preserve cached Before output and ties across restart | pending |
@@ -1080,3 +1080,15 @@ mdBook exited 0, log `target/roadmap-r09c-final-docs-20261031.log`.
 `Preflight complete incremental plans before source and state bootstrap`; no push.
 Next owner: this task, R04a outer/semi/anti match-count maintenance, including an
 audit of NULL-aware anti joins whose global NULL dependency cannot use key scope alone.
+
+
+### R04a — design and implementation lane
+
+Claimed by this task after R09c cbc4da4.
+[Match-count outer/semi/anti maintenance](docs/src/incremental/match_count_joins.md)
+defines explicit Optd state/operations, two one-sided delta stages, pure-equijoin
+bucket totals, residual per-row counts, bounded SQL predicate probes and honest
+copy/probe/output accounting. Original ordinary anti joins differ from NULL-aware
+anti joins: the latter require a global right-side NULL dependency. Pinned API and
+local source review are complete. First independently audit/repair that scope
+boundary, then implement the match-count algorithm; all acceptance remains pending.
