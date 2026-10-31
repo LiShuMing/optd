@@ -16,7 +16,10 @@ use datafusion::logical_expr::{
     lit, when, Expr, ExprSchemable, JoinType, LogicalPlan, LogicalPlanBuilder, Projection,
 };
 
-use super::{quantified_truth_error, validate_filter_membership, MAX_EXPRESSION_NODES};
+use super::{validate_filter_membership, MAX_EXPRESSION_NODES};
+
+mod correlation;
+mod partition_flags;
 
 /// Bound both relation fanout and name probes independently of binder limits.
 const MAX_EXPANSIONS: usize = 64;
@@ -191,21 +194,15 @@ fn expand(
     subquery: InSubquery,
     names: &mut RewriteContext,
 ) -> Result<TruthRelation> {
-    if !subquery.subquery.outer_ref_columns.is_empty() {
-        return Err(quantified_truth_error());
-    }
     let right = subquery.subquery.subquery.as_ref();
     right.apply_with_subqueries(|node| {
         // Nullable truth references S twice. Charge both before cloning its tree.
         super::consume_node_budget(&mut names.remaining_generated_nodes)?;
         super::consume_node_budget(&mut names.remaining_generated_nodes)?;
         for expression in node.expressions() {
-            expression.apply(|expression| {
+            expression.apply(|_expression| {
                 super::consume_node_budget(&mut names.remaining_generated_nodes)?;
                 super::consume_node_budget(&mut names.remaining_generated_nodes)?;
-                if matches!(expression, Expr::OuterReferenceColumn(_, _)) {
-                    return Err(quantified_truth_error());
-                }
                 Ok(TreeNodeRecursion::Continue)
             })?;
         }
@@ -224,37 +221,74 @@ fn expand(
         ));
     }
     let nullable = subquery.expr.nullable(input.schema())? || right.schema().field(0).is_nullable();
+    let correlation::PartitionInput {
+        plan: right,
+        mut keys,
+    } = if !subquery.subquery.outer_ref_columns.is_empty() || correlation::contains_outer(right)? {
+        correlation::extract(right, input.schema(), names)?
+    } else {
+        correlation::PartitionInput {
+            plan: right.clone(),
+            keys: vec![],
+        }
+    };
     let value_name = names.fresh()?;
     let member_name = names.fresh()?;
     let matched_name = names.fresh()?;
-    let compared = LogicalPlanBuilder::from(right.clone())
-        .project(vec![
-            Expr::Column(right.schema().columns()[0].clone()).alias(&value_name)
-        ])?
+    // Extraction preserves compared output position zero. All carried correlation
+    // columns receive distinct names before members and flags branch independently.
+    let mut compared_columns =
+        vec![Expr::Column(right.schema().columns()[0].clone()).alias(&value_name)];
+    for key in &mut keys {
+        let name = names.fresh()?;
+        compared_columns.push(Expr::Column(key.inner.clone()).alias(&name));
+        key.inner = Column::from_name(name);
+    }
+    let compared = LogicalPlanBuilder::from(right)
+        .project(compared_columns)?
         .build()?;
     let value = Expr::Column(Column::from_name(&value_name));
+    let mut groups = keys
+        .iter()
+        .map(|key| Expr::Column(key.inner.clone()))
+        .collect::<Vec<_>>();
+    let mut member_columns = Vec::new();
+    let mut left_keys = Vec::new();
+    let mut right_keys = Vec::new();
+    for key in &keys {
+        let name = names.fresh()?;
+        member_columns.push(Expr::Column(key.inner.clone()).alias(&name));
+        left_keys.push(Expr::Column(key.outer.clone()));
+        right_keys.push(Expr::Column(Column::from_name(name)));
+    }
+    groups.push(value.clone());
+    member_columns.extend([
+        value.clone().alias(&member_name),
+        lit(true).alias(&matched_name),
+    ]);
+    left_keys.push(*subquery.expr.clone());
+    right_keys.push(Expr::Column(Column::from_name(&member_name)));
     let members = LogicalPlanBuilder::from(compared.clone())
         .filter(value.clone().is_not_null())?
-        .aggregate(vec![value.clone()], Vec::<Expr>::new())?
-        .project(vec![
-            value.alias(&member_name),
-            lit(true).alias(&matched_name),
-        ])?
+        .aggregate(groups, Vec::<Expr>::new())?
+        .project(member_columns)?
         .build()?;
     let joined = LogicalPlanBuilder::from(input)
-        .join_with_expr_keys(
-            members,
-            JoinType::Left,
-            (
-                vec![*subquery.expr.clone()],
-                vec![Expr::Column(Column::from_name(&member_name))],
-            ),
-            None,
-        )?
+        .join_with_expr_keys(members, JoinType::Left, (left_keys, right_keys), None)?
         .build()?;
     let matched = Expr::Column(Column::from_name(matched_name)).is_not_null();
     // Nonnullable comparisons can never produce UNKNOWN, including on empty S.
-    let mut relation = if nullable {
+    let mut relation = if nullable && !keys.is_empty() {
+        partition_flags::append_truth(
+            joined,
+            compared,
+            &keys,
+            &value_name,
+            *subquery.expr,
+            matched,
+            names,
+        )?
+    } else if nullable {
         append_global_truth(
             joined,
             compared,

@@ -254,3 +254,19 @@ are qualified. Default/Iceberg suites pass 311/325 tests (2/3 ignored); an initi
 test-only Clippy error and its passing follow-up are retained in ROADMAP.md.
 These are uncorrelated semantic/scope witnesses, not correlated/global dependency
 contract completion or fresh full-TPC/performance certification. R04b/R06 stay open.
+
+## 13. Ordinary correlated truth partitions
+
+The relation normalizer now additionally extracts proven ordinary equality
+correlations through row-preserving projection/filter/alias boundaries. Members
+are grouped by correlation keys plus compared value; exact count flags are grouped
+by correlation keys alone. Missing flag rows mean empty input, and ordinary NULL
+keys never match. Typed extraction refuses unproved row-changing/computed/range/
+NULL-safe scopes before publication, with a specific correlation diagnostic.
+
+Independent partition truth passes 128 signed epochs and durable multi-view SQL
+writes/retry/reopen/history. Growing untouched partitions 8 -> 512 keeps match-peer
+visits at 12 and output delta rows at 2 for the fixed hot partition. Default/Iceberg
+complete gates pass 318/332 tests, with 2/3 existing ignored. These observations
+are recorded in ROADMAP.md; NULL-safe/mixed policies, binding sharing, reusable R06
+impact descriptors and numerical/TPC/performance completion remain separate.

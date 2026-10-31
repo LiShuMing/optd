@@ -1,5 +1,8 @@
 //! Independent three-valued membership and observable UNKNOWN over SQL writes.
 
+#[path = "quantified_truth/correlated.rs"]
+mod correlated;
+
 use datafusion::arrow::array::{Int64Array, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use optd_incremental_sql::database::{display_rows, SqlSession};

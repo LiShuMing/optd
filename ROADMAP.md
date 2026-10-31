@@ -1604,3 +1604,54 @@ Uncorrelated slice final format and `git diff --check` exit 0; mdBook exits 0
 (`target/roadmap-r04b-truth-relations-docs-20261031.log`). `agent-check.sh sql-tools`
 exits 0 with pinned source/schema identities and **46 report-tool tests**
 (`...-tools-20261031.log`). All owned verification sessions are terminal.
+
+### R04b — ordinary equality-correlated truth partitions
+
+Reviewed extraction/partition design precedes source in `94b9fd8`, section 9 of
+`quantified_truth_normalization.md`. Extraction removes only direct conjunctive
+ordinary equality predicates, carries hidden keys through projection/alias chains,
+retains inner predicates, verifies original outer/inner types and rejects any
+unproved row-changing scope or remaining outer reference with a specific reason.
+Member joins use correlation keys plus compared value; flag joins use correlation
+keys only. A missing flags row means empty input, including ordinary NULL outer
+keys. Existing aggregate/match-count Optd operations execute all state changes;
+there is no new executor, dependency or durable-format variant.
+
+RED `target/roadmap-r04b-correlated-truth-red-20261031.log` exits 101 with 0 passed/
+1 failed under the original correlation guard. A setup-only module-path compile
+failure is retained separately as `...-red-setup-20261031.log`, not semantic RED.
+GREEN **128 signed two-source epochs** over four projection/filter/key modes match
+an independent partition truth model and every signed output prefix; discarded and
+stale candidates remain isolated. Eight durable SQL write rounds across four views
+check independent output, key moves, empty/NULL partitions, atomic two-source
+changes, retry, per-round reopen and history. INSERT SELECT and UPDATE/DELETE
+selectors use the same path. Nonnullable compared values preserve nonnullable
+Boolean outputs despite nullable correlation keys. Aggregate/LIMIT/DISTINCT,
+NULL-safe/computed/range correlation refusals publish no view/epoch/receipt.
+
+At fixed hot partition, growing untouched partitions from 8 to 512 records exactly
+**12 match-peer visits and 2 output-delta rows** at both sizes, with zero snapshot
+evaluations/full keyed scans (`...-scope-20261031.log`). The first scope test had
+an incorrect one-key upper bound for every join: a first IN flag change legitimately
+enters the second IN's comparison-key index for two values *in the same partition*.
+The corrected bound follows the two hot comparison values and retains independent
+output and fixed-work assertions. Preserve the failing focused log; no production
+algorithm was changed to conceal it. Duplicate membership binding reuse is the
+separately reviewed optimization in section 11, not present in this measurement.
+
+**Complete gates:** R01a wrapper/target/TMPDIR and
+`bash scripts/agent-check.sh sql` exit 0: fmt, both all-target Clippy modes,
+**318 default / 332 Iceberg passed**, 2/3 existing ignored. Log
+`target/roadmap-r04b-correlated-truth-gates-20261031.log`. Private Iceberg rustdoc
+with `-D warnings --document-private-items` exits 0 (`...-rustdoc-20261031.log`).
+Seven new correlation-focused tests pass (`...-expanded-20261031.log`).
+mdBook and final diff checks are recorded before local commit. No new full-TPC,
+standard-scale, external-source delta ingestion or performance acceptance.
+
+R04b remains in_progress, R06 pending; **13/31 verified, 1 in_progress, 17 pending**.
+NULL-safe/mixed correlation policies, repeated-binding sharing and Q35 numerical
+qualification remain distinct work, alongside all other roadmap rows. Local only.
+Ordinary correlated slice mdBook and `git diff --check` both exit 0; book log
+`target/roadmap-r04b-correlated-truth-docs-20261031.log`. All verification sessions
+are terminal. NULL-safe and reuse designs are already committed as `731251d` and
+`3388dd5`; neither design entry certifies implementation.
