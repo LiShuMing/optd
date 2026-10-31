@@ -43,7 +43,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
 | R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
 | R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | verified |
-| R04b | P1 | Mark joins | Maintain TRUE/FALSE/UNKNOWN with correlated/null semantics; qualify TPC-DS Q10/Q35/Q45 | pending |
+| R04b | P1 | Mark joins | Maintain TRUE/FALSE/UNKNOWN with correlated/null semantics; qualify TPC-DS Q10/Q35/Q45 | in_progress |
 | R04c | P2 | Non-equality joins and range indexes | Rules prove affected ranges; exact deletes and boundary movement tests; explicit refusal when no sound scope is available | pending |
 | R05a | P2 | Window-specific physical maintenance | Partition aggregates use accumulators; finite frames use ordered ranges; ranking tracks affected positions; preserve cached Before output and ties across restart | pending |
 | R05b | P2 | Unpartitioned windows, ordering and Top-K | Ordered state, ties, NULL order and delete refill preserve original SQL membership; internal ORDER BY/LIMIT remain semantic operators | pending |
@@ -1395,3 +1395,69 @@ gates are qualified. Ledger: **13/31 verified, 18 pending**. Next owner is this
 task, R04b; the local `81c512f` admission design already records an independently
 reproduced UNKNOWN-sensitive NOT IN/disjunction wrong answer. Full mark truth
 state and global NULL-aware dependency maintenance remain unimplemented. No push.
+
+R04a default implementation is committed locally as `14eecce`.
+
+### R04b — quantified truth admission prerequisite
+
+Claimed by this task after R04a. Accepted design/index: `81c512f`,
+[mark joins and quantified truth](docs/src/incremental/mark_joins.md).
+Independent frozen SQL probes show right-side NULL makes negative IN under OR
+return two incorrect rows; positive IN/EXISTS/NOT EXISTS filter probes retain
+the expected row bags. Projected IN is unsupported by the pinned physical engine.
+Exact input, commands and frozen binary identity:
+`target/roadmap-r04b-mark-semantics-probe-20261031/individual-summary.json`.
+
+RED admission tests: `cargo +1.95.0 test --offline --locked -p optd-incremental-sql
+--test quantified_sql` under the R01a wrapper/target/TMPDIR exited 101: three
+unsafe SELECT/DML/preflight tests failed; the independent positive/conjunctive
+truth-table test passed. Log `target/roadmap-r04b-quantified-red-20261031.log`.
+Implement typed admission before decorrelation loses truth provenance, shared
+by the compiler and SELECT/DML validation. This is a correctness prerequisite;
+mark count state and R06 NULL/global impact contracts remain required. Ledger:
+13/31 verified, R04b in_progress, 17 pending. No production source was changed
+until the R04a frozen witnesses completed and `14eecce` was committed.
+
+
+Shared analyzed-plan admission is now implemented in `graph::quantified`, before
+optimization, for incremental compilation, SELECT, DML selectors and INSERT SELECT.
+UNKNOWN-sensitive quantified expressions fail explicitly before any execution or
+publication; proven positive membership and conjunctive NULL-aware anti retain
+their independent truth-table behavior. Four regression tests cover rejected
+contexts, independent expected bags, empty/NULL/duplicate peers, preserved CURRENT,
+CREATE/preflight refusal, request identity reuse, retry and reopen/history.
+
+**Verified:** full default/Iceberg tests passed 294/308 (2/3 ignored), recorded in
+`target/roadmap-r04b-quantified-gates-20261031.log`. That script exited 1 because
+its initial default Clippy rejected a test's `.err().expect()` spelling; the
+preflight test now uses `.expect_err()`. Final format, both all-targets Clippy
+configurations and both focused four-test configurations exited 0 in
+`target/roadmap-r04b-quantified-final-focused-20261031.log`. This test-only spelling
+fix did not require repeating the completed full suites. The R01a environment
+wrapper/target/TMPDIR and `cargo +1.95.0 doc --offline --locked
+-p optd-incremental-sql --features iceberg --no-deps --document-private-items`
+with `RUSTDOCFLAGS=-D warnings` exited 0; log
+`target/roadmap-r04b-quantified-rustdoc-20261031.log`.
+
+Fresh frozen CLI verified the previously incorrect negative IN/OR is now refused,
+and positive IN/EXISTS/NOT EXISTS match independent rows; all four leave CURRENT
+unchanged. Fresh Q10/Q35/Q45 schema-bound planning reports retain respectively
+two/three/one complete blockers, including Q35's separate R03e integer AVG blocker.
+No bootstrap or incremental rounds executed for these rejected strict plans.
+The benchmark runner deliberately exits 1 for incomplete plans; the initial
+artifact script incorrectly expected 0. Source review identified that contract;
+the final script checks exit 1, zero failed/passed variants, exactly one incomplete
+unsupported variant, zero completed rounds and every named blocking node.
+Retain both artifacts; this corrects a driver assertion, not query expectations.
+Final script exit 0 and unchanged source/frozen binary hashes:
+`target/roadmap-r04b-quantified-live-final-20261031/`, driver
+`target/roadmap-r04b-quantified-live-final-20261031.py`. Original failure remains
+under `target/roadmap-r04b-quantified-live-20261031/`.
+
+R04b remains in_progress: this correctness prerequisite does not implement mark
+maintenance or TRUE/FALSE/UNKNOWN state. Next is explicit Boolean mark-count state
+for the proven EXISTS/positive membership subset, followed by R06 truth/impact
+work. No full-TPC or performance qualification and no push.
+
+Final mdBook build and `git diff --check` exited 0; book log:
+`target/roadmap-r04b-quantified-docs-20261031.log`.

@@ -6,7 +6,9 @@ use datafusion::logical_expr::{Distinct, Expr, LogicalPlan, LogicalPlanBuilder, 
 use std::collections::HashMap;
 
 mod grouping_sets;
+mod quantified;
 pub(crate) use grouping_sets::normalize as normalize_grouping_sets;
+pub(crate) use quantified::validate as validate_quantified_subqueries;
 
 #[derive(Clone)]
 pub(crate) struct Node {

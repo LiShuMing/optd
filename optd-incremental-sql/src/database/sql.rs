@@ -125,7 +125,7 @@ pub(super) fn reads(plan: &LogicalPlan) -> Result<BTreeSet<String>> {
     Ok(names)
 }
 
-pub(super) fn immutable(plan: &LogicalPlan) -> Result<()> {
+fn immutable(plan: &LogicalPlan) -> Result<()> {
     plan.apply_with_subqueries(|p| {
         for expr in p.expressions() {
             expr.apply(|e| {
@@ -140,13 +140,19 @@ pub(super) fn immutable(plan: &LogicalPlan) -> Result<()> {
     Ok(())
 }
 
+/// Keep quantified truth and immutability checks before any selector collection.
+pub(super) fn validate_query(plan: &LogicalPlan) -> Result<()> {
+    crate::graph::validate_quantified_subqueries(plan)?;
+    immutable(plan)
+}
+
 pub(super) async fn plan_query(ctx: &SessionContext, query: &str) -> Result<LogicalPlan> {
     let parsed = statements(query)?;
     if parsed.len() != 1 || !matches!(parsed[0], Statement::Query(_)) {
         return Err(invalid("expected a read-only query"));
     }
     let plan = ctx.state().create_logical_plan(query).await?;
-    immutable(&plan)?;
+    validate_query(&plan)?;
     Ok(plan)
 }
 

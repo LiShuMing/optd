@@ -132,3 +132,21 @@ upstream normalization and how its bootstrap oracle avoids the Boolean-only mark
 kernel for observable UNKNOWN. No current design decision permits silently
 substituting Boolean match existence for those semantics. R04b verification waits
 for the complete three-valued/correlated acceptance matrix, not only this guard.
+
+
+## 9. Admission implementation and observed verification
+
+The shared analyzed-plan guard is implemented before decorrelation for incremental
+compilation, SELECT and DML. Independent truth tests preserve positive membership,
+EXISTS/NOT EXISTS and conjunctive NOT IN; unsafe observed UNKNOWN is explicitly
+refused. CREATE and rejected DML publish no changes or request receipts.
+
+ROADMAP.md records RED (three failures), final four focused tests per feature,
+294/308 complete default/Iceberg tests, both lint modes/private rustdoc and fresh
+CLI/classification evidence. The initial classification driver's exit-code
+assertion was incorrect: benchmark returns 1 for unsupported strict plans. Final
+classification checks that explicit refusal contract and all blockers; no rejected
+query is reported passed. Q35 retains its independent numerical AVG blocker.
+
+Mark execution remains unimplemented and R04b stays in_progress. No full-TPC,
+standard-scale or controlled performance certification follows from admission.
