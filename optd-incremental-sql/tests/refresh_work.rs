@@ -154,7 +154,11 @@ async fn aggregate_directory_copies_are_separate_from_one_touched_group() {
     for n in [16, 128] {
         for (sql, accumulator) in [
             ("SELECT k, SUM(v) AS total FROM t GROUP BY k", true),
-            ("SELECT k, MIN(v) AS lo FROM t GROUP BY k", false),
+            ("SELECT k, MIN(v) AS lo FROM t GROUP BY k", true),
+            (
+                "SELECT k, SUM(v) FILTER (WHERE v > 0) AS n FROM t GROUP BY k",
+                false,
+            ),
         ] {
             let maintained = view(sql, tables(n)).await;
             let candidate = maintained

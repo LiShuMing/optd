@@ -515,7 +515,7 @@ async fn selected_custom_snapshot_controls_execution_and_invalid_scope_fails() {
 #[tokio::test]
 async fn strict_rejects_remaining_complete_operator_recompute() {
     for sql in [
-        "SELECT MIN(v) FROM a",
+        "SELECT MIN(CAST(v AS DOUBLE)) FROM a",
         "SELECT * FROM a ORDER BY k",
         "SELECT ROW_NUMBER() OVER (ORDER BY v) FROM a",
         "SELECT * FROM a FULL JOIN b ON a.v < b.v",

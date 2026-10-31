@@ -8,16 +8,20 @@ use datafusion::arrow::compute::take;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Expr, ExprSchemable, LogicalPlan};
-use datafusion::physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
+use datafusion::physical_expr::aggregate::AggregateExprBuilder;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::prelude::SessionContext;
 
 use crate::bag::Bag;
 use crate::group_state::{encode_keys, supported_key, KeyPolicy};
-use crate::metrics::AccumulatorWork;
+use crate::metrics::{AccumulatorWork, ValueIndexWork};
 use crate::planner::plan::RelationOperator;
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
+
+mod aggregate_cell;
+mod value_index;
+use aggregate_cell::{AggregateSpec, Cell};
 
 type Key = Vec<u8>;
 type PartitionRows = BTreeMap<Key, (Vec<ScalarValue>, Vec<u32>)>;
@@ -54,7 +58,7 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
         let Expr::AggregateFunction(f) = unalias(expr) else {
             return Ok(false);
         };
-        if !matches!(f.func.name(), "count" | "sum" | "avg")
+        if !matches!(f.func.name(), "count" | "sum" | "avg" | "min" | "max")
             || session.aggregate_functions().get(f.func.name()) != Some(&f.func)
             || f.params.distinct
             || f.params.filter.is_some()
@@ -63,6 +67,29 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
             || f.params.args.is_empty()
         {
             return Ok(false);
+        }
+        if matches!(f.func.name(), "min" | "max") {
+            // The registry can contain a same-name user function. Extrema depend on
+            // the pinned builtin's ordering and NULL/type semantics, not its name.
+            let builtin = if f.func.name() == "min" {
+                datafusion::functions_aggregate::min_max::min_udaf()
+            } else {
+                datafusion::functions_aggregate::min_max::max_udaf()
+            };
+            if f.func != builtin {
+                return Ok(false);
+            }
+            if f.params.args.len() != 1
+                || !supported_key(
+                    &f.params.args[0].get_type(agg.input.schema())?,
+                    KeyPolicy {
+                        binary_strings: true,
+                    },
+                )
+            {
+                return Ok(false);
+            }
+            continue;
         }
         if f.func.name() != "count" {
             for arg in &f.params.args {
@@ -102,7 +129,7 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
 struct Entry {
     rows: i64,
     keys: Vec<ScalarValue>,
-    states: Vec<Vec<ScalarValue>>,
+    states: Vec<Cell>,
     output: Vec<ScalarValue>,
 }
 
@@ -114,7 +141,7 @@ struct Entry {
 pub(crate) struct AccumulatorState {
     schema: SchemaRef,
     keys: Vec<Arc<dyn PhysicalExpr>>,
-    functions: Vec<AggregateFunctionExpr>,
+    functions: Vec<AggregateSpec>,
     entries: StateDirectory<Arc<Entry>>,
 }
 
@@ -156,10 +183,7 @@ impl AccumulatorState {
                 .schema(input.schema())
                 .alias(operator.schema().field(agg.group_expr.len() + i).name())
                 .build()?;
-            if !fun.create_sliding_accumulator()?.supports_retract_batch() {
-                return Err(Error::Invalid("aggregate cannot retract".into()));
-            }
-            functions.push(fun);
+            functions.push(AggregateSpec::new(fun, f.func.name())?);
         }
         let mut state = Self {
             schema: operator.schema(),
@@ -180,9 +204,9 @@ impl AccumulatorState {
         let mut states = Vec::new();
         let mut output = keys.clone();
         for f in &self.functions {
-            let mut acc = f.create_sliding_accumulator()?;
-            output.push(acc.evaluate()?);
-            states.push(acc.state()?);
+            let initial = f.initial()?;
+            output.push(initial.output);
+            states.push(initial.state);
         }
         Ok(Entry {
             rows: 0,
@@ -259,7 +283,8 @@ impl AccumulatorState {
             self.functions
                 .iter()
                 .map(|f| {
-                    f.expressions()
+                    f.expression
+                        .expressions()
                         .iter()
                         .map(|e| Ok(e.evaluate(batch)?.into_array(batch.num_rows())?))
                         .collect()
@@ -269,6 +294,7 @@ impl AccumulatorState {
         let pa = arguments(positive)?;
         let na = arguments(negative)?;
         let touched = changes.len();
+        let mut value_index_work = ValueIndexWork::default();
         for (key, (values, plus, minus)) in changes {
             let previous = self.entries.get(&key);
             if let Some(entry) = previous {
@@ -294,13 +320,6 @@ impl AccumulatorState {
             }
             entry.output = entry.keys.clone();
             for (i, f) in self.functions.iter().enumerate() {
-                let mut acc = f.create_sliding_accumulator()?;
-                acc.merge_batch(
-                    &entry.states[i]
-                        .iter()
-                        .map(|v| v.to_array_of_size(1))
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
-                )?;
                 let select = |arrays: &[ArrayRef], indices: &[u32]| -> Result<Vec<ArrayRef>> {
                     let indices = UInt32Array::from(indices.to_vec());
                     Ok(arrays
@@ -308,14 +327,12 @@ impl AccumulatorState {
                         .map(|a| take(a.as_ref(), &indices, None))
                         .collect::<std::result::Result<Vec<_>, _>>()?)
                 };
-                if !minus.is_empty() {
-                    acc.retract_batch(&select(&na[i], &minus)?)?;
-                }
-                if !plus.is_empty() {
-                    acc.update_batch(&select(&pa[i], &plus)?)?;
-                }
-                entry.output.push(acc.evaluate()?);
-                entry.states[i] = acc.state()?;
+                entry.output.push(f.apply(
+                    &mut entry.states[i],
+                    &select(&pa[i], &plus)?,
+                    &select(&na[i], &minus)?,
+                    &mut value_index_work,
+                )?);
             }
             new.push(entry.output.clone());
             next.entries.insert(key, Arc::new(entry));
@@ -332,7 +349,78 @@ impl AccumulatorState {
             historical_input_rows: 0,
             groups_before: self.entries.len(),
             groups_after: next.entries.len(),
+            value_index_work: self
+                .functions
+                .iter()
+                .any(AggregateSpec::is_indexed)
+                .then_some(value_index_work),
         };
         Ok((next, delta, work))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::Int64Array;
+
+    #[tokio::test]
+    async fn registered_same_name_user_extrema_do_not_inherit_builtin_eligibility() {
+        use datafusion::logical_expr::{create_udaf, Volatility};
+
+        let ctx = SessionContext::new();
+        ctx.register_batch(
+            "t",
+            RecordBatch::try_from_iter(vec![(
+                "v",
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            )])
+            .unwrap(),
+        )
+        .unwrap();
+        for name in ["min", "max"] {
+            ctx.register_udaf(create_udaf(
+                name,
+                vec![DataType::Int64],
+                Arc::new(DataType::Int64),
+                Volatility::Immutable,
+                Arc::new(|_| {
+                    Err(datafusion::common::DataFusionError::NotImplemented(
+                        "eligibility-only test function".into(),
+                    ))
+                }),
+                Arc::new(vec![DataType::Int64]),
+            ));
+            let frame = ctx.sql(&format!("SELECT {name}(v) FROM t")).await.unwrap();
+            let aggregate = frame.logical_plan().inputs()[0];
+            assert!(matches!(aggregate, LogicalPlan::Aggregate(_)));
+            assert!(!eligible(&ctx, aggregate).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn unoptimized_distinct_and_modifier_nodes_are_not_admitted_as_plain_accumulators() {
+        let ctx = SessionContext::new();
+        ctx.register_batch(
+            "t",
+            RecordBatch::try_from_iter(vec![(
+                "v",
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            )])
+            .unwrap(),
+        )
+        .unwrap();
+        for sql in [
+            "SELECT min(DISTINCT v) FROM t",
+            "SELECT min(v) FILTER (WHERE v > 0) FROM t",
+            "SELECT count(DISTINCT v), max(v) FROM t",
+        ] {
+            // Inspect original nodes: the SQL optimizer may safely remove redundant
+            // DISTINCT on MIN or split COUNT DISTINCT into multiple ordinary nodes.
+            let frame = ctx.sql(sql).await.unwrap();
+            let aggregate = frame.logical_plan().inputs()[0];
+            assert!(matches!(aggregate, LogicalPlan::Aggregate(_)), "{sql}");
+            assert!(!eligible(&ctx, aggregate).unwrap(), "{sql}");
+        }
     }
 }

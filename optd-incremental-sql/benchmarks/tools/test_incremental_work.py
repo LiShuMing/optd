@@ -17,6 +17,21 @@ class IncrementalWork(unittest.TestCase):
                                 "rounds":[{"sql_stats":{"nodes":[{"strategy":"AccumulatorDelta","accumulator_work":{
                                     "delta_input_rows":2,"historical_input_rows":0}}]}} for _ in range(3)]}}]}]}
 
+    def test_value_index_work_sums_actual_counts_and_legacy_absence_stays_unknown(self):
+        source = self.fixture()
+        rounds = source["queries"][0]["profiles"][0]["verification"]["rounds"]
+        for round_ in rounds:
+            round_["sql_stats"]["nodes"][0]["accumulator_work"]["value_index_work"] = {
+                "input_rows": 4, "value_updates": 2,
+                "directory_entries_copied": 3, "extremum_lookups": 2}
+        work = audit(source)["observed_work"]
+        for name, expected in [("input_rows", 12), ("value_updates", 6),
+                               ("directory_entries_copied", 9), ("extremum_lookups", 6)]:
+            self.assertEqual(work["accumulator_work.value_index_work." + name], expected)
+        for round_ in rounds:
+            del round_["sql_stats"]["nodes"][0]["accumulator_work"]["value_index_work"]
+        self.assertFalse(any("value_index_work" in key for key in audit(source)["observed_work"]))
+
     def test_unexecuted_planned_blocker_prevents_strict_coverage_claim(self):
         result=audit(self.fixture())
         self.assertEqual(result["counts"],{"total":1,"semantic_pass":1,"strict_plan_eligible":0,

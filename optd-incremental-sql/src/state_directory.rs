@@ -114,6 +114,15 @@ impl<V> StateDirectory<V> {
         Some((&node.key, &node.value))
     }
 
+    /// Read the maximum value without walking or collecting unrelated directory entries.
+    pub(crate) fn last_key_value(&self) -> Option<(&Vec<u8>, &V)> {
+        let mut node = self.root.as_deref()?;
+        while let Some(right) = node.right.as_deref() {
+            node = right;
+        }
+        Some((&node.key, &node.value))
+    }
+
     /// Find the next leaf without collecting directory handles or borrowing a cursor stack.
     pub(crate) fn successor(&self, key: &[u8]) -> Option<(&Vec<u8>, &V)> {
         let mut cursor = self.root.as_deref();
@@ -440,6 +449,7 @@ mod tests {
         assert!(d.keys().eq(m.keys()));
         assert!(d.values().eq(m.values()));
         assert_eq!(d.first_key_value(), m.first_key_value());
+        assert_eq!(d.last_key_value(), m.last_key_value());
         for k in [0, 1, 7, 64, 127, 512, 1025, u64::MAX] {
             assert_eq!(d.get(&key(k)), m.get(&key(k)));
             assert_eq!(d.predecessor(&key(k)), m.range(..=key(k)).next_back());

@@ -1,6 +1,6 @@
 # Retractable MIN/MAX value indexes
 
-**Status:** accepted · 2026-10-31; local source/design review, implementation pending
+**Status:** accepted · 2026-10-31; implementation verified locally, evidence in ROADMAP R03a
 **Scope:** R03a global/grouped builtin MIN/MAX and mixtures with already qualified
 COUNT/SUM/AVG. No dependency, persisted format, source ingestion or floating
 arithmetic contract change. DISTINCT, FILTER and GROUPING SETS retain their
@@ -47,7 +47,8 @@ native sliding accumulator states for qualified COUNT/SUM/AVG.
 
 Admit builtin MIN/MAX with exactly one immutable, non-DISTINCT argument, no FILTER,
 ORDER BY or explicit null-treatment modifier, and the same builtin identity checks
-as other accumulators. Initial ordered types are Null, Boolean, signed/unsigned
+as other accumulators, plus canonical pinned MIN/MAX identity: a same-name user
+function registered in the session is insufficient. Initial ordered types are Null, Boolean, signed/unsigned
 integers, Decimal128/256, Date32/64 and binary UTF-8 variants: the existing proven
 group-key order/equality policy. Use Arrow RowConverter for one fixed typed value,
 never string rendering or probabilistic hashes. Reject an encoding collision that
@@ -152,3 +153,20 @@ The critical checks are arbitrary deletion versus FIFO queues, per-group value
 root sharing, exact NULL/empty types, mixed aggregate state isolation, and explicit
 type/numeric boundaries. This is source/design review; implementation and query
 acceptance remain unverified until recorded in ROADMAP.
+
+
+## 9. Implementation and observed verification
+
+`accumulator_state/aggregate_cell.rs` separates native and indexed cells;
+`accumulator_state/value_index.rs` implements counted persistent value updates.
+`StateDirectory::last_key_value` supplies maximum lookup. Extrema remain under the
+existing rule/Optd accumulator operation. The eligibility check additionally compares
+to canonical pinned MIN/MAX functions, since a session registry can hold a same-name
+user function. Indexed work remains an optional diagnostic; derived state bootstrap
+and persisted formats are unchanged.
+
+ROADMAP R03a records the RED/green plan test, independent state/SQL/scaling oracles,
+SQL retry/reopen/history tests, 238 default / 252 Iceberg passes, 40 tool passes,
+private rustdoc, mdBook and fresh frozen-binary Q15/Q23 strict SQL witnesses. These
+are local implementation and semantic/work-scope observations. They do not certify
+all TPC queries, bounded recovery/checkpoint IO or controlled performance.

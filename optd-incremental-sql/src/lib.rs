@@ -36,7 +36,7 @@ pub use engine::{
     GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, TableChange,
 };
 pub use error::{Error, Result};
-pub use metrics::AccumulatorWork;
+pub use metrics::{AccumulatorWork, ValueIndexWork};
 pub use planner::Strategy;
 pub use work::{
     CacheRelationWork, RefreshWork, RelationWork, RowEncodingWork, RowReadWork, SourceStateWork,

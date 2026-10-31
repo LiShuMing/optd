@@ -12,7 +12,7 @@ use datafusion::physical_plan::collect;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use optd_incremental_sql::store::CheckpointStore;
 use optd_incremental_sql::{
-    DurableSqlView, GroupWork, RefreshStats, SqlView, Strategy, TableChange,
+    AccumulatorWork, DurableSqlView, RefreshStats, SqlView, Strategy, TableChange,
 };
 
 // Integer AVG is coerced to a floating argument by DataFusion 55 and remains
@@ -110,15 +110,15 @@ async fn oracle(sql: &str, rows: &[IntRow]) -> RecordBatch {
     concat_batches(&schema, &collect(plan, ctx.task_ctx()).await.unwrap()).unwrap()
 }
 
-fn one_group_work(stats: &RefreshStats) -> &GroupWork {
+fn one_group_work(stats: &RefreshStats) -> &AccumulatorWork {
     let grouped = stats
         .nodes
         .iter()
-        .filter(|node| node.strategy == Strategy::ChangedGroupRecompute)
+        .filter(|node| node.strategy == Strategy::AccumulatorDelta)
         .collect::<Vec<_>>();
     assert_eq!(grouped.len(), 1, "{stats:?}");
     grouped[0]
-        .group_work
+        .accumulator_work
         .as_ref()
         .expect("indexed work must be reported")
 }
@@ -177,12 +177,12 @@ async fn one_of_100_groups_reports_actual_work_and_survives_delete_restart_reins
     rows.push((42, 5));
     let stats = refresh_checked(&mut view, &[change(&[(42, 1), (42, 5)], &[-1, 1])], &rows).await;
     let work = one_group_work(&stats);
-    assert_eq!(work.total_groups_before, 100);
-    assert_eq!(work.total_groups_after, 100);
+    assert_eq!(work.groups_before, 100);
+    assert_eq!(work.groups_after, 100);
     assert_eq!(work.touched_groups, 1);
-    assert_eq!(work.changed_input_rows, 2);
-    assert_eq!(work.aggregate_input_rows, 2);
-    assert_eq!(work.aggregate_output_rows, 1);
+    assert_eq!(work.delta_input_rows, 2);
+    assert_eq!(work.historical_input_rows, 0);
+    assert_eq!(work.value_index_work.as_ref().unwrap().input_rows, 4);
     expected_sources.push(rows.clone());
 
     rows.retain(|row| row.0 != 42);
@@ -193,12 +193,12 @@ async fn one_of_100_groups_reports_actual_work_and_survives_delete_restart_reins
     )
     .await;
     let work = one_group_work(&stats);
-    assert_eq!(work.total_groups_before, 100);
-    assert_eq!(work.total_groups_after, 99);
+    assert_eq!(work.groups_before, 100);
+    assert_eq!(work.groups_after, 99);
     assert_eq!(work.touched_groups, 1);
-    assert_eq!(work.changed_input_rows, 2);
-    assert_eq!(work.aggregate_input_rows, 0);
-    assert_eq!(work.aggregate_output_rows, 0);
+    assert_eq!(work.delta_input_rows, 2);
+    assert_eq!(work.historical_input_rows, 0);
+    assert_eq!(work.value_index_work.as_ref().unwrap().input_rows, 0);
     expected_sources.push(rows.clone());
 
     drop(view);
@@ -218,12 +218,12 @@ async fn one_of_100_groups_reports_actual_work_and_survives_delete_restart_reins
     )
     .await;
     let work = one_group_work(&stats);
-    assert_eq!(work.total_groups_before, 99);
-    assert_eq!(work.total_groups_after, 100);
+    assert_eq!(work.groups_before, 99);
+    assert_eq!(work.groups_after, 100);
     assert_eq!(work.touched_groups, 1);
-    assert_eq!(work.changed_input_rows, 2);
-    assert_eq!(work.aggregate_input_rows, 2);
-    assert_eq!(work.aggregate_output_rows, 1);
+    assert_eq!(work.delta_input_rows, 2);
+    assert_eq!(work.historical_input_rows, 0);
+    assert_eq!(work.value_index_work.as_ref().unwrap().input_rows, 4);
     expected_sources.push(rows);
     drop(recovered);
 

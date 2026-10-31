@@ -37,7 +37,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R02b | P1 | Transaction table blocks and change overlays | Small writes avoid full target conversion; preserve duplicate rows, statement snapshots, swaps and read-your-writes | verified |
 | R02c | P1 | Shared state directories and candidate overlays | Copy only changed directory blocks/entries while discarded/failed candidates leave committed state intact | verified |
 | R02d | P1 | Lazy/chunked relation caches | Avoid complete Bag copies, repeated sorting and Arrow materialization for small changes; retain required output order | verified |
-| R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | in_progress |
+| R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | verified |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | pending |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | pending |
 | R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
@@ -787,5 +787,69 @@ Claimed by this task. [Retractable MIN/MAX value indexes](docs/src/incremental/e
 defines counted shared value directories under the existing accumulator rewrite,
 exact nonfloating type/NULL contracts, optional actual work, independent oracles
 and fresh TPC-H Q15/TPC-DS Q23 acceptance. Local source/design review is complete;
-implementation and all R03a acceptance gates remain pending. No new package or
-persisted format is proposed. Design is committed before implementation.
+The accepted design was committed as `28f4da8` before implementation. The existing
+accumulator rule and Optd operation now select counted ordered MIN/MAX cells for
+qualified exact types; native COUNT/SUM/AVG cells retain their prior arithmetic.
+Persistent value roots isolate candidates and copy changed paths. Per-value net
+changes skip cancellations; NULLs do not enter the value directory, while group
+cardinality independently preserves NULL-only groups and empty global output.
+Canonical builtin MIN/MAX identity additionally rejects same-name registered user
+functions. No new package, rule name, Optd operation or persisted format is added.
+
+**Verified RED/green:** ordinary global/grouped MIN/MAX selected recomputation on
+the baseline and now selects `AccumulatorDelta`.
+Logs: `target/roadmap-r03a-red-20261031.log` and
+`target/roadmap-r03a-green-20261031.log`. Independent counted BTreeMap, integer-group
+and full SQL oracles cover arbitrary deletion, duplicate extrema, NULL/empty input,
+all admitted value types, mixed native/indexed aggregates, group removal/recreation,
+key moves, projected cancellation, failed/discarded/stale candidates and signed
+output replay. The value-index oracle executes 240 updates; the SQL oracle executes
+80 mixed epochs. SQL CREATE MV and INSERT/DELETE/UPDATE tests reopen after every
+round, retry the original request and verify every output-history prefix.
+
+At 1,024 and 8,192 unchanged groups or distinct values in a hot group, one changed
+key consumes four MIN/MAX argument rows, updates four net values, looks up two
+extrema and reads zero historical aggregate inputs. Actual value-path copy counts
+satisfy logarithmic bounds; projected equal-value replacement copies zero value
+nodes. Group removal skips unnecessary value-index work. `value_index_work` is
+optional, absent for native-only/old reports; a report-tool regression independently
+checks nested sums and absence without fabricating zeros.
+
+**Verified final gates:** the R01a Rust 1.95.0 locked offline wrapper, project target
+and TMPDIR with `bash scripts/agent-check.sh sql` exited 0: format, both warnings-denied
+Clippy configurations, **238 default passed / 2 ignored**, **252 Iceberg passed /
+3 ignored**. Log: `target/roadmap-r03a-final-gates-20261031.log`. The private-rustdoc
+command from R01a exited 0, log `target/roadmap-r03a-rustdoc-20261031.log`.
+The same wrapper with `bash scripts/agent-check.sh sql-tools` exited 0: fixture-hash
+verification and **40 tool tests**, log `target/roadmap-r03a-tools-20261031.log`.
+An earlier full check failed because an old strict-policy test still expected
+integer MIN to be rejected; its refusal case now uses unqualified floating MIN.
+The original failed log remains `target/roadmap-r03a-gates-20261031.log`.
+No correctness assertion was relaxed: the ordinary MIN path has its own RED/green
+plan and independent result/work tests. Raw DISTINCT/modifier eligibility is tested
+before SQL optimization, which can legitimately split a DISTINCT aggregate.
+
+After all feature jobs ended, explicitly built the default `benchmark_sql_database`
+example and froze its runner. The wrapper with
+`python3 target/roadmap-r03a-extrema-witness-20261031.py` exited 0: **TPC-H Q15 and
+TPC-DS Q23 each pass three SQL DML rounds, strict planning, independent full SQL,
+reopen and output-history replay**, plus unified numeric-work audit. Both witnesses
+observe nonempty output and an output change. Q15 performs 22 value updates and
+two extremum lookups; Q23 performs three value updates and three lookups. These
+actual counts include no-op rounds rather than implying every statement changes
+the result. Initial/final result rows: Q15 0/1, Q23 0/0.
+
+Fresh artifacts: `target/roadmap-r03a-extrema-live-20261031/`. Commands, independent
+database roots, source HEAD/diff/new production-file hashes, lockfile, runner,
+report hashes and unchanged before/after binary identity are retained. Logs:
+`target/roadmap-r03a-bench-build-20261031.log`,
+`target/roadmap-r03a-witness-20261031.log`. Additional per-query extrema-work receipts
+record the executed index counters. These are two small `relational_core` SQL
+witnesses, not full-TPC or controlled performance qualification; both performance
+and end-to-end delta-work flags stay false. Complete checkpoint writes and derived
+state reconstruction on restart remain explicit R07 work.
+
+mdBook with the R01a wrapper and project book output exited 0, log
+`target/roadmap-r03a-docs-20261031.log`. **R03a is verified locally.** Implementation
+is the local commit titled `Maintain retractable MIN/MAX through counted value indexes`;
+no push. Next owner: this task, R03b DISTINCT membership state.

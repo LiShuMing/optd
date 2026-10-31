@@ -40,6 +40,23 @@ pub struct AccumulatorWork {
     pub groups_before: usize,
     /// Candidate aggregate groups after the batch.
     pub groups_after: usize,
+    /// Actual indexed MIN/MAX work; absent for native-only nodes and older reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_index_work: Option<ValueIndexWork>,
+}
+
+/// Operator-local ordered-value maintenance, summed across touched groups/functions.
+/// These counters do not include source/cache/SQL/checkpoint work or temporary buffers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ValueIndexWork {
+    /// Argument rows consumed by indexed functions, including NULLs and both signs.
+    pub input_rows: usize,
+    /// Nonzero consolidated values looked up and updated once per group/function.
+    pub value_updates: usize,
+    /// Existing persistent directory nodes actually cloned by value updates.
+    pub directory_entries_copied: usize,
+    /// First/last entry lookups, including empty value indexes.
+    pub extremum_lookups: usize,
 }
 
 /// Actual input work at an indexed aggregate, independent of elapsed time.

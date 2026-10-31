@@ -435,7 +435,10 @@ async fn strict_policy_checks_selected_custom_rule_without_falling_back_to_built
 #[tokio::test]
 async fn compatibility_recompute_is_explicit_and_strict_reports_the_same_first_node() {
     for (sql, expected_rule) in [
-        ("SELECT MIN(v) FROM a", "builtin.aggregate_recompute"),
+        (
+            "SELECT MIN(CAST(v AS DOUBLE)) FROM a",
+            "builtin.aggregate_recompute",
+        ),
         (
             "SELECT ROW_NUMBER() OVER (ORDER BY v) FROM a",
             "builtin.window_recompute",
