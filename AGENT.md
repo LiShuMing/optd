@@ -78,6 +78,34 @@ Rules:
 
 ## 3. Coding standards (Rust)
 
+Use the public [Google Rust Style Guide](https://google.github.io/styleguide/rustguide.html)
+as the baseline for new and substantially changed Rust code, including both incremental
+crates. Apply its readability, API-design and ownership guidance in this repository's
+context; this is not a claim of conformance to every Google-codebase-specific rule.
+
+* Keep module entry points focused on declarations and explicit re-exports. Put substantial
+  implementation in leaf modules named for their main type or responsibility. Separate SQL
+  binding, rewrite rules, execution/state, transaction coordination and durable publication.
+* Prefer descriptive names, named result/state structs and enums over positional tuples or
+  ambiguous boolean parameters. Model mutually exclusive states with an enum rather than
+  independent flags/options. Avoid speculative traits, generic frameworks and new crates.
+* Use explicit imports; qualify free-function calls with their module when useful. Keep
+  visibility as narrow as possible. Preserve existing public import paths through re-exports
+  when reorganizing internals. Inline tests may use `use super::*`.
+* Prefer borrowing (`&str`, `&[T]`, `&T`) to unnecessary owned copies. Retain copies required
+  for isolated refresh candidates and atomic publication; explain their ownership purpose.
+* Use `Option` for an expected absence and `Result` with diagnostic context for recoverable
+  failure. Use pattern matching instead of check-then-unwrap, and mark uncommitted prepared
+  work `#[must_use]` when silently discarding it would conceal a missing step.
+* Pure refactors preserve SQL semantics, strict-plan policy, public APIs and persisted/wire
+  formats. Verify both default and Iceberg feature configurations, differential semantics
+  and process-recovery tests; separate any intentional behavior change into another change.
+
+Keep conventional Cargo layout, the existing async runtime, required Arrow `Arc` sharing,
+the pinned stable toolchain and compatible public types. Google rules tagged for Chromium
+or Fuchsia (flat GN layouts, async restrictions or platform mutexes) are not project rules.
+Do not add breaking `#[non_exhaustive]` annotations or dependencies solely for style.
+
 * `cargo fmt` and `cargo clippy -- -D warnings` must be clean.
 * The declared MSRV is a contract. Do not change it silently; changing it is a design change.
 * Library code must not panic on user input. `unwrap`/`expect` require a proven invariant and a
