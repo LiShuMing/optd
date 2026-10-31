@@ -12,6 +12,8 @@ rust-version = "1.95"
 iceberg = ["dep:iceberg", "dep:optd-incremental"]
 
 [dependencies]
+# Implement DataFusion's async table-provider API without a new resolved package.
+async-trait = "0.1"
 # Generic Optd plans and transformation/implementation rules; SQL stays typed.
 optd-core = { path = "../optd-core" }
 # Reuse the workspace's pinned SQL/type implementation. The default graph has

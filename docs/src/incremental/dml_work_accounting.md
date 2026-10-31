@@ -20,9 +20,12 @@ statistics. Preserve unrelated comment edits in `dml_compiler.rs`.
 ## 3. Options considered
 
 Logical cardinality estimates cannot establish actual work. DataFusion's memory
-sources do not retain suitable output metrics by default. Replacing providers or
-adding predicates to count rows would change optimization or add row work.
-Wrap physical source streams after planning, with statement-local counters.
+sources do not retain suitable output metrics by default. Adding predicates to
+count rows would add row work. Wrapping all physical `DataSourceExec` nodes also
+counts VALUES constants as relation reads and misses physical expression subqueries.
+Delegate snapshot MemTable providers and wrap only their actual scans, sharing a
+counter owned by the single statement. Preserve source properties, statistics,
+filter/projection requests and fetch behavior explicitly.
 
 ## 4. Decision
 
@@ -31,8 +34,8 @@ Add `DmlWork.execution: Option<DmlExecutionWork>` with a serde default: historic
 receipts keep `None` (unknown); new successful DML has measured values. Identified
 retries retain their original measurements and keep `replayed=true`.
 
-Create the normal optimized physical selector plan once. Add transparent wrappers
-at `DataSourceExec` nodes after physical optimization. Count every successful batch
+Create the optimized physical selector plan once using delegated snapshot providers.
+Add a pass-through wrapper at each provider's scan result. Count every successful batch
 delivered through these stream boundaries, its rows and Arrow array buffer bytes.
 Count repeated scan executions separately. Optimized-away sources count zero.
 LIMIT counts only delivered batches/rows, possibly more than final selected rows.
@@ -40,6 +43,9 @@ The count is neither disk IO nor CPU row visits inside a DataFusion operator.
 No asynchronous side task, global counter or retained batch copy is introduced.
 Checked statement-local counters use a short mutex only when a batch is yielded.
 Planning and physical expression evaluation remain DataFusion responsibilities.
+Physical expression subqueries use the same registered providers and statement
+counter; retain DataFusion's existing subquery optimization setting. Tests check
+both selected rows and consumption, including branches mixing constants and scans.
 
 Record selector output batches/rows, old/new image rows, target input rows and
 distinct entries collected into a Bag, then actual full-map copy and final Arrow
@@ -48,12 +54,16 @@ Deserialize support. Counter failures reject preparation before publication.
 
 The existing `futures` dependency becomes unconditional to implement Stream and
 poll the existing DataFusion stream. It is already resolved transitively in both
-configurations; retain version/features and the lockfile. Record this manifest
-adjustment separately with its reason; no new package is introduced.
+configurations; retain its version/features. Add the already-resolved `async-trait`
+0.1.92 as a direct dependency to implement DataFusion's object-safe table-provider
+API. Cargo.lock adds only this dependency edge to this crate; no resolved package,
+version, feature or checksum changes. Record manifest adjustments separately with
+their reasons. No new resolved package is introduced.
 
 ## 5. Failure modes and recovery
 
-Each selector collection owns its counter; concurrent sessions cannot mix work.
+Each consumed DmlCompiler owns its selector/counter; concurrent statements cannot
+mix work. A compiler cannot be reused for a second statement.
 Failed statements never publish their table replacement or diagnostic receipt.
 Pending batches and errors pass through with their normal polling behavior.
 Dropping a stream drops its input without introducing a producer task.
@@ -84,16 +94,25 @@ selector planning costs and end-to-end performance remain separate tasks.
 ## Implementation review
 
 The source API review confirmed that memory-source metrics cannot supply these
-counts and that wrapping after optimization preserves the chosen physical plan.
-Do not add a consumer task or materialize a source to count it. Checked counters
+counts. Stream regression found that generic physical-source classification also
+counts VALUES: move instrumentation to provider-owned scans. Delegate statistics
+and fetch to preserve COUNT scan elimination and LIMIT pushdown. Do not add a
+consumer task or materialize a source to count it. Checked counters
 must fail preparation, and old receipt JSON must deserialize without fabrication.
-The only manifest change exposes the already-resolved Stream API directly.
+The manifest changes expose the already-resolved Stream and async provider APIs.
 
 ## Dependency verification
 
 Rust 1.95.0, offline locked checks for `optd-incremental-sql` default and Iceberg
 both exited 0 using the ROADMAP environment and project target directory. Logs:
 `target/roadmap-r01b-dependency-20261031.log` and
-`target/roadmap-r01b-dependency-iceberg-20261031.log`. Only `futures` changes from
-an optional direct dependency to an unconditional one; its version/features and
-Cargo.lock remain unchanged. This is build evidence, not implementation acceptance.
+`target/roadmap-r01b-dependency-iceberg-20261031.log`. The first checks validate
+unconditional `futures`; subsequent locked checks validate the direct async-trait
+edge. No resolved package identity changes. This is build evidence, not
+implementation acceptance.
+
+Provider dependency checks: `cargo +1.95.0 check --offline --locked -p
+optd-incremental-sql` and the same command with `--features iceberg` both exited 0
+in the ROADMAP environment. Logs: `target/roadmap-r01b-provider-dependency-20261031.log`
+and `target/roadmap-r01b-provider-dependency-iceberg-20261031.log`. Lockfile review
+shows exactly one added direct `async-trait` reference for this crate.

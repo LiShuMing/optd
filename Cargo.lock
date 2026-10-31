@@ -4288,6 +4288,7 @@ dependencies = [
 name = "optd-incremental-sql"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "datafusion",
  "futures",
  "iceberg",
