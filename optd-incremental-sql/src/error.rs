@@ -9,6 +9,12 @@ pub enum Error {
     /// Rejected SQL, input, state transition or resource requirement.
     #[error("{0}")]
     Invalid(String),
+    /// Complete schema-bound strict-plan refusal; no source/operator state was initialized.
+    #[error("strict incremental planning rejected: {report}")]
+    PlanRejected {
+        /// Every blocked node in the admitted logical/physical compilation graph.
+        report: Box<crate::PlanPreflight>,
+    },
     /// An invalid or conflicting rule registry definition.
     #[error("incremental rule registry: {0}")]
     RuleRegistry(String),
@@ -55,6 +61,18 @@ pub enum Error {
     #[cfg(feature = "iceberg")]
     #[error(transparent)]
     Iceberg(#[from] ::iceberg::Error),
+}
+
+impl Error {
+    /// Complete strict-planning diagnostics retained through rule/operator context.
+    /// Non-planning and pre-graph SQL errors have no complete report.
+    pub fn plan_preflight(&self) -> Option<&crate::PlanPreflight> {
+        match self {
+            Self::PlanRejected { report } => Some(report),
+            Self::Rewrite { source, .. } | Self::Operator { source, .. } => source.plan_preflight(),
+            _ => None,
+        }
+    }
 }
 
 /// Result returned by the typed SQL backend.

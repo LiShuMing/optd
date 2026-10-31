@@ -191,16 +191,42 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         .iter()
         .map(|(n, b)| (n.clone(), b.slice(0, b.num_rows() / 2)))
         .collect();
-    let probe = SqlView::new(sql, current.clone())
-        .await
-        .map_err(|e| format!("plan_probe: {e}"))?;
-    let qualification = plan_qualification(&probe);
+    let probe = SqlView::preflight(
+        sql,
+        current
+            .iter()
+            .map(|(name, batch)| (name.clone(), batch.schema()))
+            .collect(),
+        optd_incremental_sql::planner::IncrementalOptimizer::default().require_incremental(),
+    )
+    .await
+    .map_err(|e| format!("plan_preflight: {e}"))?;
+    let blockers = probe
+        .blockers
+        .iter()
+        .map(|blocker| {
+            let mut value = json!(blocker);
+            // Preserve the existing report's rule identity object for audit readers.
+            value["rule"] = probe
+                .planned_nodes
+                .iter()
+                .find(|node| node.id == blocker.id)
+                .and_then(|node| node.rule.as_ref())
+                .map_or_else(|| json!({"name": blocker.rule}), |rule| json!(rule));
+            value
+        })
+        .collect::<Vec<_>>();
+    let qualification = json!({
+        "strict_plan_eligible": probe.strict_plan_eligible,
+        "complete_recompute_blockers": blockers,
+        "planned_nodes": probe.planned_nodes,
+        "work_scope": "schema_bound_planning_only_no_bootstrap_execution",
+    });
     if qualification["strict_plan_eligible"] != true {
         return Ok(
             json!({"status":"unsupported_strict_plan","plan_qualification":qualification,"completed_rounds":0,"rounds":[]}),
         );
     }
-    drop(probe);
     // Per-query roots must be fresh; never reset another run's committed state.
     fs::create_dir(root)?;
     let mut script = String::new();

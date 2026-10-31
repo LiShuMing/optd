@@ -107,6 +107,40 @@ def empty_domains():
         "verification_before_reopen", "recovery", "verification_after_reopen"]}
 
 
+def checked_qualification(qualification):
+    """Validate a complete plan, including nodes whose compilation itself failed."""
+    planned = qualification["planned_nodes"]
+    blockers = qualification["complete_recompute_blockers"]
+    blocked_ids = {node["id"] for node in planned
+                   if node["strategy"] in (None, "OperatorRecompute")}
+    if (len({node["id"] for node in planned}) != len(planned) or
+            len({node["id"] for node in blockers}) != len(blockers) or
+            {node["id"] for node in blockers} != blocked_ids or
+            type(qualification["strict_plan_eligible"]) is not bool or
+            qualification["strict_plan_eligible"] != (not blocked_ids)):
+        raise ValueError("planned blockers and strict eligibility contradict each other")
+    return planned, blockers
+
+
+def refused_profiles(query):
+    """Keep preflight evidence even when there is no successful semantic witness."""
+    reports = []
+    for profile in query.get("profiles", []):
+        verification = profile.get("verification", {})
+        if verification.get("status") != "unsupported_strict_plan":
+            continue
+        qualification = verification.get("plan_qualification")
+        if (qualification is None or verification.get("completed_rounds") != 0 or
+                verification.get("rounds") != []):
+            raise ValueError("strict preflight refusal requires a plan and zero executed rounds")
+        planned, blockers = checked_qualification(qualification)
+        if qualification["strict_plan_eligible"]:
+            raise ValueError("strict refusal contradicts eligible preflight")
+        reports.append({"profile": profile["profile"], "strict_plan_eligible": False,
+                        "complete_recompute_blockers": blockers, "planned_nodes": planned})
+    return reports
+
+
 def audit(aggregate):
     queries = []
     strategies = Counter()
@@ -116,8 +150,21 @@ def audit(aggregate):
     for query in aggregate["queries"]:
         selected = query.get("selected_complete_profile")
         if not query.get("with_pass") or not selected:
+            reports = refused_profiles(query)
+            # A unique profile is unambiguous. Multiple profiles remain individually
+            # inspectable; do not silently select a favorable schema/plan variant.
+            refused = reports[0] if len(query.get("profiles", [])) == len(reports) == 1 else None
+            if refused is not None:
+                strategies.update({node["strategy"] for node in refused["planned_nodes"]
+                                   if node["strategy"] is not None})
+                blocker_rules.update({node["rule"]["name"]
+                                      for node in refused["complete_recompute_blockers"]})
             queries.append({"query_id": query["query_id"], "semantic_pass": False,
-                            "strict_plan_eligible": None, "complete_recompute_blockers": None})
+                            "strict_plan_eligible": False if refused else None,
+                            "complete_recompute_blockers": refused["complete_recompute_blockers"] if refused else None,
+                            "preflight_profiles": reports,
+                            "complete_recompute_required": any(node["strategy"] == "OperatorRecompute" for node in refused["planned_nodes"]) if refused else None,
+                            "plan_compilation_failed": any(node["strategy"] is None for node in refused["planned_nodes"]) if refused else None})
             continue
         profiles = [p for p in query["profiles"] if p["profile"] == selected["profile"]]
         if len(profiles) != 1:
@@ -126,16 +173,11 @@ def audit(aggregate):
         if verification["status"] != "pass" or verification.get("completed_rounds") != 3:
             raise ValueError("selected semantic witness is not a complete passing profile")
         qualification = verification.get("plan_qualification")
-        planned = qualification["planned_nodes"] if qualification is not None else []
-        actual_blockers = {n["id"] for n in planned if n["strategy"] == "OperatorRecompute"}
-        blockers = qualification["complete_recompute_blockers"] if qualification is not None else None
+        planned, blockers = checked_qualification(qualification) if qualification is not None else ([], None)
+        actual_blockers = {node["id"] for node in blockers} if blockers is not None else set()
         if qualification is not None:
-            if (len({n["id"] for n in planned}) != len(planned) or
-                    len({b["id"] for b in blockers}) != len(blockers) or
-                    {b["id"] for b in blockers} != actual_blockers or
-                    type(qualification["strict_plan_eligible"]) is not bool or
-                    qualification["strict_plan_eligible"] != (not actual_blockers)):
-                raise ValueError("planned blockers and strict eligibility contradict each other")
+            if any(node["strategy"] is None for node in planned):
+                raise ValueError("semantic pass cannot contain failed plan compilation")
             strategies.update({node["strategy"] for node in planned})
             blocker_rules.update({node["rule"]["name"] for node in blockers})
         if len(verification["rounds"]) != 3:
@@ -151,6 +193,8 @@ def audit(aggregate):
         queries.append({"query_id": query["query_id"], "semantic_pass": True,
                         "strict_plan_eligible": not actual_blockers if qualification is not None else None,
                         "complete_recompute_blockers": blockers,
+                        "complete_recompute_required": bool(actual_blockers) if qualification is not None else None,
+                        "plan_compilation_failed": False if qualification is not None else None,
                         "strategies": sorted({n["strategy"] for n in planned}),
                         "observed_work": dict(work), "work_domains": domains})
     return {"suite": aggregate["suite"], "query_mode": aggregate.get("query_mode", "original"),
@@ -158,7 +202,9 @@ def audit(aggregate):
             "counts": {"total": len(queries),
                        "semantic_pass": sum(q["semantic_pass"] for q in queries),
                        "strict_plan_eligible": sum(q["strict_plan_eligible"] is True for q in queries),
-                       "complete_recompute": sum(q["strict_plan_eligible"] is False for q in queries),
+                       "complete_recompute": sum(q["complete_recompute_required"] is True for q in queries),
+                       "strict_plan_rejected": sum(q["strict_plan_eligible"] is False for q in queries),
+                       "plan_compilation_failed": sum(q["plan_compilation_failed"] is True for q in queries),
                        "plan_qualification_unknown": sum(q["strict_plan_eligible"] is None for q in queries)},
             "queries_with_strategy": dict(strategies), "queries_with_blocking_rule": dict(blocker_rules),
             "observed_work": dict(totals), "work_domains": total_domains, "performance_qualified": False,

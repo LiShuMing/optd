@@ -1,27 +1,24 @@
 //! DataFusion logical operators connected by typed, signed relation changes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::Column;
 use datafusion::datasource::{provider_as_source, MemTable};
-use datafusion::logical_expr::{
-    Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan, Volatility,
-};
+use datafusion::logical_expr::{Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, TableScan};
 use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::accumulator_state::AccumulatorState;
 use crate::bag::Bag;
 use crate::executor::{self, cache_scan, Bindings, Relation};
-use crate::graph::{self, Node};
+use crate::graph::Node;
 use crate::group_state::{supported_key, GroupState, KeyPolicy};
 use crate::keyed_state::KeyedState;
-use crate::planner::plan::{self, StateSpec};
-use crate::planner::{IncrementalOptimizer, IncrementalPlan, RuleContext, Strategy};
+use crate::planner::plan::StateSpec;
+use crate::planner::{IncrementalOptimizer, IncrementalPlan, Strategy};
 use crate::row_blocks::RowBlocks;
 use crate::source_state::SourceState;
 use crate::store::Snapshot;
@@ -90,7 +87,7 @@ pub struct SqlView {
     ctx: SessionContext,
 }
 
-fn context() -> SessionContext {
+pub(crate) fn context() -> SessionContext {
     // One physical input partition preserves ordered cache sequences; execution
     // parallelism is a separate performance qualification, not a correctness knob.
     let mut config = SessionConfig::new().with_target_partitions(1);
@@ -167,6 +164,26 @@ impl SqlView {
         Self::new_with_optimizer(sql, tables, IncrementalOptimizer::default()).await
     }
 
+    /// Compile against schemas without executing source rows or initializing state.
+    ///
+    /// The report includes every refusal in an admitted SQL graph, including final
+    /// physical replacements. SQL binding/normalization errors remain typed errors.
+    /// The SQL optimizer still folds immutable constants. Eligibility does not
+    /// guarantee runtime arithmetic or resource success.
+    pub async fn preflight(
+        sql: &str,
+        schemas: BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+        optimizer: IncrementalOptimizer,
+    ) -> Result<crate::PlanPreflight> {
+        let ctx = context();
+        for (name, schema) in schemas {
+            ctx.register_batch(&name, RecordBatch::new_empty(schema))?;
+        }
+        Ok(crate::planning::compile(&ctx, sql, &optimizer)
+            .await?
+            .report)
+    }
+
     /// Compile a caller-selected rule registry, then initialize its verified plan.
     ///
     /// Rules control actual maintenance expressions. They are trusted semantic
@@ -177,86 +194,16 @@ impl SqlView {
         optimizer: IncrementalOptimizer,
     ) -> Result<Self> {
         let ctx = context();
-        let mut source = BTreeMap::new();
-        for (name, batch) in tables {
-            ctx.register_batch(&name, batch.clone())?;
-            source.insert(name, SourceState::new(Bag::from_batch(&batch)?)?);
+        for (name, batch) in &tables {
+            ctx.register_batch(name, batch.clone())?;
         }
-        let analyzed = ctx.state().create_logical_plan(sql).await?;
-        // Check volatility before optimizations can constant-fold a stable
-        // function such as current_date into an apparently immutable literal.
-        analyzed.apply_with_subqueries(|p| {
-            for e in p.expressions() {
-                e.apply(|e| {
-                    if matches!(e, Expr::ScalarFunction(f) if f.func.signature().volatility != Volatility::Immutable) {
-                        return Err(datafusion::common::DataFusionError::Plan("non-immutable SQL function".into()));
-                    }
-                    Ok(TreeNodeRecursion::Continue)
-                })?;
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
-        let plan = graph::normalize_grouping_sets(graph::normalize_distinct(
-            ctx.state().optimize(&analyzed)?,
-        )?)?;
-        let mut nodes = Vec::new();
-        let root = graph::add_node(&plan, &mut nodes, &mut HashMap::new())?;
-        if root + 1 != nodes.len() {
-            return Err(Error::Invalid(
-                "query root was not last in postorder".into(),
-            ));
-        }
-        let compiled = nodes
-            .iter()
-            .enumerate()
-            .map(|(id, node)| {
-                let group_eligible = Self::admits_group_index(&ctx, &node.plan)?;
-                optimizer.rewrite_node(
-                    &RuleContext::new(id, &node.plan, &node.inputs, node.ordered, group_eligible)
-                        .with_accumulator_eligible(crate::accumulator_state::eligible(
-                            &ctx, &node.plan,
-                        )?),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut incremental_plan = IncrementalPlan::new(compiled)?;
-        let mut after_bindings: Vec<plan::IncrementalRel> = Vec::with_capacity(nodes.len());
-        let mut programs = Vec::with_capacity(nodes.len());
-        for (id, node) in nodes.iter().enumerate() {
-            let children = node
-                .inputs
-                .iter()
-                .map(|i| after_bindings[*i].clone())
-                .collect::<Vec<_>>();
-            let context = RuleContext::new(
-                id,
-                &node.plan,
-                &node.inputs,
-                node.ordered,
-                Self::admits_group_index(&ctx, &node.plan)?,
-            )
-            .with_accumulator_eligible(crate::accumulator_state::eligible(&ctx, &node.plan)?);
-            let program = crate::planner::lower::compile(
-                &context,
-                &incremental_plan.nodes()[id].maintenance,
-                children.clone(),
-                optimizer.plan_rules(),
-            )?;
-            if optimizer.requires_incremental() && program.strategy() == Strategy::OperatorRecompute
-            {
-                return Err(Error::Invalid(
-                    "strict incremental planning forbids physical replacement recomputation".into(),
-                ));
-            }
-            programs.push(program);
-            after_bindings.push(crate::planner::lower::after_input(
-                id,
-                &node.plan,
-                node.ordered,
-                children,
-            )?);
-        }
-        incremental_plan.install_programs(programs)?;
+        let compilation = crate::planning::compile(&ctx, sql, &optimizer).await?;
+        let (nodes, incremental_plan) = compilation.into_plan(optimizer.requires_incremental())?;
+        // Reject the complete plan before encoding source rows or creating any state.
+        let source = tables
+            .into_iter()
+            .map(|(name, batch)| Ok((name, SourceState::new(Bag::from_batch(&batch)?)?)))
+            .collect::<Result<_>>()?;
         let group_slots = vec![None; nodes.len()];
         let mut out = Self {
             sql: sql.into(),
@@ -398,7 +345,7 @@ impl SqlView {
         self.incremental_plan.programs()[id].strategy()
     }
 
-    fn admits_group_index(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool> {
+    pub(crate) fn admits_group_index(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool> {
         let LogicalPlan::Aggregate(aggregate) = plan else {
             return Ok(false);
         };

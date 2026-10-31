@@ -1,6 +1,6 @@
 # Complete incremental plan preflight before bootstrap
 
-**Status:** accepted · 2026-10-31; local source/design review, implementation pending
+**Status:** accepted · 2026-10-31; implemented and locally verified
 **Scope:** R09c schema-bound planning, complete blockers within the admitted SQL
 graph, automatic strict CREATE MV rejection before source materialization/bootstrap,
 and SQL-database benchmark eligibility. No numerical, persisted or dependency change.
@@ -18,6 +18,8 @@ R03c is committed at 733a0eb. Rule selection and Optd lowering are separate from
 executor/state bootstrap. Typed schemas are enough to bind logical expressions.
 Caller-supplied rules and physical plan rules must retain identity and diagnostics;
 preflight must inspect their final physical operations, including injected Replace.
+The first-node Error::Rewrite envelope remains available in strict mode too;
+Error::plan_preflight() retrieves its complete structured source report.
 Existing non-strict missing-rule errors retain their typed Error::Rewrite contract.
 
 ## 3. Options considered
@@ -51,7 +53,8 @@ Parse/binding, volatility, normalization and unsupported graph/expression failur
 remain typed errors before a complete admitted graph exists; do not label such an
 incomplete analysis eligible or invent missing nodes. Preflight is structural
 qualification, not a promise that arithmetic, resource limits or bootstrap will
-succeed on future data. Schema-only and data-bound compilation must agree in the
+succeed on future data. Normal SQL optimization still folds immutable constants;
+preflight does not evaluate source rows or run DataFusion physical operators. Schema-only and data-bound compilation must agree in the
 covered default SQL optimizer, with explicit empty/nonempty parity tests.
 
 SqlSession preflight is read-only and uses committed base-table schemas. Reject it
@@ -60,6 +63,10 @@ same automatic strict compiler; add a schema preflight before dependency source
 materialization. Rejected CREATE publishes no catalog, receipt or epoch. The SQL
 database benchmark uses preflight instead of constructing a non-strict probe;
 retain complete_recompute_blockers compatibility while adding typed details.
+Report tools retain unique-profile known refusals even without semantic success;
+multiple profiles retain per-profile preflight evidence without an arbitrary choice.
+Strict rejection, actual complete-node replacement and failed compilation have
+separate counts; a missing implementation must not masquerade as measured recomputation.
 
 ## 5. Failure modes and recovery
 
@@ -79,7 +86,9 @@ state ownership or produces runtime rows.
   collect independent sibling errors without installing partial programs.
 * A query that fails if evaluated (division/cast) can be preflighted without row
   execution; no source/state/relation construction is necessary.
-* Failed CREATE/retry leaves epoch, CURRENT bytes, file counters and catalog intact;
+* Failed ordinary CREATE leaves epoch, CURRENT bytes, file counters and catalog intact;
+  identified retries may read existing request-history metadata but never write
+  files or materialize source/view state;
   valid SQL still passes DML, reopen and output-history checks.
 * Default/Iceberg format/Clippy/tests, private rustdoc, report tools and mdBook pass.
   Fresh Q22 reports five numerical blockers with zero bootstrap rounds; an accepted
@@ -99,4 +108,30 @@ Reviewed engine graph construction, rewrite/physical lowerers, exact aggregate a
 group admission, database CREATE publication order and benchmark probe execution.
 The key invariant is that a diagnostic continuation is never an executable partial
 plan. The owner's continuous implementation instruction authorizes this local
-increment. Every implementation and verification gate remains pending.
+increment. Implementation and observed verification are recorded below.
+
+
+## 9. Implementation and observed verification
+
+`src/planning/` holds the common planning-only compiler, report types and typed
+restriction context. `SqlView::preflight` and `SqlSession::preflight` bind schemas;
+CREATE MV preflights before dependency materialization. Actual bootstrap compiles
+again against its real registered schemas. Caller physical rules are inspected,
+including Replace introduced after a native frontend. Diagnostic placeholders
+cannot be installed: compilation returns either the whole plan or an error.
+
+`ROADMAP.md` R09c records exact commands, original failed test assumptions and final
+logs. Six new integration tests preserve existing rule/error contracts, compare
+schema-only and full-data plans, enumerate independent source failures and physical
+replacements, prove no source-row evaluation, and verify failed CREATE/retry leaves
+no writes/catalog changes. Identified retry metadata reads remain measured R07c work.
+Report tools preserve unique-profile refusals without semantic success, retain
+ambiguous profile evidence and distinguish strict rejection, failed compilation
+and complete-node replacement.
+
+Final gates: 263 default / 277 Iceberg tests pass (2/3 explicitly ignored), both
+Clippy configurations/fmt, private rustdoc, mdBook and 44 report tools/fixture checks
+exit 0. Frozen default-runner Q22 preflight lists five Float64 AVG/R03e blockers
+with zero execution rounds; Q28 passes three strict SQL/full-oracle/reopen/history
+rounds. Artifacts: `target/roadmap-r09c-final-preflight-live-20261031/`.
+These are local directed witnesses; full TPC and controlled performance remain R10.

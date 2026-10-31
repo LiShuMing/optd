@@ -124,6 +124,29 @@ impl SqlSession {
         self.committed.epoch
     }
 
+    /// Inspect strict eligibility against committed base-table schemas without reading rows.
+    ///
+    /// No physical SQL, operator state or publication work executes. Transactions
+    /// are rejected so the report has an unambiguous committed visibility boundary.
+    pub async fn preflight(&self, query: &str) -> Result<crate::PlanPreflight> {
+        self.ensure_ready()?;
+        if self.transaction.is_some() {
+            return Err(invalid("plan preflight requires an autocommit session"));
+        }
+        let schemas = self
+            .committed
+            .tables
+            .iter()
+            .map(|(name, table)| (name.clone(), table.rows.schema()))
+            .collect();
+        SqlView::preflight(
+            query,
+            schemas,
+            IncrementalOptimizer::default().require_incremental(),
+        )
+        .await
+    }
+
     /// Execute exactly one SQL statement.
     ///
     /// A statement error aborts an active explicit transaction until ROLLBACK.
@@ -489,6 +512,26 @@ impl SqlSession {
                 let ctx = sql::context(&tx.snapshot, RelationScope::BaseTables)?;
                 let plan = sql::plan_query(&ctx, &definition).await?;
                 let dependencies = sql::reads(&plan)?;
+                let schemas = dependencies
+                    .iter()
+                    .map(|name| {
+                        let table = tx.snapshot.tables.get(name).ok_or_else(|| {
+                            invalid("MV definitions may reference base tables only")
+                        })?;
+                        Ok((name.clone(), table.rows.schema()))
+                    })
+                    .collect::<Result<_>>()?;
+                let preflight = SqlView::preflight(
+                    &definition,
+                    schemas,
+                    IncrementalOptimizer::default().require_incremental(),
+                )
+                .await?;
+                if !preflight.strict_plan_eligible {
+                    return Err(Error::PlanRejected {
+                        report: Box::new(preflight),
+                    });
+                }
                 let tables = dependencies
                     .iter()
                     .map(|n| {

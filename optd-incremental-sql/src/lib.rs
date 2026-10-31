@@ -18,6 +18,7 @@ mod group_state;
 mod keyed_state;
 mod metrics;
 pub mod planner;
+mod planning;
 mod row_blocks;
 mod source_state;
 pub mod source_vector;
@@ -38,6 +39,7 @@ pub use engine::{
 pub use error::{Error, Result};
 pub use metrics::{AccumulatorWork, DistinctWork, ValueIndexWork};
 pub use planner::Strategy;
+pub use planning::{NodePreflight, PlanBlocker, PlanPreflight};
 pub use work::{
     CacheRelationWork, RefreshWork, RelationWork, RowEncodingWork, RowReadWork, SourceStateWork,
     StateCopyWork,

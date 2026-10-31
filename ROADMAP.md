@@ -54,7 +54,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R08 | P1 | Incremental source ingestion | Read changed files/native changes rather than both full endpoints; qualify delete-file semantics and source provenance separately from host-local atomicity | pending |
 | R09a | P2 | Physical algorithm alternatives and cost selection | Compare qualified delta/indexed/scoped algorithms using measured state and change sizes; strict mode never silently selects full recomputation | pending |
 | R09b | P2 | Reusable execution templates | Avoid repeatedly planning/materializing local DataFusion expressions; inputs remain epoch-correct and task-isolated | pending |
-| R09c | P1 | Plan preflight and complete blockers | Enumerate every blocking node with precise function/type/scope reason before CREATE MV; unsupported plans publish nothing | in_progress |
+| R09c | P1 | Plan preflight and complete blockers | Enumerate every blocking node with precise function/type/scope reason before CREATE MV; unsupported plans publish nothing | verified |
 | R10a | P0 | Scaling and work-scope regressions | Hold changes, bucket size and required output fixed; grow untouched data; assert source reads, state copies, materialization and writes separately | pending |
 | R10b | P1 | Long-running randomized SQL/recovery loops | Mix transactions, duplicate/NULL/key moves, hot keys, window peers, discarded candidates and deterministic crash points; independent SQL and delta-prefix oracles | pending |
 | R10c | P1 | Controlled performance qualification | Record machine, source/data/binary identities and isolated state; compare full vs incremental at multiple change ratios; no performance claim from correctness durations | pending |
@@ -1006,5 +1006,77 @@ Claimed after R03c 733a0eb, ahead of further maintenance algorithms so qualifica
 can identify all remaining blockers without executing a non-strict bootstrap.
 [Complete plan preflight](docs/src/incremental/plan_preflight.md) defines shared
 schema-bound rule/Optd compilation, complete deterministic reports, exact admission
-reasons and strict refusal before CREATE source materialization/publication. Local
-source/design review is complete; implementation and verification remain pending.
+reasons and strict refusal before CREATE source materialization/publication. The
+accepted design was committed as ef5fd82 before implementation. Shared planning-only
+compilation now feeds both schema preflight and actual view bootstrap; rules remain
+separate from runtime operators/state. PlanPreflight records every blocked admitted
+graph node in deterministic order, exact expressions/types, rule/phase and the final
+physical strategy. A diagnostic continuation is never an executable partial plan:
+compilation stores either a complete IncrementalPlan or its original typed error.
+Strict APIs preserve the first-node Rewrite envelope and expose the complete report
+through Error::plan_preflight(). Non-strict typed errors remain compatible.
+
+SqlView::preflight binds schemas without source-row execution or state conversion.
+SqlSession::preflight reads committed base-table schemas; transaction calls refuse.
+CREATE MV checks schemas before materializing dependencies, then the actual-data
+compiler repeats the same strict validation before source Bag/state initialization.
+The SQL database benchmark no longer constructs/executes a non-strict probe view.
+SQL optimization may fold immutable constants; schema preflight is not a promise
+that runtime arithmetic or materialization limits will succeed.
+
+**Verified RED/green:** strict creation previously exposed only the first generic
+aggregate policy error, with neither sum/avg casts nor ordering context. Log
+`target/roadmap-r09c-red-20261031.log` (exit 101). The initial regression passed
+after extraction, log `target/roadmap-r09c-green-20261031.log`. Six final integration
+cases cover all numeric branches and ordering, exact Float64/R03e/variance/key/
+partition context, schema-only versus empty/nonempty actual physical-plan parity,
+unmatched registries, independent match/rewrite/verification failures on both
+sources, final physical Replace introduced by a caller rule, and no physical
+source-row execution for a query that actually fails with division by zero.
+Existing strict/non-strict rule and recovery contracts pass unchanged.
+
+Failed ordinary CREATE leaves epoch, CURRENT bytes and all storage counters intact.
+Failed identified CREATE/retry performs no relation work or writes; existing retry
+history metadata reads are retained explicitly as R07c work. Refused requests do not
+reserve the ID: a later valid CREATE can use it, followed by DML and a correct reopen.
+An early test incorrectly expected request-history lookup to read no metadata; the
+original failure remains in `target/roadmap-r09c-targeted-20261031.log`. The physical
+rewrite test originally expected one transformed kernel; inspection showed both
+the pushed scan projection and visible alias projection match the caller rule.
+The test now asserts both exact rule identities, with original failure retained in
+`target/roadmap-r09c-targeted-final-20261031.log`. No product assertion or SQL oracle
+was relaxed to hide either observation.
+
+The work-report audit now retains unique-profile preflight refusals without a
+semantic pass, validates every failed-compilation/replacement node, and separates
+strict rejection, actual complete recomputation and failed compilation counts.
+Multiple profiles preserve their explicit evidence without selecting an arbitrary
+winner. Refusal contributes no imaginary executed work. Three added tool tests
+cover the known Q22 unknown-classification regression, contradictory/partial refusal
+records and failed compilation distinct from actual recomputation.
+
+**Verified final gates:** R01a Rust 1.95.0/offline/locked wrapper and project target/
+TMPDIR with `bash scripts/agent-check.sh sql` exited 0: fmt, both Clippy configurations,
+**263 default passed / 2 ignored**, **277 Iceberg passed / 3 ignored**. Log:
+`target/roadmap-r09c-final-gates-20261031.log`. Private rustdoc exited 0, log
+`target/roadmap-r09c-final-rustdoc-20261031.log`. SQL tools/fixture hashes exited 0:
+**44 tests**, log `target/roadmap-r09c-final-tools-20261031.log`. Earlier successful
+pre-cleanup gates/witnesses remain retained separately; final evidence is authoritative.
+
+After feature jobs ended, explicitly built and froze a default runner, then ran
+`python3 target/roadmap-r09c-final-preflight-witness-20261031.py` with the R01a wrapper
+(exit 0). Fresh **Q22 records all five Float64 AVG/R03e blockers and zero rounds**;
+the unified audit now records a known strict refusal (unknown=0), no semantic pass
+and no executed work. **Q28 passes three strict SQL DML/full-oracle rounds, nonempty
+changed output, reopen and output-history replay**. Source/runner/SQL/lockfile/report
+identities, exact commands and isolated roots:
+`target/roadmap-r09c-final-preflight-live-20261031/`. Log:
+`target/roadmap-r09c-final-witness-20261031.log`. Runner hashes are unchanged before/
+after. Full TPC, standard-scale and controlled performance remain unqualified;
+fixture acquisition and all refresh/storage work are separate from plan-only probing.
+
+mdBook exited 0, log `target/roadmap-r09c-final-docs-20261031.log`.
+**R09c is verified locally.** Implementation commit is titled
+`Preflight complete incremental plans before source and state bootstrap`; no push.
+Next owner: this task, R04a outer/semi/anti match-count maintenance, including an
+audit of NULL-aware anti joins whose global NULL dependency cannot use key scope alone.

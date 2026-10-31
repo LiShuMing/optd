@@ -217,6 +217,13 @@ impl IncrementalOptimizer {
         self
     }
 
+    /// Inspect the identical registry/programs while deferring only strict-policy refusal.
+    pub(crate) fn for_preflight(&self) -> Self {
+        let mut optimizer = self.clone();
+        optimizer.require_incremental = false;
+        optimizer
+    }
+
     pub(crate) fn requires_incremental(&self) -> bool {
         self.require_incremental
     }

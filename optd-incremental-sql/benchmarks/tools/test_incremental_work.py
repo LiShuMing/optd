@@ -51,7 +51,8 @@ class IncrementalWork(unittest.TestCase):
     def test_unexecuted_planned_blocker_prevents_strict_coverage_claim(self):
         result=audit(self.fixture())
         self.assertEqual(result["counts"],{"total":1,"semantic_pass":1,"strict_plan_eligible":0,
-                                            "complete_recompute":1,"plan_qualification_unknown":0})
+                                            "complete_recompute":1,"strict_plan_rejected":1,
+                                            "plan_compilation_failed":0,"plan_qualification_unknown":0})
         self.assertEqual(result["observed_work"]["accumulator_work.delta_input_rows"],6)
         self.assertFalse(result["end_to_end_delta_work_qualified"])
         self.assertEqual(result["queries_with_blocking_rule"],{"sort":1})
@@ -68,6 +69,50 @@ class IncrementalWork(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"contradict"):audit(bad)
         del source["queries"][0]["profiles"][0]["verification"]["rounds"][0]["sql_stats"]
         with self.assertRaisesRegex(ValueError,"structured"):audit(source)
+
+    def refusal(self):
+        source = self.fixture()
+        source["queries"][0]["with_pass"] = False
+        report = source["queries"][0]["profiles"][0]["verification"]
+        report.update(status="unsupported_strict_plan", completed_rounds=0, rounds=[])
+        return source
+
+    def test_known_preflight_refusal_is_never_erased_by_failed_semantics(self):
+        source = self.refusal()
+        result = audit(source)
+        self.assertEqual(result["counts"]["semantic_pass"], 0)
+        self.assertEqual(result["counts"]["plan_qualification_unknown"], 0)
+        self.assertEqual(result["counts"]["complete_recompute"], 1)
+        self.assertFalse(result["queries"][0]["strict_plan_eligible"])
+        self.assertEqual(result["queries_with_blocking_rule"], {"sort": 1})
+        self.assertEqual(result["observed_work"], {})
+        self.assertEqual(result["queries"][0]["preflight_profiles"][0]["profile"], "p")
+
+    def test_refusal_rejects_execution_or_contradictory_plan_and_keeps_profile_ambiguity(self):
+        for field, value in [("completed_rounds", 1), ("rounds", [{}]), ("plan_qualification", None)]:
+            source = self.refusal()
+            source["queries"][0]["profiles"][0]["verification"][field] = value
+            with self.assertRaisesRegex(ValueError, "zero executed rounds"):
+                audit(source)
+        source = self.refusal()
+        source["queries"][0]["profiles"].append({"profile": "unknown", "verification": {}})
+        query = audit(source)["queries"][0]
+        self.assertIsNone(query["strict_plan_eligible"])
+        self.assertEqual(len(query["preflight_profiles"]), 1)
+
+    def test_compilation_failure_is_a_blocker_but_never_a_semantic_pass(self):
+        source = self.refusal()
+        report = source["queries"][0]["profiles"][0]["verification"]
+        report["plan_qualification"]["planned_nodes"][1]["strategy"] = None
+        result = audit(source)
+        self.assertFalse(result["queries"][0]["strict_plan_eligible"])
+        self.assertEqual(result["counts"]["complete_recompute"], 0)
+        self.assertEqual(result["counts"]["plan_compilation_failed"], 1)
+        self.assertEqual(result["counts"]["strict_plan_rejected"], 1)
+        source["queries"][0]["with_pass"] = True
+        report.update(status="pass", completed_rounds=3, rounds=[{}] * 3)
+        with self.assertRaisesRegex(ValueError, "failed plan compilation"):
+            audit(source)
 
 
 class UnifiedWork(unittest.TestCase):
