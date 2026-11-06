@@ -8,7 +8,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use optd_incremental_sql::planner::IncrementalOptimizer;
 use optd_incremental_sql::SqlView;
 
-const BLOCKED: &str = "SELECT k,sum(CAST(v AS DOUBLE)) AS s FROM a GROUP BY k UNION ALL SELECT k,avg(v) AS s FROM b GROUP BY k ORDER BY k LIMIT 3";
+const BLOCKED: &str = "SELECT k,sum(CAST(v AS DOUBLE)) AS s FROM a GROUP BY k UNION ALL SELECT k,avg(CAST(v AS DOUBLE)/3.0) AS s FROM b GROUP BY k ORDER BY k LIMIT 3";
 
 fn tables() -> BTreeMap<String, RecordBatch> {
     let batch = RecordBatch::try_new(

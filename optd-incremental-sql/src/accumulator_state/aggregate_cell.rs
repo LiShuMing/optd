@@ -8,14 +8,17 @@ use datafusion::arrow::row::{RowConverter, SortField};
 use datafusion::common::ScalarValue;
 use datafusion::physical_expr::aggregate::AggregateFunctionExpr;
 
+use super::moments::{MomentOutput, Moments};
 use super::value_index::{Extremum, OrderedValues};
 use crate::error::invalid;
-use crate::metrics::{DistinctWork, ValueIndexWork};
+use crate::metrics::{DistinctWork, NumericWork, ValueIndexWork};
 use crate::{Error, Result};
 
 /// Aggregate SQL input multiplicity, qualified before physical state is constructed.
 pub(super) enum ArgumentMode {
     All,
+    ExactIntegerAverage,
+    Moments(MomentOutput),
     Distinct(DataType),
 }
 
@@ -23,6 +26,11 @@ pub(super) enum ArgumentMode {
 #[derive(Clone, Debug)]
 pub(super) enum Cell {
     Native(Vec<ScalarValue>),
+    ExactIntegerAverage {
+        states: Vec<ScalarValue>,
+        mass: u64,
+    },
+    Moments(Moments),
     Values(OrderedValues),
     Distinct {
         values: OrderedValues,
@@ -34,6 +42,8 @@ pub(super) enum Cell {
 #[derive(Clone, Debug)]
 enum Maintenance {
     Native,
+    ExactIntegerAverage,
+    Moments(MomentOutput),
     Extremum {
         direction: Extremum,
         converter: Arc<RowConverter>,
@@ -63,6 +73,7 @@ pub(super) struct InitialCell {
 pub(super) struct CellWork {
     pub(super) extrema: ValueIndexWork,
     pub(super) distinct: DistinctWork,
+    pub(super) numeric: NumericWork,
 }
 
 impl AggregateSpec {
@@ -72,36 +83,44 @@ impl AggregateSpec {
         builtin_name: &str,
         mode: ArgumentMode,
     ) -> Result<Self> {
-        let maintenance = match builtin_name {
-            "min" | "max" => {
-                let empty = expression.create_accumulator()?.evaluate()?;
-                let converter =
-                    Arc::new(RowConverter::new(vec![SortField::new(empty.data_type())])?);
-                Maintenance::Extremum {
-                    direction: if builtin_name == "min" {
-                        Extremum::Minimum
-                    } else {
-                        Extremum::Maximum
-                    },
-                    converter,
-                    empty,
+        let maintenance = if let ArgumentMode::Moments(kind) = mode {
+            Maintenance::Moments(kind)
+        } else {
+            match builtin_name {
+                "min" | "max" => {
+                    let empty = expression.create_accumulator()?.evaluate()?;
+                    let converter =
+                        Arc::new(RowConverter::new(vec![SortField::new(empty.data_type())])?);
+                    Maintenance::Extremum {
+                        direction: if builtin_name == "min" {
+                            Extremum::Minimum
+                        } else {
+                            Extremum::Maximum
+                        },
+                        converter,
+                        empty,
+                    }
                 }
-            }
-            _ => {
-                if !expression
-                    .create_sliding_accumulator()?
-                    .supports_retract_batch()
-                {
-                    return Err(invalid("aggregate cannot retract"));
-                }
-                match mode {
-                    ArgumentMode::All => Maintenance::Native,
-                    ArgumentMode::Distinct(argument_type) => Maintenance::Distinct {
-                        converter: Arc::new(RowConverter::new(vec![SortField::new(
-                            argument_type.clone(),
-                        )])?),
-                        argument_type,
-                    },
+                _ => {
+                    if !expression
+                        .create_sliding_accumulator()?
+                        .supports_retract_batch()
+                    {
+                        return Err(invalid("aggregate cannot retract"));
+                    }
+                    match mode {
+                        ArgumentMode::Moments(_) => {
+                            return Err(invalid("moment mode escaped numerical dispatch"))
+                        }
+                        ArgumentMode::All => Maintenance::Native,
+                        ArgumentMode::ExactIntegerAverage => Maintenance::ExactIntegerAverage,
+                        ArgumentMode::Distinct(argument_type) => Maintenance::Distinct {
+                            converter: Arc::new(RowConverter::new(vec![SortField::new(
+                                argument_type.clone(),
+                            )])?),
+                            argument_type,
+                        },
+                    }
                 }
             }
         };
@@ -109,6 +128,11 @@ impl AggregateSpec {
             expression,
             maintenance,
         })
+    }
+
+    /// Identify qualified stable moment cells for explicit numerical accounting.
+    pub(super) fn is_numeric(&self) -> bool {
+        matches!(self.maintenance, Maintenance::Moments(_))
     }
 
     /// Identify nodes that publish the optional extrema work domain.
@@ -124,11 +148,17 @@ impl AggregateSpec {
     /// Empty native states have identical outputs for ordinary and DISTINCT inputs.
     pub(super) fn initial(&self) -> Result<InitialCell> {
         Ok(match &self.maintenance {
+            Maintenance::Moments(_) => InitialCell {
+                state: Cell::Moments(Moments::default()),
+                output: ScalarValue::Float64(None),
+            },
             Maintenance::Extremum { empty, .. } => InitialCell {
                 state: Cell::Values(OrderedValues::default()),
                 output: empty.clone(),
             },
-            Maintenance::Native | Maintenance::Distinct { .. } => {
+            Maintenance::Native
+            | Maintenance::ExactIntegerAverage
+            | Maintenance::Distinct { .. } => {
                 let mut accumulator = self.expression.create_sliding_accumulator()?;
                 let output = accumulator.evaluate()?;
                 let states = accumulator.state()?;
@@ -137,6 +167,8 @@ impl AggregateSpec {
                         values: OrderedValues::default(),
                         states,
                     }
+                } else if matches!(self.maintenance, Maintenance::ExactIntegerAverage) {
+                    Cell::ExactIntegerAverage { states, mass: 0 }
                 } else {
                     Cell::Native(states)
                 };
@@ -154,6 +186,27 @@ impl AggregateSpec {
         work: &mut CellWork,
     ) -> Result<ScalarValue> {
         match (&self.maintenance, cell) {
+            (Maintenance::Moments(kind), Cell::Moments(moments)) => {
+                let ([positive], [negative]) = (positive, negative) else {
+                    return Err(invalid("moments require one argument"));
+                };
+                moments.apply(positive, negative, *kind, &mut work.numeric)
+            }
+            (Maintenance::ExactIntegerAverage, Cell::ExactIntegerAverage { states, mass }) => {
+                let ([positive_array], [negative_array]) = (positive, negative) else {
+                    return Err(invalid("exact integer average requires one argument"));
+                };
+                let removed = integer_mass(negative_array)?;
+                let added = integer_mass(positive_array)?;
+                let next = mass
+                    .checked_sub(removed)
+                    .and_then(|n| n.checked_add(added))
+                    .filter(|n| *n <= (1u64 << 53))
+                    .ok_or_else(|| Error::ExactIntegerAverage)?;
+                let output = self.apply_native(states, positive, negative)?;
+                *mass = next;
+                Ok(output)
+            }
             (Maintenance::Native, Cell::Native(states)) => {
                 self.apply_native(states, positive, negative)
             }
@@ -246,4 +299,26 @@ fn membership_array(values: Vec<ScalarValue>, data_type: &DataType) -> Result<Ar
 fn add_count(counter: &mut usize, amount: usize) -> Result<()> {
     *counter = counter.checked_add(amount).ok_or(Error::Overflow)?;
     Ok(())
+}
+
+/// Absolute integral mass bounds every partial native sum, regardless of batch order.
+fn integer_mass(array: &ArrayRef) -> Result<u64> {
+    let mut mass = 0u64;
+    for index in 0..array.len() {
+        match ScalarValue::try_from_array(array, index)? {
+            ScalarValue::Float64(None) => {}
+            ScalarValue::Float64(Some(value))
+                if value.is_finite()
+                    && value.fract() == 0.0
+                    && value.abs() <= (1u64 << 53) as f64 =>
+            {
+                mass = mass
+                    .checked_add(value.abs() as u64)
+                    .filter(|n| *n <= (1u64 << 53))
+                    .ok_or_else(|| Error::ExactIntegerAverage)?;
+            }
+            _ => return Err(Error::ExactIntegerAverage),
+        }
+    }
+    Ok(mass)
 }

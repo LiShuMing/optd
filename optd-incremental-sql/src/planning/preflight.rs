@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::planner::plan::SnapshotDependency;
 use crate::planner::{RuleIdentity, Strategy};
 
 /// One normalized logical node and the physical behavior actually selected for it.
@@ -19,6 +20,9 @@ pub struct NodePreflight {
     pub rule: Option<RuleIdentity>,
     /// Final physical behavior; absent when compilation failed.
     pub strategy: Option<Strategy>,
+    /// Complete reads in the final physical plan, including their delta guards.
+    /// This does not describe external source, checkpoint or indexed bucket IO.
+    pub snapshot_dependencies: Vec<SnapshotDependency>,
 }
 
 /// One blocked node; multiple independent nodes are never collapsed to the first error.
@@ -46,6 +50,8 @@ pub struct PlanBlocker {
 pub struct PlanPreflight {
     /// True exactly when compilation succeeds without complete-node replacements.
     pub strict_plan_eligible: bool,
+    /// Floating result positions derived from stable numerical cells; other columns stay exact.
+    pub numerical_columns: Vec<usize>,
     /// Nodes in deterministic dependency order, including successful siblings.
     pub planned_nodes: Vec<NodePreflight>,
     /// Every failed compilation or complete-node replacement in that order.

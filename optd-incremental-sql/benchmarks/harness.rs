@@ -30,8 +30,11 @@ type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 type Tables = BTreeMap<String, RecordBatch>;
 type Bag = BTreeMap<Vec<u8>, i64>;
 
+#[path = "numeric_comparison.rs"]
+mod numeric_comparison;
 #[path = "query_mode.rs"]
 mod query_mode;
+use numeric_comparison::equal_result;
 
 #[path = "database_harness.rs"]
 mod database_harness;
@@ -47,8 +50,18 @@ fn plan_qualification(view: &SqlView) -> Value {
             "reason":view.incremental_plan().nodes()[node.id].reason})
         })
         .collect::<Vec<_>>();
+    let planned_nodes = strategies
+        .iter()
+        .map(|node| {
+            let mut record = json!(node);
+            record["inputs"] = json!(view.incremental_plan().nodes()[node.id].inputs);
+            record["snapshot_dependencies"] =
+                json!(view.incremental_plan().programs()[node.id].snapshot_dependencies());
+            record
+        })
+        .collect::<Vec<_>>();
     json!({"strict_plan_eligible":blockers.is_empty(),"complete_recompute_blockers":blockers,
-        "planned_nodes":strategies,"work_scope":"operator_local_excludes_full_cache_source_and_checkpoint_costs"})
+        "planned_nodes":planned_nodes,"numerical_columns":view.numerical_columns().unwrap_or_default(),"work_scope":"operator_local_excludes_full_cache_source_and_checkpoint_costs"})
 }
 
 struct OracleOutput {
@@ -307,9 +320,11 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
     let bootstrap = oracle(sql, &current)
         .await
         .map_err(|error| format!("oracle_bootstrap: {error}"))?;
-    let mut previous = bootstrap.rows;
+    let numerical_columns = view.numerical_columns()?;
+    let mut previous = view.contents()?;
     let bootstrap_schema = bootstrap.schema;
-    equal(&view.contents()?, &previous).map_err(|error| format!("compare_bootstrap: {error}"))?;
+    equal_result(&previous, &bootstrap.rows, &numerical_columns)
+        .map_err(|error| format!("compare_bootstrap: {error}"))?;
     let initial_rows = previous.num_rows();
     let mut rounds = Vec::new();
     for stage in [
@@ -344,10 +359,10 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
             let strategy = format!("{:?}", candidate.stats());
             let sql_stats = candidate.stats().clone();
             let expected = oracle(sql, &current).await.map_err(|error| format!("oracle_{stage}: {error}"))?;
-            verify_delta(&previous, &expected.rows, &delta).map_err(|error| format!("compare_delta_{stage}: {error}"))?;
+            verify_delta(&previous, candidate.contents(), &delta).map_err(|error| format!("compare_delta_{stage}: {error}"))?;
             view.acknowledge(candidate)?;
-            equal(&view.contents()?, &expected.rows).map_err(|error| format!("compare_result_{stage}: {error}"))?;
-            Ok((expected.rows.clone(), json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),"oracle_schema":expected.schema,"signed_delta_rows":delta.num_rows(),"stats":strategy,"sql_stats":sql_stats,"storage_work":null,"recovery_work":null,"source_work":null,"affected_scope_qualified":null,"performance_qualified":false})))
+            equal_result(&view.contents()?, &expected.rows,&numerical_columns).map_err(|error| format!("compare_result_{stage}: {error}"))?;
+            Ok((view.contents()?, json!({"stage":stage,"status":"pass","output_rows":expected.rows.num_rows(),"oracle_schema":expected.schema,"signed_delta_rows":delta.num_rows(),"stats":strategy,"sql_stats":sql_stats,"storage_work":null,"recovery_work":null,"source_work":null,"affected_scope_qualified":null,"performance_qualified":false})))
         }
         .await;
         match result {
@@ -389,7 +404,7 @@ async fn run_query(sql: &str, complete: &Tables, iceberg_root: Option<&Path>) ->
         "pass"
     };
     Ok(
-        json!({"status":status,"reason":failure,"plan_qualification":qualification,"registered_tables":registered_tables,"initial_rows":initial_rows,"bootstrap_oracle_schema":bootstrap_schema,"last_verified_rows":previous.num_rows(),"final_rows":if completed_rounds==3 {Some(previous.num_rows())} else {None},"completed_rounds":completed_rounds,"nonempty_result_seen":nonempty_result_seen,"output_delta_seen":output_delta_seen,"all_rounds_empty":all_rounds_empty,"rounds":rounds,"oracle":"independent_DataFusion_full_SQL","comparison":"typed_bag_and_signed_endpoint_delta","ordered_presentation_checked":false}),
+        json!({"status":status,"reason":failure,"plan_qualification":qualification,"registered_tables":registered_tables,"initial_rows":initial_rows,"bootstrap_oracle_schema":bootstrap_schema,"last_verified_rows":previous.num_rows(),"final_rows":if completed_rounds==3 {Some(previous.num_rows())} else {None},"completed_rounds":completed_rounds,"nonempty_result_seen":nonempty_result_seen,"output_delta_seen":output_delta_seen,"all_rounds_empty":all_rounds_empty,"rounds":rounds,"oracle":"independent_DataFusion_full_SQL","comparison":"exact_typed_bag_and_signed_endpoint_delta_with_declared_numerical_lineage","numerical_contract":{"columns":numerical_columns,"absolute":numeric_comparison::ABSOLUTE,"relative":numeric_comparison::RELATIVE},"ordered_presentation_checked":false}),
     )
 }
 

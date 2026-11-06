@@ -22,12 +22,17 @@ pub struct NodeStats {
     /// Actual affected-bucket snapshot work, excluding full cache/source I/O.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyed_work: Option<KeyedWork>,
-    /// Delta-only retractable aggregate work, excluding full relation caches.
+    /// Retractable aggregate work, including optional counted-value numerical rebases.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accumulator_work: Option<AccumulatorWork>,
+    /// Actual ordered-rank range maintenance, absent for other operators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank_work: Option<RankWork>,
 }
 
-/// Actual aggregate-state work; historical group rows are never read on this path.
+/// Aggregate-state work, excluding full relation caches and source/checkpoint I/O.
+/// Historical complete input rows are not read; numerical cells separately count
+/// visits to their retained argument-value indexes in `numeric_work`.
 #[derive(Clone, Debug, Serialize)]
 pub struct AccumulatorWork {
     /// Distinct groups changed by this batch.
@@ -46,6 +51,9 @@ pub struct AccumulatorWork {
     /// Actual DISTINCT function membership work; absent for ordinary/older nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub distinct_work: Option<DistinctWork>,
+    /// Stable moment updates and counted-value rebases, absent for exact-only nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numeric_work: Option<NumericWork>,
 }
 
 /// Operator-local ordered-value maintenance, summed across touched groups/functions.
@@ -168,4 +176,34 @@ pub struct RefreshStats {
     /// Full relation-cache rebuilds and state-directory copies during prepare.
     /// This does not include SQL DML, external-source IO, checkpoints or recovery.
     pub work: crate::RefreshWork,
+}
+
+/// Actual ordered-rank work; an early insertion can legitimately affect the whole suffix.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RankWork {
+    /// Inserted and retracted complete input rows.
+    pub delta_input_rows: usize,
+    /// Peer keys with nonzero consolidated input changes.
+    pub changed_peers: usize,
+    /// Old/new peers traversed in affected ranges, excluding skipped prefixes/gaps.
+    pub visited_peers: usize,
+    /// Historical rows read from visited peers, excluding predecessor metadata lookups.
+    pub historical_input_rows: usize,
+    /// Distinct complete signed output changes after consolidation.
+    pub output_delta_rows: usize,
+    /// Shared ordered-directory nodes actually cloned by the candidate.
+    pub directory_entries_copied: usize,
+}
+
+/// Work on stable numerical argument state; rebases are limited to touched groups.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NumericWork {
+    /// Non-NULL argument updates and retractions.
+    pub observations: usize,
+    /// Touched cells numerically rebuilt from counted values.
+    pub rebases: usize,
+    /// Distinct historical argument values visited during rebases (not expanded rows).
+    pub rebase_values: usize,
+    /// Shared value-directory nodes actually cloned.
+    pub directory_entries_copied: usize,
 }

@@ -163,6 +163,117 @@ fn keyed_join(left_type: DataType, right_type: DataType) -> Result<LogicalPlan> 
 }
 
 #[test]
+fn scalar_cardinality_and_fragment_qualification_are_structural() -> Result<()> {
+    use datafusion::functions_aggregate::expr_fn::count;
+    use datafusion::logical_expr::{lit, Expr, JoinType};
+
+    let aggregate = LogicalPlanBuilder::from(scan(None)?)
+        .aggregate(Vec::<Expr>::new(), vec![count(col("t.x")).alias("n")])?
+        .build()?;
+    let scalar = LogicalPlanBuilder::from(aggregate.clone())
+        .project(vec![col("n")])?
+        .alias("s")?
+        .build()?;
+    assert!(super::capability::exactly_one_row(&scalar));
+    for plan in [
+        scan(None)?,
+        LogicalPlanBuilder::from(aggregate.clone())
+            .filter(col("n").gt(lit(0_i64)))?
+            .build()?,
+        LogicalPlanBuilder::from(aggregate)
+            .limit(0, Some(1))?
+            .build()?,
+        LogicalPlanBuilder::from(scan(None)?)
+            .aggregate(vec![col("t.x")], vec![count(col("t.y"))])?
+            .build()?,
+    ] {
+        assert!(!super::capability::exactly_one_row(&plan));
+    }
+    let mut plan = LogicalPlanBuilder::from(scan(None)?)
+        .join(
+            scalar,
+            JoinType::Left,
+            (Vec::<&str>::new(), Vec::<&str>::new()),
+            Some(lit(true)),
+        )?
+        .build()?;
+    // SQL scalar decorrelation removes the literal true predicate. Construct
+    // that exact optimized shape; the builder requires a condition initially.
+    let LogicalPlan::Join(join) = &mut plan else {
+        panic!("builder made a join")
+    };
+    join.filter = None;
+    let program = Maintenance::Delta(DeltaExpr::ScalarProduct {
+        left: Box::new(DeltaExpr::InputDelta(0)),
+        right: Box::new(DeltaExpr::InputSnapshotWhenChanged {
+            input: 1,
+            version: super::SnapshotVersion::Before,
+            trigger: 0,
+        }),
+    });
+    verify(&RuleContext::new(2, &plan, &[0, 1], false, false), &program)?;
+    for mode in 0..4 {
+        let mut changed = plan.clone();
+        let LogicalPlan::Join(join) = &mut changed else {
+            panic!("builder made a join")
+        };
+        match mode {
+            0 => join.filter = Some(lit(false)),
+            1 => join.null_aware = true,
+            2 => join.right = Arc::new(scan(None)?),
+            _ => join.join_type = JoinType::Full,
+        }
+        assert!(verify(
+            &RuleContext::new(2, &changed, &[0, 1], false, false),
+            &program
+        )
+        .is_err());
+    }
+    let invalid = Maintenance::Delta(DeltaExpr::ScalarProduct {
+        left: Box::new(DeltaExpr::InputDelta(0)),
+        right: Box::new(DeltaExpr::InputSnapshotWhenChanged {
+            input: 1,
+            version: super::SnapshotVersion::Before,
+            trigger: 2,
+        }),
+    });
+    assert!(verify(&RuleContext::new(2, &plan, &[0, 1], false, false), &invalid).is_err());
+    Ok(())
+}
+
+#[test]
+fn physical_guard_cannot_substitute_another_delta_even_with_the_same_schema() -> Result<()> {
+    use super::plan::{logical, Operation};
+    let plan = keyed_join(DataType::Int64, DataType::Int64)?;
+    let context = RuleContext::new(2, &plan, &[0, 1], false, false);
+    let schema = Arc::new(plan.inputs()[0].schema().as_arrow().clone());
+    let root = logical(
+        Operation::SnapshotReadWhenChanged {
+            input: 0,
+            version: super::SnapshotVersion::After,
+            schema: schema.clone(),
+            trigger: 1,
+        },
+        vec![logical(
+            Operation::DeltaRead {
+                input: 0,
+                schema: schema.clone(),
+            },
+            vec![],
+        )],
+    );
+    let reads = std::collections::BTreeMap::from([(0, schema.clone()), (1, schema)]);
+    let error = super::verify_plan::verify(&root, false, &context, &None, &reads).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("trigger is not its declared delta"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
 fn scoped_join_admission_checks_both_key_types_before_execution() -> Result<()> {
     use super::{KeyScope, SnapshotVersion};
     for (left, right, eligible) in [
@@ -350,6 +461,76 @@ fn match_join_frontend_admits_residuals_but_refuses_inner_and_null_aware_operato
         )?);
         let context = RuleContext::new(2, &plan, &[0, 1], false, false);
         assert_eq!(verify(&context, &Maintenance::MatchJoin).is_ok(), eligible);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordered_rank_has_separate_state_and_rejects_other_windows_and_wrong_delta() -> Result<()> {
+    use super::plan::{IncrementalNode, Operation};
+    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+    let ctx = datafusion::prelude::SessionContext::new();
+    ctx.register_batch(
+        "t",
+        RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
+            "x",
+            DataType::Int64,
+            true,
+        )]))),
+    )?;
+    for (sql, eligible) in [
+        ("SELECT rank() OVER (ORDER BY x) FROM t", true),
+        ("SELECT dense_rank() OVER (ORDER BY x) FROM t", false),
+        ("SELECT row_number() OVER (ORDER BY x) FROM t", false),
+        (
+            "SELECT rank() OVER (PARTITION BY x ORDER BY x) FROM t",
+            false,
+        ),
+        ("SELECT rank() OVER () FROM t", false),
+    ] {
+        let plan = ctx.state().create_logical_plan(sql).await?;
+        let mut window = None;
+        plan.apply(|node| {
+            if matches!(node, LogicalPlan::Window(_)) {
+                window = Some(node.clone());
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })?;
+        let plan = window.expect("test SQL contains one window");
+        assert_eq!(crate::rank_state::eligible(&plan)?, eligible);
+        let context = RuleContext::new(2, &plan, &[0], false, false);
+        assert_eq!(verify(&context, &Maintenance::Rank).is_ok(), eligible);
+        if !eligible {
+            continue;
+        }
+        let optimizer = IncrementalOptimizer::default();
+        let selected = optimizer.rewrite_node(&context)?;
+        assert_eq!(selected.rule.name, "builtin.window.rank");
+        let program = super::lower::compile(&context, &selected.maintenance, vec![], &[])?;
+        assert_eq!(program.strategy(), super::Strategy::RankDelta);
+        let original = program.physical.clone();
+        // Same-schema input 1 is still the wrong source: schema checks alone are insufficient.
+        let mut reads = std::collections::BTreeMap::from([(
+            0,
+            Arc::new(plan.inputs()[0].schema().as_arrow().clone()),
+        )]);
+        reads.insert(1, reads[&0].clone());
+        let IncrementalNode::Physical(operation) = &original.typ else {
+            panic!("physical root")
+        };
+        let wrong = super::plan::logical(
+            operation.clone(),
+            vec![super::plan::logical(
+                Operation::DeltaRead {
+                    input: 1,
+                    schema: reads[&1].clone(),
+                },
+                vec![],
+            )],
+        );
+        assert!(
+            super::verify_plan::verify(&wrong, false, &context, &program.state, &reads).is_err()
+        );
     }
     Ok(())
 }

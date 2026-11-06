@@ -79,9 +79,16 @@ pub struct StateCopyWork {
     pub window_output_entries: usize,
     /// Retractable aggregate group entries cloned, with shared accumulator cells.
     pub accumulator_entries: usize,
+    /// Ordered rank peer-directory entries cloned.
+    pub rank_entries: usize,
 }
 
 impl StateCopyWork {
+    /// Record actual ordered rank path copies, excluding shared peer payloads.
+    pub(crate) fn record_ranks(&mut self, entries: usize) -> Result<()> {
+        add(&mut self.rank_entries, entries)
+    }
+
     /// Record actual group-directory path copies after candidate updates.
     pub(crate) fn record_groups(&mut self, entries: usize) -> Result<()> {
         add(&mut self.group_entries, entries)
@@ -130,6 +137,9 @@ pub struct RefreshWork {
 /// Actual maintained relation update, demand and replacement boundaries.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct CacheRelationWork {
+    /// Complete snapshot reads enabled/skipped by explicit upstream delta guards.
+    /// Counts actual consumed rows even when an Arrow cache is already materialized.
+    pub guarded_snapshots: GuardedSnapshotWork,
     /// Actual graph leaf expansions demanded by complete snapshots/root outputs.
     pub demanded_leaves: RelationWork,
     /// Distinct-row Arrow batches used for lazy graph leaf identity/boundary checks.
@@ -144,6 +154,30 @@ pub struct CacheRelationWork {
     pub complete_caches: RowMaterializationWork,
     /// Arrow collection and leaf bootstrap for complete physical replacements.
     pub replacement_bootstrap: RowBootstrapWork,
+}
+
+/// Actual conditional complete-snapshot accesses, excluding indexed reads and root output.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct GuardedSnapshotWork {
+    /// Nonempty triggers that demanded a complete positive input relation.
+    pub reads: usize,
+    /// Empty consolidated triggers that avoided all access to that snapshot.
+    pub skipped_reads: usize,
+    /// Expanded rows supplied by the demanded snapshots, including duplicates.
+    pub rows: usize,
+}
+
+impl GuardedSnapshotWork {
+    /// Record a consumed complete snapshot, including an empty positive relation.
+    pub(crate) fn record_read(&mut self, rows: usize) -> Result<()> {
+        add(&mut self.reads, 1)?;
+        add(&mut self.rows, rows)
+    }
+
+    /// Record a disabled read before touching the referenced relation.
+    pub(crate) fn record_skip(&mut self) -> Result<()> {
+        add(&mut self.skipped_reads, 1)
+    }
 }
 
 /// Distinct-row validation/encoding at a retained graph leaf, without weight expansion.

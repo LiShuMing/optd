@@ -28,7 +28,7 @@ def numeric_leaves(value, prefix, work):
 
 
 def node_work(node, work):
-    for prefix in ["accumulator_work", "group_work", "keyed_work"]:
+    for prefix in ["accumulator_work", "group_work", "keyed_work", "rank_work"]:
         values = node.get(prefix)
         if values is None:
             continue

@@ -588,7 +588,8 @@ async fn unqualified_numeric_types_and_modifiers_do_not_select_indexed_accumulat
     for sql in [
         "SELECT min(CAST(v AS DOUBLE)), max(CAST(v AS DOUBLE)) FROM t",
         "SELECT sum(CAST(v AS DOUBLE)), min(v) FROM t",
-        "SELECT avg(v), max(v) FROM t",
+        // Integer AVG now has a qualified exact-mass cell; general float arithmetic does not.
+        "SELECT avg(CAST(v AS DOUBLE) / 3.0), max(v) FROM t",
         "SELECT k, min(v) FILTER (WHERE v > 0) FROM t GROUP BY k",
     ] {
         let view = SqlView::new(

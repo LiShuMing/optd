@@ -99,6 +99,7 @@ pub(crate) async fn compile(
     let mut programs = Vec::with_capacity(nodes.len());
     let mut report = PlanPreflight {
         strict_plan_eligible: false,
+        numerical_columns: super::numerical_columns(&nodes)?,
         planned_nodes: Vec::with_capacity(nodes.len()),
         blockers: Vec::new(),
     };
@@ -115,6 +116,7 @@ pub(crate) async fn compile(
             operator: node.plan.display().to_string(),
             rule: None,
             strategy: None,
+            snapshot_dependencies: Vec::new(),
         };
         let result = (|| {
             let grouped = SqlView::admits_group_index(ctx, &node.plan)?;
@@ -131,6 +133,7 @@ pub(crate) async fn compile(
             )?;
             let strategy = program.strategy();
             diagnostic.strategy = Some(strategy);
+            diagnostic.snapshot_dependencies = program.snapshot_dependencies();
             // Build the next symbolic binding before recording policy refusal;
             // a binding failure is the sole diagnostic for that failed node.
             let after =

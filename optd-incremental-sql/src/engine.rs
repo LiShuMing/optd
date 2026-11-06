@@ -19,6 +19,7 @@ use crate::group_state::{supported_key, GroupState, KeyPolicy};
 use crate::keyed_state::KeyedState;
 use crate::planner::plan::StateSpec;
 use crate::planner::{IncrementalOptimizer, IncrementalPlan, Strategy};
+use crate::rank_state::RankState;
 use crate::row_blocks::RowBlocks;
 use crate::source_state::SourceState;
 use crate::store::Snapshot;
@@ -49,6 +50,7 @@ pub struct PreparedSqlRefresh {
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
     accumulators: Vec<Option<AccumulatorState>>,
+    ranks: Vec<Option<RankState>>,
     delta: Bag,
     output: RecordBatch,
     stats: RefreshStats,
@@ -83,6 +85,7 @@ pub struct SqlView {
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
     accumulators: Vec<Option<AccumulatorState>>,
+    ranks: Vec<Option<RankState>>,
     tables: BTreeMap<String, SourceState>,
     ctx: SessionContext,
 }
@@ -101,6 +104,12 @@ pub(crate) fn context() -> SessionContext {
 }
 
 impl SqlView {
+    /// Floating result positions with the explicitly documented stable numerical contract.
+    /// Source images, other columns and signed-delta replay retain exact identity.
+    pub fn numerical_columns(&self) -> Result<Vec<usize>> {
+        crate::planning::numerical_columns(&self.nodes)
+    }
+
     /// Rebuild exactly the committed sources and validate its result before
     /// restoring the logical epoch. Source provenance is validated by its owner.
     pub(crate) async fn restore_checkpoint_with_optimizer(
@@ -214,6 +223,7 @@ impl SqlView {
             states: vec![],
             keyed: vec![None; group_slots.len()],
             accumulators: vec![None; group_slots.len()],
+            ranks: vec![None; group_slots.len()],
             groups: group_slots,
             tables: source,
             ctx,
@@ -231,14 +241,25 @@ impl SqlView {
             };
             out.states.push(Relation::new(batch)?);
             match &out.incremental_plan.programs()[id].state {
-                Some(StateSpec::Accumulator {
+                Some(StateSpec::Rank {
                     input, operator, ..
                 }) => {
-                    out.accumulators[id] = Some(AccumulatorState::new(
+                    out.ranks[id] = Some(RankState::new(
                         &out.ctx,
                         operator,
                         &out.states[*input].rows.materialize()?.batch,
                     )?);
+                }
+                Some(StateSpec::Accumulator {
+                    input, operator, ..
+                }) => {
+                    let state = AccumulatorState::new(
+                        &out.ctx,
+                        operator,
+                        &out.states[*input].rows.materialize()?.batch,
+                    )?;
+                    out.states[id] = Relation::new(state.contents()?)?;
+                    out.accumulators[id] = Some(state);
                 }
                 Some(StateSpec::Group {
                     input, projection, ..
@@ -339,6 +360,7 @@ impl SqlView {
                 group_work: None,
                 keyed_work: None,
                 accumulator_work: None,
+                rank_work: None,
             })
             .collect()
     }
@@ -528,6 +550,7 @@ impl SqlView {
         let mut groups = self.groups.clone();
         let mut keyed = self.keyed.clone();
         let mut accumulators = self.accumulators.clone();
+        let mut ranks = self.ranks.clone();
         let mut deltas: Vec<Bag> = Vec::with_capacity(self.nodes.len());
         // A sorted relation can reorder without changing its bag (for example,
         // projecting away a modified sort key). LIMIT must still be refreshed.
@@ -538,6 +561,7 @@ impl SqlView {
             let mut group_work = None;
             let mut keyed_work = None;
             let mut accumulator_work = None;
+            let mut rank_work = None;
             let schema = self.states[id].rows.schema();
             // Scans own a raw-source dependency even though they have no graph
             // children. This binding is independent of the selected rule.
@@ -575,6 +599,7 @@ impl SqlView {
                         keyed: &self.keyed,
                         groups: &self.groups,
                         accumulators: &self.accumulators,
+                        ranks: &self.ranks,
                     },
                     &mut stats.work,
                 )
@@ -593,6 +618,10 @@ impl SqlView {
                 if let Some(index) = result.accumulator {
                     accumulators[id] = Some(index);
                 }
+                if let Some(index) = result.rank {
+                    ranks[id] = Some(index);
+                }
+                rank_work = result.rank_work;
                 accumulator_work = result.accumulator_work;
                 keyed_work = result.keyed_work;
                 group_work = result.group_work;
@@ -645,6 +674,7 @@ impl SqlView {
                     group_work,
                     keyed_work,
                     accumulator_work,
+                    rank_work,
                 });
             }
             let changed_sequence = if node.ordered {
@@ -683,6 +713,7 @@ impl SqlView {
             groups,
             keyed,
             accumulators,
+            ranks,
             delta,
             output,
             stats,
@@ -700,6 +731,7 @@ impl SqlView {
         self.groups = candidate.groups;
         self.keyed = candidate.keyed;
         self.accumulators = candidate.accumulators;
+        self.ranks = candidate.ranks;
         Ok(())
     }
 }

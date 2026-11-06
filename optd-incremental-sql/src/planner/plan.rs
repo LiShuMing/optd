@@ -10,6 +10,7 @@ use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, LogicalPlanBuil
 use optd_core::heuristics::HeuristicsOptimizer;
 use optd_core::nodes::{ArcPlanNode, NodeType, PlanNode, PlanNodeOrGroup};
 use optd_core::rules::Rule;
+use serde::Serialize;
 
 use super::{KeyScope, SnapshotVersion};
 use crate::{Error, Result};
@@ -130,6 +131,15 @@ pub struct IndexSpec {
 /// State declarations are separate from execution operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateSpec {
+    /// Ordered peer counts and committed ranks for a qualified window.
+    Rank {
+        /// Stable state slot.
+        id: usize,
+        /// Original upstream relation.
+        input: usize,
+        /// Qualified window expressions and exact output schema.
+        operator: RelationOperator,
+    },
     /// Retractable builtin aggregates with typed key/argument expressions.
     Accumulator {
         /// Stable state slot.
@@ -161,11 +171,33 @@ pub enum ApplyMode {
     SignedLinear,
     /// Bilinear lifting, including positive negative-times-negative products.
     SignedJoin,
+    /// Signed product fragments for a structurally qualified scalar Left Join.
+    /// The physical kernel never NULL-extends fragment inputs.
+    SignedScalarProduct,
+}
+
+/// Complete snapshot access declared by the final physical program.
+/// A scalar change can legitimately require the complete opposite relation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotDependency {
+    /// Global graph input whose complete relation can be consumed.
+    pub input: usize,
+    /// Required immutable relation version.
+    pub version: SnapshotVersion,
+    /// Global input whose nonempty signed delta enables access; None is unconditional.
+    pub trigger: Option<usize>,
 }
 
 /// Logical operations and their physical implementation vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Operation {
+    /// Maintain ordered peer counts and emit exact affected rank changes.
+    UpdateRank {
+        /// Declared rank state slot.
+        state: usize,
+        /// Exact output schema.
+        schema: SchemaRef,
+    },
     /// Apply signed changes to a qualified aggregate state and emit output changes.
     UpdateAccumulator {
         /// Declared accumulator state slot.
@@ -188,6 +220,17 @@ pub enum Operation {
         version: SnapshotVersion,
         /// Complete typed upstream output schema.
         schema: SchemaRef,
+    },
+    /// A complete relation read guarded by a specific upstream delta input.
+    SnapshotReadWhenChanged {
+        /// Global relation ID to read.
+        input: usize,
+        /// Required committed/candidate version.
+        version: SnapshotVersion,
+        /// Exact positive input schema.
+        schema: SchemaRef,
+        /// Global delta ID, also supplied as the sole child of this operation.
+        trigger: usize,
     },
     /// Raw named-source changes or its candidate snapshot.
     SourceRead {
@@ -312,8 +355,10 @@ impl Operation {
     pub fn name(&self) -> &'static str {
         match self {
             Self::UpdateAccumulator { .. } => "UpdateAccumulator",
+            Self::UpdateRank { .. } => "UpdateRank",
             Self::DeltaRead { .. } => "DeltaRead",
             Self::SnapshotRead { .. } => "SnapshotRead",
+            Self::SnapshotReadWhenChanged { .. } => "SnapshotReadWhenChanged",
             Self::SourceRead { .. } => "SourceRead",
             Self::Empty(_) => "Empty",
             Self::Sum => "Sum",
@@ -357,6 +402,32 @@ pub struct CompiledProgram {
 }
 
 impl CompiledProgram {
+    /// Report actual complete reads after all caller transformation rules.
+    /// Indexed/group reads have separate scope declarations in StateSpec.
+    pub fn snapshot_dependencies(&self) -> Vec<SnapshotDependency> {
+        self.steps
+            .iter()
+            .filter_map(|step| match step.operation {
+                Operation::SnapshotRead { input, version, .. } => Some(SnapshotDependency {
+                    input,
+                    version,
+                    trigger: None,
+                }),
+                Operation::SnapshotReadWhenChanged {
+                    input,
+                    version,
+                    trigger,
+                    ..
+                } => Some(SnapshotDependency {
+                    input,
+                    version,
+                    trigger: Some(trigger),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Report the behavior of the final physical program, including caller rewrites.
     pub fn strategy(&self) -> super::Strategy {
         if self
@@ -367,6 +438,7 @@ impl CompiledProgram {
             super::Strategy::OperatorRecompute
         } else {
             match self.state {
+                Some(StateSpec::Rank { .. }) => super::Strategy::RankDelta,
                 Some(StateSpec::Accumulator { .. }) => super::Strategy::AccumulatorDelta,
                 Some(StateSpec::Keyed(_))
                     if self.steps.iter().any(|step| {
@@ -426,6 +498,17 @@ pub fn explain(root: &IncrementalRel) -> String {
                 }
                 Operation::SnapshotRead { input, version, .. } => {
                     let _ = write!(output, " input={input} version={version:?}");
+                }
+                Operation::SnapshotReadWhenChanged {
+                    input,
+                    version,
+                    trigger,
+                    ..
+                } => {
+                    let _ = write!(
+                        output,
+                        " input={input} version={version:?} trigger={trigger}"
+                    );
                 }
                 Operation::SourceRead { name, delta, .. } => {
                     let _ = write!(output, " source={name} delta={delta}");

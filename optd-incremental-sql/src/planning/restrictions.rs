@@ -64,7 +64,7 @@ pub(super) fn details(context: &RuleContext<'_>) -> Result<Vec<String>> {
                 }
             }
             if !context.accumulator_eligible() {
-                details.push("accumulator admission requires canonical COUNT/SUM/AVG/MIN/MAX, qualified keys/modifiers and exact SUM/AVG arithmetic; floating numerical qualification is not enabled".into());
+                details.push("accumulator admission requires canonical COUNT/SUM/AVG/MIN/MAX, qualified keys/modifiers and exact arithmetic; integer-to-Float64 AVG uses a checked absolute mass bound, while general floating aggregates remain unqualified".into());
             }
             if !context.group_eligible() {
                 details.push("affected-group admission requires nonempty supported keys and qualified aggregate functions/argument types".into());
@@ -93,6 +93,10 @@ pub(super) fn details(context: &RuleContext<'_>) -> Result<Vec<String>> {
             details.push(format!(
                 "qualified common nonempty partition scope={}",
                 context.supports_key_scope(KeyScope::WindowPartitions)?
+            ));
+            details.push(format!(
+                "qualified ordered rank state={}",
+                crate::rank_state::eligible(context.logical_plan())?
             ));
             details.extend(
                 window

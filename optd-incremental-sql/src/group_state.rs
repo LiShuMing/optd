@@ -207,6 +207,11 @@ impl GroupUpdate {
     }
 }
 
+/// Group equality folds signed zero, while join/value-index admission stays separate.
+pub(crate) fn supported_group_key(data_type: &DataType, policy: KeyPolicy) -> bool {
+    matches!(data_type, DataType::Float32 | DataType::Float64) || supported_key(data_type, policy)
+}
+
 pub(crate) fn supported_key(data_type: &DataType, policy: KeyPolicy) -> bool {
     match data_type {
         DataType::Null

@@ -31,6 +31,12 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    /// Integer AVG's absolute contribution mass cannot be represented exactly in binary64.
+    #[error("exact integer average exceeds the binary64 absolute mass domain")]
+    ExactIntegerAverage,
+    /// A numerical input or moment cannot be represented by the qualified finite state.
+    #[error("stable numerical aggregate requires finite representable moments")]
+    NumericDomain,
     /// Signed row multiplicity cannot be represented.
     #[error("signed row multiplicity overflow")]
     Overflow,

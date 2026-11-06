@@ -34,6 +34,29 @@ No result in either manifest is a successful execution claim. SQL qualification,
 nonempty result coverage, standard-data coverage, durability, and performance
 are separate facts.
 
+### Scalar-product gap qualification
+
+The [execution specification](../../docs/src/incremental/strict_gap_execution_spec.md)
+tracks the strict-plan repair batches. Current plan reports include
+`planned_nodes[].snapshot_dependencies`: global input ID, `Before`/`After`
+version and optional global delta `trigger`. These describe complete snapshot
+reads in the final physical program; indexed scopes remain separately declared.
+`refresh_work.guarded_snapshots` records actual `reads`, `skipped_reads` and
+expanded `rows`, including cache hits. A scalar change may legitimately broadcast
+to the full preserved relation. Older missing fields mean unknown, not zero.
+These diagnostics do not qualify source ingestion, checkpoint IO or performance.
+
+Run focused SQL/recovery and scaling regressions with:
+
+```sh
+cargo test -p optd-incremental-sql --test scalar_product
+```
+
+Re-run unchanged Q9 with `benchmark_sql_database`, the existing directed or
+public-generator manifest, a fresh database root, and explicit deadline. Retain
+the original coverage file and compare a new report; do not overwrite the frozen
+baseline or merge different binary/profile results into a fresh full-suite claim.
+
 ## Reproduce fixture identities
 
 From the repository root:
@@ -269,3 +292,32 @@ for type, schema, delete-file and resource boundaries.
 `scripts/agent-check.sh sql-tools` verifies prepared public source hashes and
 runs all Python tool tests offline; it fails if sources are missing. CI prepares
 those ignored public sources in an explicit preceding fetch step.
+
+### Numeric groups and ordered rank qualification
+
+The [numeric/rank design](../../docs/src/incremental/strict_numeric_and_rank_design.md)
+separates group equality, complete-row identity and numerical accuracy.
+Float32/64 group keys fold signed zero and retain NaN payload identity. Integer
+AVG uses an exact binary64 absolute-mass bound of 2^53; exceeding it rejects the
+candidate rather than changing algorithms. STDDEV/sample/population and paired
+floating means use centered moments and counted-value rebasing in affected groups.
+`accumulator_work.numeric_work` records observations, rebases and distinct values
+visited; it is not evidence of delta-only numerical work.
+
+Preflight and `SqlView::numerical_columns()` identify floating result positions
+with numerical lineage. Benchmark reports declare abs=1e-10, rel=1e-9 on those
+positions only. Other columns, keys, NULLs, row membership/multiplicity and source
+bags remain exact. Signed output logs replay exact maintained endpoints separately
+from numerical full-SQL agreement. A filter or join membership difference fails.
+
+Unpartitioned builtin RANK uses `StateSpec::Rank` / `UpdateRank` and reports
+`RankDelta` with `rank_work`: actual changed/visited peers, historical rows,
+output changes and directory copies. End insertions avoid the unchanged prefix;
+early insertions may necessarily change the complete suffix. Original outer
+ordering and Top-K remain separate gates from the relational-core profile.
+
+Focused reproduction:
+
+```sh
+cargo test -p optd-incremental-sql --test numeric_groups --test moments --test rank_state
+```

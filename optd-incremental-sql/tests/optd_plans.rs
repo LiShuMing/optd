@@ -206,6 +206,7 @@ async fn window_group_and_accumulator_plans_expose_different_state_contracts() {
                         assert!(program.steps.iter().any(|s| s.operation.name() == name));
                     }
                 }
+                Some(StateSpec::Rank { .. }) => panic!("these fixtures have no global rank"),
                 None => {}
             }
         }

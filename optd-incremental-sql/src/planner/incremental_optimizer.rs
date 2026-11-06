@@ -21,6 +21,8 @@ pub enum Strategy {
     MatchCountDelta,
     /// Update retractable aggregate state using only inserted/deleted rows.
     AccumulatorDelta,
+    /// Maintain ordered peer counts and only affected rank ranges.
+    RankDelta,
     /// Re-evaluate only groups whose indexed input multiset changed.
     ChangedGroupRecompute,
     /// Evaluate only indexed affected keys/partitions, subtracting their snapshots.

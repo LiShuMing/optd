@@ -109,6 +109,38 @@ pub(super) fn verify(
                 })
                 .collect::<Result<Vec<_>>>()?;
             let output = match operation {
+                Operation::UpdateRank { state, schema } => {
+                    arity(&types, 1)?;
+                    let Some(StateSpec::Rank {
+                        id,
+                        input,
+                        operator,
+                    }) = self.state
+                    else {
+                        return Err(invalid("missing rank declaration"));
+                    };
+                    if depth != 0
+                        || state != id
+                        || !crate::rank_state::eligible(self.context.logical_plan())?
+                        || schema != &operator.schema()
+                        || types[0]
+                            != Type::Relation(std::sync::Arc::new(
+                                operator.inputs[0].as_arrow().clone(),
+                            ))
+                    {
+                        return Err(invalid("rank state/schema differs"));
+                    }
+                    let PlanNodeOrGroup::PlanNode(child) = &node.children[0] else {
+                        return Err(invalid("unbound rank delta"));
+                    };
+                    if !matches!(&child.typ, IncrementalNode::Logical(Operation::DeltaRead {input:i,..}) | IncrementalNode::Physical(Operation::DeltaRead {input:i,..}) if i == input)
+                    {
+                        return Err(invalid("rank must read its declared input delta"));
+                    }
+                    self.preparations.insert(node.clone());
+                    self.completions += 1;
+                    Type::Relation(schema.clone())
+                }
                 Operation::UpdateAccumulator { state, schema } => {
                     arity(&types, 1)?;
                     let Some(StateSpec::Accumulator {
@@ -180,6 +212,31 @@ pub(super) fn verify(
                     }
                     Type::Relation(schema.clone())
                 }
+                Operation::SnapshotReadWhenChanged {
+                    input,
+                    version: _,
+                    schema,
+                    trigger,
+                } => {
+                    arity(&types, 1)?;
+                    if !self.context.inputs().contains(input)
+                        || !self.context.inputs().contains(trigger)
+                        || self.reads.get(input) != Some(schema)
+                    {
+                        return Err(invalid("guarded snapshot escapes declared inputs"));
+                    }
+                    let child = node.child_rel(0);
+                    if !matches!(&child.typ,
+                        IncrementalNode::Logical(Operation::DeltaRead { input, .. })
+                        | IncrementalNode::Physical(Operation::DeltaRead { input, .. })
+                        if input == trigger)
+                    {
+                        return Err(invalid(
+                            "guarded snapshot trigger is not its declared delta",
+                        ));
+                    }
+                    Type::Relation(schema.clone())
+                }
                 Operation::Sum => {
                     let first = types.first().ok_or_else(|| invalid("empty sum"))?;
                     relation(first)?;
@@ -195,6 +252,18 @@ pub(super) fn verify(
                 }
                 Operation::Apply { operator, mode } => {
                     match mode {
+                        ApplyMode::SignedScalarProduct
+                            if !super::capability::scalar_product_eligible(
+                                self.context.logical_plan(),
+                            ) || operator
+                                != &RelationOperator::from_logical(
+                                    self.context.logical_plan(),
+                                )? =>
+                        {
+                            return Err(invalid(
+                                "scalar product requires its original qualified join",
+                            ))
+                        }
                         ApplyMode::SignedJoin if !matches!(operator.template.as_ref(), LogicalPlan::Join(j) if j.join_type == JoinType::Inner) => {
                             return Err(invalid("signed join requires inner join"))
                         }

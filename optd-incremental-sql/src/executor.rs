@@ -19,9 +19,12 @@ use crate::keyed_state::{KeyedState, KeyedUpdate};
 use crate::metrics::{AccumulatorWork, GroupWork, KeyedWork};
 use crate::planner::plan::{ApplyMode, Operation, PhysicalStep, RelationOperator};
 use crate::planner::SnapshotVersion;
+use crate::rank_state::RankState;
 use crate::row_blocks::RowBlocks;
 use crate::source_state::SourceState;
 use crate::{Error, Result};
+
+mod scalar_product;
 
 pub(crate) async fn execute(ctx: &SessionContext, plan: LogicalPlan) -> Result<RecordBatch> {
     let schema = Arc::new(plan.schema().as_arrow().clone());
@@ -88,6 +91,7 @@ pub(crate) struct Bindings<'a> {
     pub(crate) keyed: &'a [Option<KeyedState>],
     pub(crate) groups: &'a [Option<GroupState>],
     pub(crate) accumulators: &'a [Option<AccumulatorState>],
+    pub(crate) ranks: &'a [Option<RankState>],
 }
 
 pub(crate) struct ExecutionResult {
@@ -98,6 +102,8 @@ pub(crate) struct ExecutionResult {
     pub(crate) keyed_work: Option<KeyedWork>,
     pub(crate) group_work: Option<GroupWork>,
     pub(crate) accumulator: Option<AccumulatorState>,
+    pub(crate) rank: Option<RankState>,
+    pub(crate) rank_work: Option<crate::RankWork>,
     pub(crate) accumulator_work: Option<AccumulatorWork>,
 }
 struct ProjectedChange {
@@ -222,7 +228,13 @@ async fn signed_apply(
         if left.num_rows() == 0 || right.num_rows() == 0 {
             continue;
         }
-        let value = Bag::from_batch(&apply(ctx, operator, &[left.clone(), right.clone()]).await?)?;
+        let fragments = [left.clone(), right.clone()];
+        let output = if mode == ApplyMode::SignedScalarProduct {
+            scalar_product::apply(ctx, operator, &fragments).await?
+        } else {
+            apply(ctx, operator, &fragments).await?
+        };
+        let value = Bag::from_batch(&output)?;
         result = if negative {
             result.difference(&value)?
         } else {
@@ -247,11 +259,26 @@ pub(crate) async fn run(
     let mut next_keyed = None;
     let mut next_groups = None;
     let mut next_accumulator = None;
+    let mut next_rank = None;
+    let mut rank_work = None;
     let mut accumulator_work = None;
     let mut replacement = None;
     for step in steps {
         let inputs = step.inputs.iter().map(|i| &values[*i]).collect::<Vec<_>>();
         let value = match &step.operation {
+            Operation::UpdateRank { state, .. } => {
+                let index = bindings.ranks[*state]
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing rank state".into()))?;
+                let (positive, negative) = inputs[0].relation()?.bag.signed_parts()?;
+                let (next, delta, work) = index.update(&positive, &negative)?;
+                refresh_work
+                    .state_copies
+                    .record_ranks(work.directory_entries_copied)?;
+                next_rank = Some(next);
+                rank_work = Some(work);
+                Value::Relation(RelationValue::from_signed(delta)?)
+            }
             Operation::UpdateAccumulator { state, .. } => {
                 let index = bindings.accumulators[*state]
                     .as_ref()
@@ -277,6 +304,30 @@ pub(crate) async fn run(
                         &mut refresh_work.cache_work.demanded_leaves,
                     )?,
                 })?)
+            }
+            Operation::SnapshotReadWhenChanged {
+                input,
+                version,
+                schema,
+                ..
+            } => {
+                let work = &mut refresh_work.cache_work.guarded_snapshots;
+                if inputs[0].relation()?.bag.is_empty() {
+                    work.record_skip()?;
+                    Value::Relation(RelationValue::from_signed(Bag::empty(schema.clone()))?)
+                } else {
+                    let relation = match version {
+                        SnapshotVersion::Before => &bindings.before[*input],
+                        SnapshotVersion::After => &bindings.after[*input],
+                    };
+                    let batch = relation.rows.materialize_recorded(
+                        &mut refresh_work.cache_work.complete_caches,
+                        &mut refresh_work.cache_work.demanded_leaves,
+                    )?;
+                    let work = &mut refresh_work.cache_work.guarded_snapshots;
+                    work.record_read(batch.num_rows())?;
+                    Value::Relation(RelationValue::new(batch)?)
+                }
             }
             Operation::SourceRead { name, delta, .. } => {
                 Value::Relation(RelationValue::from_signed(if *delta {
@@ -538,6 +589,8 @@ pub(crate) async fn run(
         groups: next_groups,
         keyed_work,
         group_work,
+        rank: next_rank,
+        rank_work,
         accumulator: next_accumulator,
         accumulator_work,
     })

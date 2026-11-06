@@ -40,14 +40,14 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R03a | P1 | Global and grouped MIN/MAX value indexes | Reference-counted ordered values survive duplicate extrema, final deletion, NULL, empty input and restart; qualify TPC-H Q15 and TPC-DS Q23 | verified |
 | R03b | P1 | DISTINCT aggregate state | Per-value reference counts update on zero crossings; support global COUNT DISTINCT and mixed aggregates; qualify TPC-DS Q28 | verified |
 | R03c | P1 | GROUPING SETS / ROLLUP | Maintain each grouping set with a grouping identity; distinguish synthetic and real NULL; verify the nine historical ROLLUP blockers independently | verified |
-| R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | pending |
-| R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | pending |
+| R03d | P2 | Variance/STDDEV retractable aggregates | Define stable numerical state and deletion behavior; test TPC-DS Q17/Q39 against an independent oracle | in_progress |
+| R03e | P2 | Floating aggregate qualification | Explicit numerical/rounding contract, special-value and multibatch tests; no removal of existing guards merely to enlarge eligibility | in_progress |
 | R04a | P1 | Outer/semi/anti match-count algorithms | Handle first/last matches, two-sided changes, residuals, duplicates and NULL; avoid unchanged peer-pair recomputation beyond necessary output | verified |
 | R04b | P1 | Mark joins | Maintain TRUE/FALSE/UNKNOWN with correlated/null semantics; qualify TPC-DS Q10/Q35/Q45 | in_progress |
 | R04c | P2 | Non-equality joins and range indexes | Rules prove affected ranges; exact deletes and boundary movement tests; explicit refusal when no sound scope is available | pending |
 | R05a | P2 | Window-specific physical maintenance | Partition aggregates use accumulators; finite frames use ordered ranges; ranking tracks affected positions; preserve cached Before output and ties across restart | pending |
-| R05b | P2 | Unpartitioned windows, ordering and Top-K | Ordered state, ties, NULL order and delete refill preserve original SQL membership; internal ORDER BY/LIMIT remain semantic operators | pending |
-| R06 | P1 | Extensible dependency/impact contracts | Represent group keys, join keys, partitions, ranges and global dependencies; propagate threshold changes to unchanged source keys without missing outputs | pending |
+| R05b | P2 | Unpartitioned windows, ordering and Top-K | Ordered state, ties, NULL order and delete refill preserve original SQL membership; internal ORDER BY/LIMIT remain semantic operators | in_progress |
+| R06 | P1 | Extensible dependency/impact contracts | Represent group keys, join keys, partitions, ranges and global dependencies; propagate threshold changes to unchanged source keys without missing outputs | in_progress |
 | R07a | P1 | Delta logs and block checkpoints | Changed blocks/deltas replace full changed-relation payload writes; publication and SIGKILL recovery remain atomic | pending |
 | R07b | P1 | Persist operator state and restore incrementally | Version states and rule identity; recover with bounded replay; incompatible states fail or rebuild explicitly | pending |
 | R07c | P1 | Request indexes, history retention and compaction | Retry lookup avoids history traversal; compaction retains retry/replay/recovery reachability and never deletes live referenced files | pending |
@@ -1779,3 +1779,113 @@ target is `origin` / `refs/heads/main` via an ordinary fast-forward push. Confir
 the actual result by comparing remote main with the final local commit after
 push; this preparation record is not remote publication evidence. Ledger remains
 **13 verified, 1 in_progress, 17 pending**.
+
+
+### 2026-11-06 — current-source benchmark qualification
+
+See [the complete execution record](docs/src/incremental/benchmark_validation_20261106.md).
+The frozen 494-configuration baseline completed collection and identity checks:
+357 complete three-round comparisons, of which 314 were nonempty and changing;
+26 strict refusals, 47 fixture-import budget failures, 54 deadlines, and 10
+Iceberg launch-path errors remain separately recorded. The ten Iceberg samples
+subsequently passed with the same frozen executable and corrected /tmp artifact
+roots; baseline failures were not replaced.
+
+Across individual complete profiles, strict relational-core SQL loops have
+nonempty changing witnesses for 22/22 TPC-H and 86/99 TPC-DS, but the real-data
+strict SQL loop completed only 6/22 and 2/99 respectively. Most original SQL
+comparisons still include explicit recomputation. No full-TPC incremental or
+performance qualification is implied.
+
+Fixed-delta tests at 1,024/8,192/65,536 rows confirm bounded measured aggregate
+work while full-table checkpoint writes and DELETE/UPDATE selector scans remain.
+The real-lineitem Q6 deterministic mixed loop passed 32 writes, four rollbacks,
+four reopens and 41 comparisons each for full SQL and MV. This extends evidence
+for R10a/R10b but does not close their full acceptance criteria; R07a/R07b/R08 and
+R10c remain open. A width-aware benchmark importer repair and its independent
+follow-up are recorded in the execution document, without changing the engine
+budget or query/expected-result contract.
+
+### Strict-gap execution S1 — scalar products and guarded snapshot dependencies
+
+The owner requested an executable spec and implementation of the strict-gap
+repair sequence. [Execution spec](docs/src/incremental/strict_gap_execution_spec.md)
+defines S1–S6; [S1 qualification](docs/src/incremental/strict_gap_progress_20261106.md)
+records the actual scope and outstanding gates. R06 is now **in_progress**, for
+its scalar/global snapshot-dependency subset only. Ledger: **13 verified,
+2 in_progress, 16 pending**; no broad R06 or performance gate is closed.
+
+Implemented `builtin.scalar_product` for condition-free Left Join with a proven
+always-one-row right aggregate. Its signed product law and dedicated kernel
+preserve outer output schemas; guarded Before/After reads declare delta triggers
+and avoid disabled snapshot accesses. Final compiled dependencies and actual
+guarded read/skip/row counts flow into benchmark output.
+
+The old implementation failed the new strict-plan regression (exit 101). Actual
+default/Iceberg tests passed 331/345 with 2/3 existing ignores; 112 focused tests
+overlap those totals. Python benchmark tests passed 47; fmt, both all-target
+warnings-denied Clippy configurations and mdBook passed. Source hashes and reused
+dependency-cache scope are recorded; this is not a clean dependency rebuild.
+
+Q9's fifteen blockers are removed. Directed original/core SQL loops both pass;
+real generated original-SQL Arrow maintenance passes three rounds. A separate
+600s-budget real generated SQL/core run passed three DML/MV/reopen/history rounds
+in 243.830s. The two 180s real SQL timeouts remain failures. All other twelve
+previous refusals retain their blocker counts on both data profiles. No fresh
+full-99 coverage or controlled performance gain is claimed. Frozen baseline
+reports remain unchanged; new artifacts are in `target/strict-gap-20261106/`.
+
+### Strict-gap execution S2–S5 — numeric groups, moments and global RANK
+
+See [the design](docs/src/incremental/strict_numeric_and_rank_design.md) and
+[the independent qualification](docs/src/incremental/strict_batches_progress_20261106.md).
+R03d, R03e and R05b are now **in_progress**, for the qualified subsets below;
+ledger: **13 verified, 5 in_progress, 13 pending**. No broad row is closed by
+removing a guard or by a query's plan eligibility alone.
+
+Float32/64 grouping/DISTINCT now has explicit signed-zero and NaN identity rules.
+Integer-to-Float64 AVG maintains exact native state within a checked absolute
+integral-mass domain <= 2^53. STDDEV sample/population and same-argument paired
+means use centered moments and counted argument values, under the owner's
+separately approved abs=1e-10 / rel=1e-9 result-column contract. All source rows,
+keys, unrelated exact values, multiplicities and maintained-endpoint signed replay
+remain exact. Every changed numerical cell canonically rebases its affected
+counted values for exact source-based recovery; those visits are explicitly
+reported and may grow with affected-group cardinality.
+
+The separate Rank state/operation maintains one canonical unpartitioned RANK
+expression, preserving ties, compound ordering and NULL policy. Ordered predecessor
+metadata avoids prefix scans; zero rank shifts allow seeking past unchanged gaps.
+Necessary suffix changes remain measured output work. Tests at 32/4,096 peers
+observe zero historical rows for a tail insert, and two historical rows for
+content-only changes at the two ends. This does not implement original Top-K.
+
+All thirteen known relational-core queries completed three nonempty changing
+SQL DML/MV/reopen/history rounds on their directed witnesses with zero complete-node
+blockers. The same thirteen queries completed generated-data Arrow comparisons,
+with empty-only/unchanged outputs recorded separately. Six original-SQL directed
+configurations retain explicit sorting/row-bound refusal. Generated-data SQL
+runs preserve their separate successful and timed-out outcomes; neither Arrow
+nor directed witnesses certify those incomplete real-data SQL loops.
+
+New evidence is under `target/strict-batches-20261106/`; the 494-configuration and
+S1 reports stay frozen. A final numerical-lineage refinement has its own frozen
+binary and Q17/Q39 follow-ups rather than overwriting the main matrix.
+Final engineering gates and exact counts are recorded in the qualification.
+A separate effective-UPDATE follow-up addresses ten no-op UPDATE rounds in the
+main sequence: all thirteen directed queries changed their output after actual
+updates (62 source rows / net_changed_rows=124), with full-SQL comparison,
+source-image checks, reopen and exact stored output-history verification. These
+are independent one-update witnesses; the main outcomes remain unchanged.
+
+Still open: VAR_SAMP/VAR_POP (R03d), general floating SUM/AVG (R03e), specialized
+partition/frame operators (R05a), other global windows and sorting/Top-K (R05b),
+general dependency/range/NULL contracts (R06), checkpoint/operator persistence
+(R07), native input changes (R08), DELETE/UPDATE selection scans and controlled
+performance (R10). This is a targeted known-plan repair, not full-project or
+full-TPC performance completion.
+
+Final S2–S5 delivery checks: **344 default / 358 Iceberg passed**, with 2/3
+existing ignored gates; Python **48 passed**, both Clippy/private-rustdoc modes,
+fmt and mdBook passed. Final crate hashes and all process exits are recorded.
+These counts overlap repeated feature configurations; they are not unique cases.

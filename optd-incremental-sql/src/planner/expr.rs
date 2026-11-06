@@ -55,6 +55,16 @@ pub enum DeltaExpr {
         /// Whether to read its committed or candidate relation.
         version: SnapshotVersion,
     },
+    /// Read a complete input only when another original input has a nonzero delta.
+    /// An empty trigger produces a typed empty relation without snapshot access.
+    InputSnapshotWhenChanged {
+        /// Local input port whose complete positive snapshot is required.
+        input: usize,
+        /// Snapshot epoch required by the maintenance law.
+        version: SnapshotVersion,
+        /// Local input port whose consolidated delta enables the read.
+        trigger: usize,
+    },
     /// Positive input restricted to the shared affected equijoin-key closure.
     IndexedInputSnapshot {
         /// Original logical input port.
@@ -74,6 +84,14 @@ pub enum DeltaExpr {
         /// Expression having the original right input's complete schema.
         right: Box<DeltaExpr>,
     },
+    /// Signed product for a condition-free Left Join with a proven one-row RHS.
+    /// Fragments use product semantics, never outer NULL extension.
+    ScalarProduct {
+        /// Original left input schema.
+        left: Box<DeltaExpr>,
+        /// Original scalar input schema, including negative/positive replacements.
+        right: Box<DeltaExpr>,
+    },
     /// Checked addition of nonempty same-schema signed expressions.
     Sum(Vec<DeltaExpr>),
     /// Checked reversal of all signed row multiplicities.
@@ -87,6 +105,8 @@ pub enum DeltaExpr {
 pub enum Maintenance {
     /// Update qualified retractable aggregate states from signed changes only.
     Accumulate,
+    /// Maintain ordered peer counts and affected ranks.
+    Rank,
     /// Maintain equikey outer/semi/anti joins using indexed match-count transitions.
     MatchJoin,
     /// Compile this verified shorthand into Optd logical and physical plans.
@@ -113,6 +133,7 @@ impl Maintenance {
     pub fn strategy(&self) -> Strategy {
         match self {
             Self::Accumulate => Strategy::AccumulatorDelta,
+            Self::Rank => Strategy::RankDelta,
             Self::MatchJoin => Strategy::MatchCountDelta,
             Self::Delta(expr) if self.key_scope().is_some() && !expr.has_scoped_output() => {
                 Strategy::IndexedDelta
@@ -131,7 +152,9 @@ impl DeltaExpr {
             Self::ScopedSnapshot { .. } => true,
             Self::Linear(xs) | Self::Sum(xs) => xs.iter().any(Self::has_scoped_output),
             Self::Negate(x) => x.has_scoped_output(),
-            Self::Join { left, right } => left.has_scoped_output() || right.has_scoped_output(),
+            Self::Join { left, right } | Self::ScalarProduct { left, right } => {
+                left.has_scoped_output() || right.has_scoped_output()
+            }
             _ => false,
         }
     }
@@ -144,7 +167,7 @@ impl DeltaExpr {
                 Self::IndexedInputSnapshot { .. } => return Some(KeyScope::JoinKeys),
                 Self::Sum(xs) | Self::Linear(xs) => pending.extend(xs.iter().rev()),
                 Self::Negate(x) => pending.push(x),
-                Self::Join { left, right } => {
+                Self::Join { left, right } | Self::ScalarProduct { left, right } => {
                     pending.push(right);
                     pending.push(left);
                 }
@@ -160,7 +183,9 @@ impl DeltaExpr {
             | Self::IndexedInputSnapshot { version: v, .. } => *v == version,
             Self::Sum(xs) | Self::Linear(xs) => xs.iter().any(|x| x.reads_scoped(version)),
             Self::Negate(x) => x.reads_scoped(version),
-            Self::Join { left, right } => left.reads_scoped(version) || right.reads_scoped(version),
+            Self::Join { left, right } | Self::ScalarProduct { left, right } => {
+                left.reads_scoped(version) || right.reads_scoped(version)
+            }
             _ => false,
         }
     }
@@ -233,11 +258,14 @@ pub(super) fn verify(context: &RuleContext<'_>, maintenance: &Maintenance) -> Re
                 Err(Error::Invalid("unqualified match-count join".into()))
             }
         }
+        Maintenance::Rank if crate::rank_state::eligible(context.logical_plan())? => Ok(()),
+        Maintenance::Rank => Err(Error::Invalid("unqualified rank state".into())),
         Maintenance::Accumulate if context.accumulator_eligible() => Ok(()),
         Maintenance::Accumulate => Err(Error::Invalid("unqualified accumulator state".into())),
         Maintenance::Delta(expression) => {
             if !linear_operator(context.logical_plan())
                 && !matches!(context.logical_plan(), LogicalPlan::Join(join) if join.join_type == JoinType::Inner)
+                && !super::capability::scalar_product_eligible(context.logical_plan())
                 && expression.key_scope().is_none()
             {
                 return Err(Error::Invalid(
@@ -312,7 +340,13 @@ fn verify_expr(
         }
         DeltaExpr::InputDelta(input)
         | DeltaExpr::InputSnapshot { input, .. }
+        | DeltaExpr::InputSnapshotWhenChanged { input, .. }
         | DeltaExpr::IndexedInputSnapshot { input, .. } => {
+            if let DeltaExpr::InputSnapshotWhenChanged { trigger, .. } = expression {
+                if *trigger >= context.inputs().len() {
+                    return Err(Error::Invalid("invalid snapshot delta trigger port".into()));
+                }
+            }
             if matches!(expression, DeltaExpr::IndexedInputSnapshot { .. })
                 && !context.supports_key_scope(KeyScope::JoinKeys)?
             {
@@ -377,11 +411,16 @@ fn verify_expr(
                 Ok(())
             }
         }
-        DeltaExpr::Join { left, right } => {
-            if !matches!(context.logical_plan(), LogicalPlan::Join(join) if join.join_type == JoinType::Inner)
-            {
+        DeltaExpr::Join { left, right } | DeltaExpr::ScalarProduct { left, right } => {
+            let qualified = if matches!(expression, DeltaExpr::ScalarProduct { .. }) {
+                super::capability::scalar_product_eligible(context.logical_plan())
+            } else {
+                matches!(context.logical_plan(), LogicalPlan::Join(join) if join.join_type == JoinType::Inner)
+            };
+            if !qualified {
                 return Err(Error::Invalid(
-                    "Join signed lifting requires an inner join".into(),
+                    "signed product requires an inner join or a qualified scalar-product primitive"
+                        .into(),
                 ));
             }
             verify_schema(

@@ -6,6 +6,25 @@ use crate::Result;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::logical_expr::{Expr, ExprSchemable, JoinType, LogicalPlan};
 
+/// Prove cardinality structurally, independently of current data or estimates.
+/// Filters, grouping sets and row bounds deliberately do not inherit this proof.
+pub(super) fn exactly_one_row(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Aggregate(aggregate) => aggregate.group_expr.is_empty(),
+        LogicalPlan::Projection(projection) => exactly_one_row(&projection.input),
+        LogicalPlan::SubqueryAlias(alias) => exactly_one_row(&alias.input),
+        _ => false,
+    }
+}
+
+/// A condition-free left join with an always-present scalar is a bag product.
+pub(super) fn scalar_product_eligible(plan: &LogicalPlan) -> bool {
+    matches!(plan, LogicalPlan::Join(join)
+        if join.join_type == JoinType::Left && !join.null_aware
+            && join.on.is_empty() && join.filter.is_none()
+            && exactly_one_row(&join.right))
+}
+
 /// Match-count execution requires typed equikey scope without global NULL awareness.
 pub(super) fn match_join_eligible(context: &super::RuleContext<'_>) -> Result<bool> {
     Ok(matches!(context.logical_plan(), LogicalPlan::Join(join)

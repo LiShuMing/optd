@@ -32,10 +32,14 @@ fn literal(a: &ArrayRef, i: usize) -> Result<String> {
     Ok(format!("CAST({value} AS {})", sql_type(a.data_type())?))
 }
 fn insert(name: &str, b: &RecordBatch) -> Result<Vec<String>> {
+    const MAX_INSERT_ROWS: usize = 1024;
+    const MAX_INSERT_CELLS: usize = 8192;
     let mut statements = Vec::new();
-    // Keep binder expression counts and SQL buffers bounded even for larger fixtures.
-    for start in (0..b.num_rows()).step_by(1024) {
-        let rows = (start..(start + 1024).min(b.num_rows()))
+    // Each cell adds a typed CAST expression. Bound width as well as rows so wide
+    // fixtures respect the binder budget without changing the transaction boundary.
+    let chunk_rows = MAX_INSERT_ROWS.min((MAX_INSERT_CELLS / b.num_columns().max(1)).max(1));
+    for start in (0..b.num_rows()).step_by(chunk_rows) {
+        let rows = (start..(start + chunk_rows).min(b.num_rows()))
             .map(|i| {
                 Ok(format!(
                     "({})",
@@ -144,7 +148,12 @@ fn mutation(name: &str, b: &RecordBatch, update: bool) -> Result<(String, Record
         after,
     ))
 }
-async fn verify(db: &mut SqlSession, sql: &str, current: &Tables) -> Result<RecordBatch> {
+async fn verify(
+    db: &mut SqlSession,
+    sql: &str,
+    current: &Tables,
+    numerical_columns: &[usize],
+) -> Result<RecordBatch> {
     for (name, expected) in current {
         let actual = db
             .execute(&format!("SELECT * FROM {}", quote(name)))
@@ -159,9 +168,9 @@ async fn verify(db: &mut SqlSession, sql: &str, current: &Tables) -> Result<Reco
         .await?
         .rows
         .ok_or("missing view result")?;
-    equal(&actual, &expected)?;
+    equal_result(&actual, &expected, numerical_columns)?;
     db.verify_output_history()?;
-    Ok(expected)
+    Ok(actual)
 }
 
 // Streaming statements keeps one commit boundary without accumulating a >16MiB
@@ -220,6 +229,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         "strict_plan_eligible": probe.strict_plan_eligible,
         "complete_recompute_blockers": blockers,
         "planned_nodes": probe.planned_nodes,
+        "numerical_columns": probe.numerical_columns,
         "work_scope": "schema_bound_planning_only_no_bootstrap_execution",
     });
     if qualification["strict_plan_eligible"] != true {
@@ -268,7 +278,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         .await
         .map_err(|e| format!("bootstrap_ddl: {e}"))?;
     script.push_str(&format!("{ddl};\n"));
-    let mut previous = verify(&mut db, sql, &current).await?;
+    let mut previous = verify(&mut db, sql, &current, &probe.numerical_columns).await?;
     let initial_rows = previous.num_rows();
     let bootstrap_epoch = db.epoch();
     let mut nonempty = initial_rows > 0;
@@ -304,7 +314,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
             .map_err(|e| format!("{stage}: {e}"))?;
         let storage_after = db.store_work()?;
         let storage_work = storage_after.since(&storage_before)?;
-        let expected = verify(&mut db, sql, &current).await?;
+        let expected = verify(&mut db, sql, &current, &probe.numerical_columns).await?;
         let verification_before = db.store_work()?.since(&storage_after)?;
         nonempty |= expected.num_rows() > 0;
         output_changed |= bag(&previous)? != bag(&expected)?;
@@ -312,7 +322,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         db = SqlSession::open(root.join("warehouse")).await?;
         let recovery_work = db.recovery_work().clone();
         let reopened = db.store_work()?;
-        verify(&mut db, sql, &current).await?;
+        verify(&mut db, sql, &current, &probe.numerical_columns).await?;
         let verification_after = db.store_work()?.since(&reopened)?;
         rounds.push(
             json!({"stage":stage,"status":"pass","output_rows":expected.num_rows(),"commit":report,
@@ -327,13 +337,75 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     Ok(
         json!({"status":if !nonempty{"verified_empty_only"}else if !output_changed{"verified_unchanged_output"}else{"pass"},
         "plan_qualification":qualification,"bootstrap_epoch":bootstrap_epoch,"initial_rows":initial_rows,"final_rows":previous.num_rows(),"nonempty_result_seen":nonempty,"output_delta_seen":output_changed,
-        "completed_rounds":rounds.len(),"rounds":rounds,"oracle":"independent_DataFusion_full_SQL_over_independent_source_endpoints","comparison":"exact_typed_bag_sources_and_MV_plus_output_log_replay","sql_script":root.join("input.sql"),"warehouse":root.join("warehouse"),"performance_qualified":false}),
+        "completed_rounds":rounds.len(),"rounds":rounds,"oracle":"independent_DataFusion_full_SQL_over_independent_source_endpoints","comparison":"exact_sources_and_output_log_replay_with_declared_numerical_MV_lineage","numerical_contract":{"columns":probe.numerical_columns,"absolute":numeric_comparison::ABSOLUTE,"relative":numeric_comparison::RELATIVE},"sql_script":root.join("input.sql"),"warehouse":root.join("warehouse"),"performance_qualified":false}),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wide_import_preserves_one_commit_results_and_reopen() -> Result<()> {
+        let expressions = (0..64)
+            .map(|i| format!("CAST({i} AS BIGINT) AS c{i}"))
+            .collect::<Vec<_>>();
+        let row = oracle(&format!("SELECT {}", expressions.join(",")), &Tables::new())
+            .await?
+            .rows;
+        // More than one old row chunk with enough columns to exceed its binder budget.
+        let rows = concat_batches(&row.schema(), std::iter::repeat_n(&row, 1025))?;
+        let columns = row
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                Ok(format!(
+                    "{} {}",
+                    quote(field.name()),
+                    sql_type(field.data_type())?
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let root = tempfile::tempdir()?;
+        let mut db = SqlSession::open(root.path()).await?;
+        db.execute(&format!("CREATE TABLE input({})", columns.join(",")))
+            .await?;
+        db.execute("CREATE MATERIALIZED VIEW maintained_result AS SELECT COUNT(*) AS n,SUM(c63) AS total FROM input")
+            .await?;
+        let report = execute_batch(&mut db, &insert("input", &rows)?)
+            .await?
+            .ok_or("missing import commit")?;
+        assert_eq!(report.epoch, 3);
+        assert_eq!(report.affected_rows, 1025);
+        let expected = oracle(
+            "SELECT CAST(1025 AS BIGINT) AS n,CAST(64575 AS BIGINT) AS total",
+            &Tables::new(),
+        )
+        .await?
+        .rows;
+        for reopened in [false, true] {
+            if reopened {
+                drop(db);
+                db = SqlSession::open(root.path()).await?;
+            }
+            let source = db
+                .execute("SELECT * FROM input")
+                .await?
+                .rows
+                .ok_or("source")?;
+            equal(&source, &rows)?;
+            for sql in [
+                "SELECT COUNT(*) AS n,SUM(c63) AS total FROM input",
+                "SELECT * FROM maintained_result",
+            ] {
+                let actual = db.execute(sql).await?.rows.ok_or("result")?;
+                equal(&actual, &expected)?;
+            }
+            db.verify_output_history()?;
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn streaming_transaction_accepts_large_total_input_with_bounded_statements() -> Result<()>

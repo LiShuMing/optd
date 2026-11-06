@@ -63,6 +63,19 @@ impl Compiler<'_> {
             }),
             DeltaExpr::InputDelta(port) => self.input(*port, None),
             DeltaExpr::InputSnapshot { input, version } => self.input(*input, Some(*version)),
+            DeltaExpr::InputSnapshotWhenChanged {
+                input,
+                version,
+                trigger,
+            } => logical(
+                Operation::SnapshotReadWhenChanged {
+                    input: self.context.inputs()[*input],
+                    version: *version,
+                    schema: expected,
+                    trigger: self.context.inputs()[*trigger],
+                },
+                vec![self.input(*trigger, None)],
+            ),
             DeltaExpr::IndexedInputSnapshot { input, version } => logical(
                 Operation::IndexLookup {
                     state: self.context.node_id(),
@@ -108,10 +121,14 @@ impl Compiler<'_> {
                     .map(|(e, s)| self.expression(e, Arc::new(s.as_arrow().clone())))
                     .collect::<Result<_>>()?,
             ),
-            DeltaExpr::Join { left, right } => logical(
+            DeltaExpr::Join { left, right } | DeltaExpr::ScalarProduct { left, right } => logical(
                 Operation::Apply {
                     operator: self.operator.clone(),
-                    mode: ApplyMode::SignedJoin,
+                    mode: if matches!(expr, DeltaExpr::ScalarProduct { .. }) {
+                        ApplyMode::SignedScalarProduct
+                    } else {
+                        ApplyMode::SignedJoin
+                    },
                 },
                 vec![
                     self.expression(left, Arc::new(self.operator.inputs[0].as_arrow().clone()))?,
@@ -214,6 +231,20 @@ pub(crate) fn compile(
                 vec![token.clone()],
             );
             logical(Operation::CompleteIndex(spec.clone()), vec![token, delta])
+        }
+        Maintenance::Rank => {
+            state = Some(StateSpec::Rank {
+                id: context.node_id(),
+                input: context.inputs()[0],
+                operator: operator.clone(),
+            });
+            logical(
+                Operation::UpdateRank {
+                    state: context.node_id(),
+                    schema: operator.schema(),
+                },
+                vec![compiler.input(0, None)],
+            )
         }
         Maintenance::Accumulate => {
             state = Some(StateSpec::Accumulator {

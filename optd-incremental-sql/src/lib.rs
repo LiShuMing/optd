@@ -19,6 +19,7 @@ mod keyed_state;
 mod metrics;
 pub mod planner;
 mod planning;
+mod rank_state;
 mod row_blocks;
 mod source_state;
 pub mod source_vector;
@@ -37,7 +38,9 @@ pub use engine::{
     GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, TableChange,
 };
 pub use error::{Error, Result};
-pub use metrics::{AccumulatorWork, DistinctWork, MatchJoinWork, ValueIndexWork};
+pub use metrics::{
+    AccumulatorWork, DistinctWork, MatchJoinWork, NumericWork, RankWork, ValueIndexWork,
+};
 pub use planner::Strategy;
 pub use planning::{NodePreflight, PlanBlocker, PlanPreflight};
 pub use work::{

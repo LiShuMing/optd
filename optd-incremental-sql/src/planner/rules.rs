@@ -20,7 +20,9 @@ enum Builtin {
     Union,
     Repartition,
     InnerJoin,
+    ScalarProduct,
     Accumulator,
+    Rank,
     GroupedAggregate,
     OrderedRecompute,
     AggregateRecompute,
@@ -46,7 +48,9 @@ pub(super) fn builtins() -> Vec<Arc<dyn IncrementalRule>> {
         Builtin::Union,
         Builtin::Repartition,
         Builtin::InnerJoin,
+        Builtin::ScalarProduct,
         Builtin::Accumulator,
+        Builtin::Rank,
         Builtin::GroupedAggregate,
         Builtin::OrderedRecompute,
         Builtin::AggregateRecompute,
@@ -89,7 +93,9 @@ impl IncrementalRule for Builtin {
             Self::Union => "builtin.union",
             Self::Repartition => "builtin.repartition",
             Self::InnerJoin => "builtin.inner_join",
+            Self::ScalarProduct => "builtin.scalar_product",
             Self::Accumulator => "builtin.aggregate.accumulator",
+            Self::Rank => "builtin.window.rank",
             Self::GroupedAggregate => "builtin.grouped_aggregate",
             Self::OrderedRecompute => "builtin.ordered_recompute",
             Self::AggregateRecompute => "builtin.aggregate_recompute",
@@ -110,7 +116,7 @@ impl IncrementalRule for Builtin {
             100
         } else if matches!(self, Self::MatchCountJoin | Self::BooleanMarkJoin) {
             20
-        } else if matches!(self, Self::Accumulator) {
+        } else if matches!(self, Self::Accumulator | Self::ScalarProduct | Self::Rank) {
             10
         } else {
             0
@@ -149,10 +155,12 @@ impl IncrementalRule for Builtin {
             Self::InnerJoin => {
                 matches!(plan, LogicalPlan::Join(join) if join.join_type == JoinType::Inner)
             }
+            Self::ScalarProduct => super::capability::scalar_product_eligible(plan),
             Self::GroupedAggregate => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && context.group_eligible()
             }
             Self::Accumulator => context.accumulator_eligible(),
+            Self::Rank => crate::rank_state::eligible(plan)?,
             Self::OrderedRecompute => false,
             Self::AggregateRecompute => {
                 matches!(plan, LogicalPlan::Aggregate(_)) && !context.group_eligible()
@@ -186,9 +194,27 @@ impl IncrementalRule for Builtin {
 
     fn rewrite(&self, context: &RuleContext<'_>) -> Result<RuleRewrite> {
         let (maintenance, reason) = match self {
+            Self::Rank => (Maintenance::Rank, "maintain ordered peer counts; seek past unchanged prefixes and gaps; update only changed contents and rank-shifted suffix ranges"),
+            Self::ScalarProduct => (
+                Maintenance::Delta(DeltaExpr::Sum(vec![
+                    DeltaExpr::ScalarProduct {
+                        left: Box::new(DeltaExpr::InputDelta(0)),
+                        right: Box::new(DeltaExpr::InputSnapshotWhenChanged {
+                            input: 1, version: SnapshotVersion::Before, trigger: 0,
+                        }),
+                    },
+                    DeltaExpr::ScalarProduct {
+                        left: Box::new(DeltaExpr::InputSnapshotWhenChanged {
+                            input: 0, version: SnapshotVersion::After, trigger: 1,
+                        }),
+                        right: Box::new(DeltaExpr::InputDelta(1)),
+                    },
+                ])),
+                "proven one-row right aggregate: delta-left times scalar-before plus left-after times delta-scalar; guard each snapshot by the opposite delta; scalar changes broadcast to the full left relation",
+            ),
             Self::BooleanMarkJoin => (Maintenance::MatchJoin, "maintain Boolean preserved-row marks from indexed match counts; replace old/new flags at zero crossings"),
             Self::MatchCountJoin => (Maintenance::MatchJoin, "maintain equijoin match counts using delta-left/before-right then after-left/delta-right; peer membership changes only at zero crossings"),
-            Self::Accumulator => (Maintenance::Accumulate, "update qualified builtin aggregate state from insertions/retractions without reading historical group inputs"),
+            Self::Accumulator => (Maintenance::Accumulate, "update qualified builtin aggregate state from insertions/retractions without reading historical group inputs; integer-to-Float64 AVG checks absolute integral mass <= 2^53"),
             Self::Constant => (
                 Maintenance::Constant,
                 "source-independent constant relation",

@@ -5,6 +5,33 @@ from summarize_incremental_work import audit
 
 
 class IncrementalWork(unittest.TestCase):
+    def test_guarded_snapshot_work_counts_reads_skips_and_rows_without_inventing_legacy_zeros(self):
+        source = self.fixture()
+        rounds = source["queries"][0]["profiles"][0]["verification"]["rounds"]
+        for round_ in rounds:
+            round_["sql_stats"]["work"] = {"guarded_snapshots": {
+                "reads": 1, "skipped_reads": 1, "rows": 4096}}
+        work = audit(source)["observed_work"]
+        self.assertEqual(work["refresh_work.guarded_snapshots.reads"], 3)
+        self.assertEqual(work["refresh_work.guarded_snapshots.skipped_reads"], 3)
+        self.assertEqual(work["refresh_work.guarded_snapshots.rows"], 12288)
+        for round_ in rounds:
+            del round_["sql_stats"]["work"]["guarded_snapshots"]
+        self.assertFalse(any("guarded_snapshots" in key for key in audit(source)["observed_work"]))
+
+    def test_rank_work_preserves_range_counts_and_legacy_absence(self):
+        source = self.fixture()
+        rounds = source["queries"][0]["profiles"][0]["verification"]["rounds"]
+        for round_ in rounds:
+            round_["sql_stats"]["nodes"][0]["rank_work"] = {
+                "visited_peers": 2, "historical_input_rows": 4, "output_delta_rows": 7}
+        work = audit(source)["observed_work"]
+        self.assertEqual(work["rank_work.visited_peers"], 6)
+        self.assertEqual(work["rank_work.historical_input_rows"], 12)
+        for round_ in rounds:
+            del round_["sql_stats"]["nodes"][0]["rank_work"]
+        self.assertFalse(any("rank_work" in key for key in audit(source)["observed_work"]))
+
     def fixture(self):
         return {"suite":"tpch", "source_backend":"typed_arrow", "query_mode":"relational_core",
                 "queries":[{"query_id":1,"with_pass":True,"selected_complete_profile":{"profile":"p"},

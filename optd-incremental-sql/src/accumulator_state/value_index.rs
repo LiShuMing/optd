@@ -46,6 +46,13 @@ pub(super) struct OrderedValues {
 }
 
 impl OrderedValues {
+    /// Borrow counted scalar values for a touched numerical cell's rebase.
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&ScalarValue, u64)> {
+        self.values
+            .values()
+            .map(|entry| (&entry.value, entry.count as u64))
+    }
+
     /// Update one private cloned cell; callers discard it after any error.
     /// Full-row deletion validity belongs to the graph; this index checks value counts.
     pub(super) fn apply(

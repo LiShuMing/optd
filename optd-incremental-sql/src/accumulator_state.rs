@@ -6,22 +6,24 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, RecordBatch, UInt32Array};
 use datafusion::arrow::compute::take;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::common::ScalarValue;
+use datafusion::common::{utils::normalize_float_zero, ScalarValue};
 use datafusion::logical_expr::{Expr, ExprSchemable, LogicalPlan};
 use datafusion::physical_expr::aggregate::AggregateExprBuilder;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::prelude::SessionContext;
 
 use crate::bag::Bag;
-use crate::group_state::{encode_keys, supported_key, KeyPolicy};
+use crate::group_state::{encode_keys, supported_group_key, supported_key, KeyPolicy};
 use crate::metrics::AccumulatorWork;
 use crate::planner::plan::RelationOperator;
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
 mod aggregate_cell;
+mod moments;
 mod value_index;
 use aggregate_cell::{AggregateSpec, ArgumentMode, Cell, CellWork};
+use moments::MomentOutput;
 
 type Key = Vec<u8>;
 type PartitionRows = BTreeMap<Key, (Vec<ScalarValue>, Vec<u32>)>;
@@ -31,6 +33,61 @@ fn unalias(mut expr: &Expr) -> &Expr {
         expr = &alias.expr;
     }
     expr
+}
+
+/// Integer-to-binary64 AVG is qualified only with the cell's checked mass bound.
+fn integer_average(expr: &Expr, schema: &datafusion::common::DFSchema) -> Result<bool> {
+    let Expr::AggregateFunction(function) = unalias(expr) else {
+        return Ok(false);
+    };
+    if function.func.name() != "avg" || function.params.distinct || function.params.args.len() != 1
+    {
+        return Ok(false);
+    }
+    let Expr::Cast(cast) = unalias(&function.params.args[0]) else {
+        return Ok(false);
+    };
+    Ok(cast.field.data_type() == &DataType::Float64
+        && matches!(
+            cast.expr.get_type(schema)?,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::UInt64
+        ))
+}
+
+/// Stable floating means are admitted with an identical STDDEV argument in the same node.
+fn moment_mode(
+    expr: &Expr,
+    aggregate: &datafusion::logical_expr::Aggregate,
+) -> Result<Option<MomentOutput>> {
+    let Expr::AggregateFunction(f) = unalias(expr) else {
+        return Ok(None);
+    };
+    if f.params.distinct
+        || f.params.args.len() != 1
+        || f.params.args[0].get_type(aggregate.input.schema())? != DataType::Float64
+    {
+        return Ok(None);
+    }
+    Ok(match f.func.name() {
+        "stddev" => Some(MomentOutput::SampleStddev),
+        "stddev_pop" => Some(MomentOutput::PopulationStddev),
+        "avg"
+            if aggregate.aggr_expr.iter().any(|peer| {
+                matches!(unalias(peer),Expr::AggregateFunction(peer)
+            if matches!(peer.func.name(),"stddev"|"stddev_pop") && peer.params.args==f.params.args)
+            }) =>
+        {
+            Some(MomentOutput::Mean)
+        }
+        _ => None,
+    })
 }
 
 /// Admit only exact arithmetic and known retractable builtin implementations.
@@ -43,7 +100,7 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
     }
     for key in &agg.group_expr {
         if matches!(key, Expr::GroupingSet(_))
-            || !supported_key(
+            || !supported_group_key(
                 &key.get_type(agg.input.schema())?,
                 KeyPolicy {
                     binary_strings: true,
@@ -58,8 +115,10 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
         let Expr::AggregateFunction(f) = unalias(expr) else {
             return Ok(false);
         };
-        if !matches!(f.func.name(), "count" | "sum" | "avg" | "min" | "max")
-            || session.aggregate_functions().get(f.func.name()) != Some(&f.func)
+        if !matches!(
+            f.func.name(),
+            "count" | "sum" | "avg" | "min" | "max" | "stddev" | "stddev_pop"
+        ) || session.aggregate_functions().get(f.func.name()) != Some(&f.func)
             || f.params.filter.is_some()
             || !f.params.order_by.is_empty()
             || f.params.null_treatment.is_some()
@@ -71,6 +130,8 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
             "count" => datafusion::functions_aggregate::count::count_udaf(),
             "sum" => datafusion::functions_aggregate::sum::sum_udaf(),
             "avg" => datafusion::functions_aggregate::average::avg_udaf(),
+            "stddev" => datafusion::functions_aggregate::stddev::stddev_udaf(),
+            "stddev_pop" => datafusion::functions_aggregate::stddev::stddev_pop_udaf(),
             "min" => datafusion::functions_aggregate::min_max::min_udaf(),
             "max" => datafusion::functions_aggregate::min_max::max_udaf(),
             _ => return Ok(false),
@@ -100,6 +161,9 @@ pub(crate) fn eligible(ctx: &SessionContext, plan: &LogicalPlan) -> Result<bool>
             {
                 return Ok(false);
             }
+            continue;
+        }
+        if moment_mode(expr, agg)?.is_some() || integer_average(expr, agg.input.schema())? {
             continue;
         }
         if f.func.name() != "count" {
@@ -196,8 +260,12 @@ impl AccumulatorState {
                 .build()?;
             // The native cell receives ordinary values or DISTINCT zero crossings.
             // Its expression deliberately keeps the builder's DISTINCT=false default.
-            let mode = if f.params.distinct {
+            let mode = if let Some(kind) = moment_mode(expr, agg)? {
+                ArgumentMode::Moments(kind)
+            } else if f.params.distinct {
                 ArgumentMode::Distinct(f.params.args[0].get_type(agg.input.schema())?)
+            } else if integer_average(expr, agg.input.schema())? {
+                ArgumentMode::ExactIntegerAverage
             } else {
                 ArgumentMode::All
             };
@@ -216,6 +284,12 @@ impl AccumulatorState {
         let empty = RecordBatch::new_empty(input.schema());
         let (state, _, _) = state.update(input, &empty)?;
         Ok(state)
+    }
+
+    /// State-owned bootstrap output is required when numerical cells improve native rounding.
+    pub(crate) fn contents(&self) -> Result<RecordBatch> {
+        self.output(self.entries.values().map(|entry| entry.output.clone()))?
+            .to_batch()
     }
 
     fn empty_entry(&self, keys: Vec<ScalarValue>) -> Result<Entry> {
@@ -238,7 +312,11 @@ impl AccumulatorState {
         let arrays = self
             .keys
             .iter()
-            .map(|e| e.evaluate(batch)?.into_array(batch.num_rows()))
+            .map(|e| -> Result<ArrayRef> {
+                Ok(normalize_float_zero(
+                    &e.evaluate(batch)?.into_array(batch.num_rows())?,
+                ))
+            })
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let encoded = if arrays.is_empty() {
             vec![Vec::new(); batch.num_rows()]
@@ -372,6 +450,11 @@ impl AccumulatorState {
                 .iter()
                 .any(AggregateSpec::is_indexed)
                 .then_some(cell_work.extrema),
+            numeric_work: self
+                .functions
+                .iter()
+                .any(AggregateSpec::is_numeric)
+                .then_some(cell_work.numeric),
             distinct_work: self
                 .functions
                 .iter()

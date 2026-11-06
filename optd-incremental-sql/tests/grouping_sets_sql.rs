@@ -543,7 +543,7 @@ async fn duplicate_set_ordinals_cross_the_eight_bit_mask_boundary_without_losing
 
 #[tokio::test]
 async fn normalization_keeps_unqualified_floating_aggregate_refusal_explicit() {
-    let sql = "SELECT k,avg(v) FROM t GROUP BY ROLLUP(k)";
+    let sql = "SELECT k,avg(CAST(v AS DOUBLE)/3.0) FROM t GROUP BY ROLLUP(k)";
     let view = SqlView::new(sql, BTreeMap::from([("t".into(), input())]))
         .await
         .unwrap();

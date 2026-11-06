@@ -15,8 +15,8 @@ use optd_incremental_sql::{
     AccumulatorWork, DurableSqlView, RefreshStats, SqlView, Strategy, TableChange,
 };
 
-// Integer AVG is coerced to a floating argument by DataFusion 55 and remains
-// a fallback. This dedicated witness qualifies the admitted Decimal AVG path.
+// This witness independently exercises the exact Decimal AVG path, alongside
+// the separately qualified integer-to-binary64 AVG domain.
 const SQL: &str =
     "SELECT k, COUNT(*) AS n, SUM(v) AS total, AVG(CAST(v AS DECIMAL(18,2))) AS mean, \
     MIN(v) AS lo, MAX(v) AS hi FROM t GROUP BY k";
@@ -244,12 +244,21 @@ async fn one_of_100_groups_reports_actual_work_and_survives_delete_restart_reins
 }
 
 #[tokio::test]
-async fn float_keys_and_float_arguments_report_fallback() {
-    for sql in [
-        "SELECT CAST(k AS DOUBLE) AS fk, SUM(v) AS total FROM t GROUP BY CAST(k AS DOUBLE)",
-        "SELECT k, SUM(CAST(v AS DOUBLE)) AS total FROM t GROUP BY k",
-        // Coercion changes the aggregate argument type even without a SQL cast.
-        "SELECT k, AVG(v) AS mean FROM t GROUP BY k",
+async fn float_group_keys_and_integer_averages_keep_separate_numeric_admission() {
+    for (sql, strategy) in [
+        (
+            "SELECT CAST(k AS DOUBLE) AS fk, SUM(v) AS total FROM t GROUP BY CAST(k AS DOUBLE)",
+            Strategy::AccumulatorDelta,
+        ),
+        (
+            "SELECT k, SUM(CAST(v AS DOUBLE)) AS total FROM t GROUP BY k",
+            Strategy::OperatorRecompute,
+        ),
+        // Coerced integer averages use the checked exact-mass cell.
+        (
+            "SELECT k, AVG(v) AS mean FROM t GROUP BY k",
+            Strategy::AccumulatorDelta,
+        ),
     ] {
         let mut rows = vec![(1, 3), (1, 5), (2, 4)];
         let mut view = SqlView::new(sql, BTreeMap::from([("t".into(), batch(&rows))]))
@@ -262,9 +271,7 @@ async fn float_keys_and_float_arguments_report_fallback() {
             .collect::<Vec<_>>();
         assert!(!aggregates.is_empty(), "{sql}");
         assert!(
-            aggregates
-                .iter()
-                .all(|node| node.strategy == Strategy::OperatorRecompute),
+            aggregates.iter().all(|node| node.strategy == strategy),
             "{sql}: {aggregates:?}"
         );
         rows.remove(0);
