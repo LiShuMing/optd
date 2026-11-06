@@ -133,14 +133,60 @@ Do not add breaking `#[non_exhaustive]` annotations or dependencies solely for s
 
 ### Publishability
 
-Every commit must be publishable as-is. That means:
+These rules are mandatory for every agent session, including resumed sessions and handoffs.
+Every commit must be publishable as-is.
 
-* no secrets, tokens, private URLs, internal product names, or pasted internal source;
-* no internal/corporate email in author or committer fields — use the repository's public
-  identity;
-* no internal commit-message templates, issue-tracker IDs, or "generated in <internal
-  environment>" footers;
-* generated data is not committed; the generator and its command are.
+#### Gmail identity
+
+* Use `shuming.li <ming.moriarty@gmail.com>` for both author and committer on every new commit,
+  amend, and merge commit. Never use an Alibaba/corporate email. Do not rely on an unchecked
+  identity inherited from global Git configuration or environment variables. A different Gmail
+  identity requires an explicit owner instruction.
+* Before committing, explicitly set `AI_COMMIT=1` and, when required by repository hooks,
+  `AI_MODIFY_AGENT=codex`, together with `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`,
+  `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` for the approved identity.
+* After committing, verify the stored author and committer with
+  `git show -s --format='Author: %an <%ae>%nCommitter: %cn <%ce>' HEAD`.
+  Checking `git config` alone is insufficient. Keep the final stored commit message within
+  2048 characters and 2048 UTF-8 bytes, including hook-added trailers.
+
+#### Public information and credentials
+
+* Do not commit non-public Alibaba, ODPS, or MaxCompute material: internal APIs, internal
+  domains/addresses, private platform links, internal source code, or confidential documents.
+  Do not copy internal implementation code into this repository.
+* Publicly accessible documentation, public APIs/SDKs, and open-source material may be
+  referenced in accordance with their licenses; retain a verifiable public source link where
+  applicable. The names Alibaba, ODPS, and MaxCompute alone are not a violation, including in
+  these policy rules. An internal reference is not evidence that an API is public.
+* Never put real plaintext passwords, access keys, tokens, private keys, or credential-bearing
+  connection strings in source, SQL, configuration, documentation, logs, or commit messages.
+  Supply credentials through environment variables or a credential store. Clearly fake test
+  placeholders require contextual review; a test filename does not exempt real credentials.
+* Do not include internal commit-message templates, private issue-tracker IDs, or
+  "generated in <internal environment>" footers. Generated data is not committed; the
+  generator and its command are.
+
+#### Required review before commit and push
+
+1. Before each commit or amend, inspect the staged diff, added files and filenames, and the
+   proposed commit message against both rules above. Inspect the final staged content after
+   any remediation; keyword scanning alone cannot establish publishability.
+2. Before each push, review the commits being published, including their diffs, stored author
+   and committer identities, and messages. Apply the same checks to all newly published
+   commits, including commits already present locally before the current session.
+3. Resolve suspicious findings before publishing. For a permitted public reference, retain
+   its public source as evidence. If public availability cannot be established, withhold the
+   affected content until it is removed, replaced, or verified. Do not block verified public
+   references merely because they mention a product name.
+4. Report review scope, methods, findings, and limitations without printing suspected secret
+   values; report only locations and finding categories. Do not validate credentials online.
+5. If a secret was already published, stop further publication and report the exposure without
+   repeating its value. A later deletion does not clean Git history. Credential revocation and
+   history rewriting need their own authorization; never force-push as an automatic cleanup.
+
+This checklist is a required working rule. It does not claim that an automatic secret scanner
+or Git/CI enforcement is installed; those enforcement tools remain a separate task (§7).
 
 ---
 
@@ -167,7 +213,8 @@ A change is done when:
 - [ ] `cargo fmt` and `cargo clippy -- -D warnings` are clean;
 - [ ] a regression test exists for a fixed bug;
 - [ ] docs and `SUMMARY.md` are updated;
-- [ ] the commit is publishable (identity, secrets, internal metadata);
+- [ ] the publishability checklist passes (stored Gmail identities, no real secrets or
+      non-public material, and public-source evidence for reviewed references);
 - [ ] the branch is pushed or the task states why it is local;
 - [ ] the task status and next owner are updated.
 

@@ -76,9 +76,14 @@ before execution; a lane has one canonical owner; a reviewer is read-only unless
 
 ### 3.5 Publishable by default
 
-No secret, internal URL, internal product name, internal email, or pasted internal source in any
-artifact. Public remotes use the project's public identity. The check is mechanical where
-possible (§7).
+No real credentials, internal URLs, non-public material, or pasted internal source in any
+artifact. Both Git author and committer use the approved Gmail identity,
+`shuming.li <ming.moriarty@gmail.com>`. Publicly accessible Alibaba/ODPS/MaxCompute
+documentation, public APIs/SDKs, and open-source references are allowed with verifiable public
+sources and applicable license compliance; product names alone are not forbidden. Every agent
+session reviews staged content before committing and outgoing commits before pushing, following
+the normative publishability checklist in root `AGENT.md` (§4).
+Automatic enforcement remains planned (§7); the checklist applies now.
 
 ## 4. Workflow
 
@@ -158,8 +163,9 @@ Rules that follow from past failures:
 
 ## 6. Repository conventions
 
-* **Commits:** one logical change; imperative subject; body states what and why; no internal
-  template or corporate email.
+* **Commits:** one logical change; imperative subject; body states what and why; approved Gmail
+  identity for both author and committer, checked in the stored commit; no internal template,
+  corporate email, real credentials, or non-public material.
 * **Branches:** work on a branch; never commit directly to `main`; no force-push to shared
   branches.
 * **Dependencies:** a dependency or lockfile change is its own commit with a manifest of what
@@ -204,8 +210,10 @@ optimizes the path *to* review, not around it.
    coding conventions, and collaboration rules.
 2. This document is linked from `docs/src/SUMMARY.md`.
 3. A design-template section exists and is referenced by `AGENT.md`.
-4. The rules contain no internal names, URLs, or credentials.
-5. The change is committed with the project's public identity.
+4. The rules contain no non-public material, internal URLs, or real credentials; reviewed
+   public references retain verifiable public sources.
+5. The change is committed with the approved Gmail author and committer identities, and the
+   publishability checklist is followed.
 
 ## 10. Open questions
 
