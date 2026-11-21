@@ -5,6 +5,89 @@ use datafusion::arrow::compute::take;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::ScalarValue;
 use optd_incremental_sql::database::SqlSession;
+use std::time::Instant;
+
+struct StageTracer {
+    path: PathBuf,
+    run_start: Instant,
+    active_stage: Option<(String, Instant)>,
+    completed: Vec<Value>,
+}
+
+impl StageTracer {
+    fn new(root: &Path) -> Self {
+        Self {
+            path: root.join("progress.json"),
+            run_start: Instant::now(),
+            active_stage: None,
+            completed: Vec::new(),
+        }
+    }
+
+    fn persist(&self, status: &str) -> Result<()> {
+        let active = self.active_stage.as_ref().map(|(name, started)| {
+            json!({
+                "stage": name,
+                "started_at_ms": started.saturating_duration_since(self.run_start).as_millis() as u64,
+            })
+        });
+        let payload = json!({
+            "format_version": 1,
+            "status": status,
+            "elapsed_total_ms": self.run_start.elapsed().as_millis() as u64,
+            "active_stage": active,
+            "completed_stages": self.completed,
+        });
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(&payload)?)?;
+        fs::rename(&tmp, &self.path)?;
+        Ok(())
+    }
+
+    fn record_instant(
+        &mut self,
+        stage: &str,
+        elapsed_ms: u64,
+        detail: Option<Value>,
+    ) -> Result<()> {
+        let mut entry = json!({
+            "stage": stage,
+            "elapsed_ms": elapsed_ms,
+            "status": "ok",
+        });
+        if let Some(detail) = detail {
+            entry["detail"] = detail;
+        }
+        self.completed.push(entry);
+        self.persist("in_progress")
+    }
+
+    fn begin(&mut self, stage: impl Into<String>) -> Result<()> {
+        self.active_stage = Some((stage.into(), Instant::now()));
+        self.persist("in_progress")
+    }
+
+    fn finish(&mut self, detail: Option<Value>) -> Result<()> {
+        let Some((stage, started)) = self.active_stage.take() else {
+            return Ok(());
+        };
+        let mut entry = json!({
+            "stage": stage,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "status": "ok",
+        });
+        if let Some(detail) = detail {
+            entry["detail"] = detail;
+        }
+        self.completed.push(entry);
+        self.persist("in_progress")
+    }
+
+    fn complete(&mut self) -> Result<()> {
+        self.active_stage = None;
+        self.persist("complete")
+    }
+}
 
 fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -195,6 +278,7 @@ async fn execute_batch(
 }
 
 pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Value> {
+    let preflight_start = Instant::now();
     let referenced = referenced_tables(sql, complete).await?;
     let mut current: Tables = referenced
         .iter()
@@ -210,6 +294,7 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     )
     .await
     .map_err(|e| format!("plan_preflight: {e}"))?;
+    let preflight_ms = preflight_start.elapsed().as_millis() as u64;
     let blockers = probe
         .blockers
         .iter()
@@ -239,7 +324,10 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     }
     // Per-query roots must be fresh; never reset another run's committed state.
     fs::create_dir(root)?;
+    let mut tracer = StageTracer::new(root);
+    tracer.record_instant("preflight", preflight_ms, None)?;
     let mut script = String::new();
+    tracer.begin("bootstrap_ddl")?;
     let mut db = SqlSession::open(root.join("warehouse")).await?;
     for (name, b) in &current {
         let columns = b
@@ -261,6 +349,8 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
             .map_err(|e| format!("bootstrap_ddl: {e}"))?;
         script.push_str(&format!("{ddl};\n"));
     }
+    tracer.finish(Some(json!({"tables": current.len()})))?;
+    tracer.begin("bootstrap_import")?;
     let initial = current
         .iter()
         .map(|(name, b)| insert(name, b))
@@ -273,14 +363,21 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
     execute_batch(&mut db, &initial)
         .await
         .map_err(|e| format!("bootstrap_rows: {e}"))?;
+    tracer.finish(Some(json!({"statements": initial.len()})))?;
+    tracer.begin("bootstrap_mv")?;
     let ddl = format!("CREATE MATERIALIZED VIEW maintained_result AS {sql}");
     db.execute(&ddl)
         .await
         .map_err(|e| format!("bootstrap_ddl: {e}"))?;
     script.push_str(&format!("{ddl};\n"));
+    tracer.finish(None)?;
+    tracer.begin("bootstrap_verify")?;
     let mut previous = verify(&mut db, sql, &current, &probe.numerical_columns).await?;
     let initial_rows = previous.num_rows();
     let bootstrap_epoch = db.epoch();
+    tracer.finish(Some(
+        json!({"initial_rows": initial_rows, "bootstrap_epoch": bootstrap_epoch}),
+    ))?;
     let mut nonempty = initial_rows > 0;
     let mut output_changed = false;
     let mut rounds = Vec::new();
@@ -308,22 +405,30 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         let body = statements.join(";\n");
         script.push_str(&format!("BEGIN;\n{body};\nCOMMIT;\n"));
         fs::write(root.join("input.sql"), &script)?;
+        tracer.begin(format!("round:{stage}:dml_execute"))?;
         let storage_before = db.store_work()?;
         let report = execute_batch(&mut db, &statements)
             .await
             .map_err(|e| format!("{stage}: {e}"))?;
         let storage_after = db.store_work()?;
         let storage_work = storage_after.since(&storage_before)?;
+        tracer.finish(Some(json!({"statements": statements.len()})))?;
+        tracer.begin(format!("round:{stage}:verify_before_reopen"))?;
         let expected = verify(&mut db, sql, &current, &probe.numerical_columns).await?;
         let verification_before = db.store_work()?.since(&storage_after)?;
+        tracer.finish(Some(json!({"output_rows": expected.num_rows()})))?;
         nonempty |= expected.num_rows() > 0;
         output_changed |= bag(&previous)? != bag(&expected)?;
+        tracer.begin(format!("round:{stage}:reopen"))?;
         drop(db);
         db = SqlSession::open(root.join("warehouse")).await?;
         let recovery_work = db.recovery_work().clone();
         let reopened = db.store_work()?;
+        tracer.finish(Some(json!({"rebuilt_views": recovery_work.rebuilt_views})))?;
+        tracer.begin(format!("round:{stage}:verify_after_reopen"))?;
         verify(&mut db, sql, &current, &probe.numerical_columns).await?;
         let verification_after = db.store_work()?.since(&reopened)?;
+        tracer.finish(None)?;
         rounds.push(
             json!({"stage":stage,"status":"pass","output_rows":expected.num_rows(),"commit":report,
             "storage_work":storage_work,"recovery_work":recovery_work,
@@ -334,10 +439,11 @@ pub(super) async fn run(sql: &str, complete: &Tables, root: &Path) -> Result<Val
         );
         previous = expected;
     }
+    tracer.complete()?;
     Ok(
         json!({"status":if !nonempty{"verified_empty_only"}else if !output_changed{"verified_unchanged_output"}else{"pass"},
         "plan_qualification":qualification,"bootstrap_epoch":bootstrap_epoch,"initial_rows":initial_rows,"final_rows":previous.num_rows(),"nonempty_result_seen":nonempty,"output_delta_seen":output_changed,
-        "completed_rounds":rounds.len(),"rounds":rounds,"oracle":"independent_DataFusion_full_SQL_over_independent_source_endpoints","comparison":"exact_sources_and_output_log_replay_with_declared_numerical_MV_lineage","numerical_contract":{"columns":probe.numerical_columns,"absolute":numeric_comparison::ABSOLUTE,"relative":numeric_comparison::RELATIVE},"sql_script":root.join("input.sql"),"warehouse":root.join("warehouse"),"performance_qualified":false}),
+        "completed_rounds":rounds.len(),"rounds":rounds,"stage_timings":tracer.completed,"progress_file":tracer.path,"oracle":"independent_DataFusion_full_SQL_over_independent_source_endpoints","comparison":"exact_sources_and_output_log_replay_with_declared_numerical_MV_lineage","numerical_contract":{"columns":probe.numerical_columns,"absolute":numeric_comparison::ABSOLUTE,"relative":numeric_comparison::RELATIVE},"sql_script":root.join("input.sql"),"warehouse":root.join("warehouse"),"performance_qualified":false}),
     )
 }
 
@@ -494,6 +600,40 @@ mod tests {
         }
         // Initial data is published once, independently of INSERT chunking.
         assert_eq!(result["bootstrap_epoch"], 3);
+        let progress_path = Path::new(result["progress_file"].as_str().ok_or("progress path")?);
+        let progress: Value = serde_json::from_slice(&fs::read(progress_path)?)?;
+        assert_eq!(progress["status"], "complete");
+        assert!(progress["active_stage"].is_null());
+        let completed_stages = progress["completed_stages"]
+            .as_array()
+            .ok_or("completed stages")?;
+        let stage_names: Vec<&str> = completed_stages
+            .iter()
+            .map(|entry| entry["stage"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            stage_names,
+            vec![
+                "preflight",
+                "bootstrap_ddl",
+                "bootstrap_import",
+                "bootstrap_mv",
+                "bootstrap_verify",
+                "round:insert_remaining_half:dml_execute",
+                "round:insert_remaining_half:verify_before_reopen",
+                "round:insert_remaining_half:reopen",
+                "round:insert_remaining_half:verify_after_reopen",
+                "round:delete_matching_rows:dml_execute",
+                "round:delete_matching_rows:verify_before_reopen",
+                "round:delete_matching_rows:reopen",
+                "round:delete_matching_rows:verify_after_reopen",
+                "round:update_keys:dml_execute",
+                "round:update_keys:verify_before_reopen",
+                "round:update_keys:reopen",
+                "round:update_keys:verify_after_reopen",
+            ]
+        );
+        assert_eq!(result["stage_timings"], progress["completed_stages"]);
         let script = fs::read_to_string(result["sql_script"].as_str().ok_or("script path")?)?;
         let mut db = SqlSession::open(dir.path().join("script-replay")).await?;
         db.execute_script(&script).await?;
