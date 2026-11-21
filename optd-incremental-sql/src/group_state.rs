@@ -10,6 +10,9 @@ use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::arrow::row::{RowConverter, SortField};
 
 use crate::bag::Bag;
+use crate::state_codec::{
+    batch_to_indexed_bags, decode_hex, encode_hex, indexed_bags_to_batch, GroupSnapshot,
+};
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
@@ -136,6 +139,58 @@ impl GroupState {
     /// Account actual directory path copies after finishing the candidate.
     pub(crate) fn record_copy(&self, work: &mut crate::StateCopyWork) -> Result<()> {
         work.record_groups(self.groups.copied_entries()?)
+    }
+
+    /// Export all group input/output bags in deterministic key order.
+    pub(crate) fn export_persisted(&self) -> Result<GroupSnapshot> {
+        let mut keys_hex = Vec::with_capacity(self.groups.len());
+        let mut inputs = Vec::with_capacity(self.groups.len());
+        let mut outputs = Vec::with_capacity(self.groups.len());
+        for (idx, (key, bucket)) in self.groups.iter().enumerate() {
+            keys_hex.push(encode_hex(key));
+            inputs.push((idx as u64, &bucket.input));
+            outputs.push((idx as u64, &bucket.output));
+        }
+        Ok(GroupSnapshot {
+            key_schema: Arc::clone(&self.key_schema),
+            keys_hex,
+            inputs_batch: indexed_bags_to_batch(&self.input_schema, &inputs)?,
+            outputs_batch: indexed_bags_to_batch(&self.output_schema, &outputs)?,
+        })
+    }
+
+    /// Restore a `GroupState` from verified persisted buckets without re-evaluating groups.
+    pub(crate) fn from_persisted(
+        input_schema: SchemaRef,
+        output_schema: SchemaRef,
+        snapshot: GroupSnapshot,
+    ) -> Result<Self> {
+        let mut inputs = batch_to_indexed_bags(&snapshot.inputs_batch, &input_schema)?;
+        let mut outputs = batch_to_indexed_bags(&snapshot.outputs_batch, &output_schema)?;
+        let mut groups = StateDirectory::new();
+        for (idx, key_hex) in snapshot.keys_hex.into_iter().enumerate() {
+            let key = decode_hex(&key_hex)?;
+            let input = inputs
+                .remove(&(idx as u64))
+                .unwrap_or_else(|| Bag::empty(Arc::clone(&input_schema)));
+            let output = outputs
+                .remove(&(idx as u64))
+                .unwrap_or_else(|| Bag::empty(Arc::clone(&output_schema)));
+            if groups
+                .insert(key, Arc::new(GroupBucket { input, output }))
+                .is_some()
+            {
+                return Err(Error::Invalid(
+                    "duplicate group key in persisted group state".into(),
+                ));
+            }
+        }
+        Ok(Self {
+            input_schema,
+            key_schema: snapshot.key_schema,
+            output_schema,
+            groups,
+        })
     }
 
     /// Count installed SQL groups, including NULL-key and all-NULL-value groups.

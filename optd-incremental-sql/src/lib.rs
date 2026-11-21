@@ -23,6 +23,7 @@ mod rank_state;
 mod row_blocks;
 mod source_state;
 pub mod source_vector;
+mod state_codec;
 mod state_directory;
 pub mod store;
 mod work;

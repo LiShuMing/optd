@@ -12,6 +12,10 @@ use super::moments::{MomentOutput, Moments};
 use super::value_index::{Extremum, OrderedValues};
 use crate::error::invalid;
 use crate::metrics::{DistinctWork, NumericWork, ValueIndexWork};
+use crate::state_codec::{
+    batch_to_counted_values, batch_to_scalar_rows, counted_values_to_batch, scalar_rows_to_batch,
+    FunctionCellsSnapshot,
+};
 use crate::{Error, Result};
 
 /// Aggregate SQL input multiplicity, qualified before physical state is constructed.
@@ -143,6 +147,232 @@ impl AggregateSpec {
     /// Identify functions whose counts and native state have separate work counters.
     pub(super) fn is_distinct(&self) -> bool {
         matches!(&self.maintenance, Maintenance::Distinct { .. })
+    }
+
+    /// Export one function's cells across all groups in deterministic group order.
+    pub(super) fn export_cells<'a>(
+        &self,
+        cells: impl IntoIterator<Item = &'a Cell>,
+    ) -> Result<FunctionCellsSnapshot> {
+        let cells: Vec<&Cell> = cells.into_iter().collect();
+        match &self.maintenance {
+            Maintenance::Native => {
+                let mut rows = Vec::with_capacity(cells.len());
+                for cell in cells {
+                    let Cell::Native(states) = cell else {
+                        return Err(invalid("aggregate cell mode mismatch on export"));
+                    };
+                    rows.push(states.clone());
+                }
+                let states_batch = if rows.is_empty() {
+                    None
+                } else {
+                    Some(scalar_rows_to_batch(None, &rows)?)
+                };
+                Ok(FunctionCellsSnapshot::Native { states_batch })
+            }
+            Maintenance::ExactIntegerAverage => {
+                let mut rows = Vec::with_capacity(cells.len());
+                let mut masses = Vec::with_capacity(cells.len());
+                for cell in cells {
+                    let Cell::ExactIntegerAverage { states, mass } = cell else {
+                        return Err(invalid("aggregate cell mode mismatch on export"));
+                    };
+                    rows.push(states.clone());
+                    masses.push(*mass);
+                }
+                let states_batch = if rows.is_empty() {
+                    None
+                } else {
+                    Some(scalar_rows_to_batch(None, &rows)?)
+                };
+                Ok(FunctionCellsSnapshot::ExactIntegerAverage {
+                    states_batch,
+                    masses,
+                })
+            }
+            Maintenance::Moments(_) => {
+                let mut entries = Vec::with_capacity(cells.len());
+                let mut values = Vec::new();
+                for (group_idx, cell) in cells.into_iter().enumerate() {
+                    let Cell::Moments(moments) = cell else {
+                        return Err(invalid("aggregate cell mode mismatch on export"));
+                    };
+                    let (meta, vals) = moments.export_persisted();
+                    entries.push(meta);
+                    for (v, c) in vals {
+                        values.push((group_idx as u64, v, c));
+                    }
+                }
+                Ok(FunctionCellsSnapshot::Moments {
+                    entries,
+                    values_batch: counted_values_to_batch(&values)?,
+                })
+            }
+            Maintenance::Extremum { .. } => {
+                let mut values = Vec::new();
+                for (group_idx, cell) in cells.into_iter().enumerate() {
+                    let Cell::Values(index) = cell else {
+                        return Err(invalid("aggregate cell mode mismatch on export"));
+                    };
+                    for (v, c) in index.entries() {
+                        values.push((group_idx as u64, v.clone(), c as i64));
+                    }
+                }
+                Ok(FunctionCellsSnapshot::Values {
+                    values_batch: counted_values_to_batch(&values)?,
+                })
+            }
+            Maintenance::Distinct { .. } => {
+                let mut values = Vec::new();
+                let mut rows = Vec::with_capacity(cells.len());
+                for (group_idx, cell) in cells.into_iter().enumerate() {
+                    let Cell::Distinct {
+                        values: index,
+                        states,
+                    } = cell
+                    else {
+                        return Err(invalid("aggregate cell mode mismatch on export"));
+                    };
+                    for (v, c) in index.entries() {
+                        values.push((group_idx as u64, v.clone(), c as i64));
+                    }
+                    rows.push(states.clone());
+                }
+                let states_batch = if rows.is_empty() {
+                    None
+                } else {
+                    Some(scalar_rows_to_batch(None, &rows)?)
+                };
+                Ok(FunctionCellsSnapshot::Distinct {
+                    values_batch: counted_values_to_batch(&values)?,
+                    states_batch,
+                })
+            }
+        }
+    }
+
+    /// Restore one function's cells across `group_count` groups.
+    pub(super) fn restore_cells(
+        &self,
+        group_count: usize,
+        snapshot: FunctionCellsSnapshot,
+    ) -> Result<Vec<Cell>> {
+        match (&self.maintenance, snapshot) {
+            (Maintenance::Native, FunctionCellsSnapshot::Native { states_batch }) => {
+                let rows = match states_batch {
+                    Some(batch) => batch_to_scalar_rows(&batch)?,
+                    None => Vec::new(),
+                };
+                if rows.len() != group_count {
+                    return Err(invalid("persisted native cell count differs"));
+                }
+                Ok(rows.into_iter().map(Cell::Native).collect())
+            }
+            (
+                Maintenance::ExactIntegerAverage,
+                FunctionCellsSnapshot::ExactIntegerAverage {
+                    states_batch,
+                    masses,
+                },
+            ) => {
+                let rows = match states_batch {
+                    Some(batch) => batch_to_scalar_rows(&batch)?,
+                    None => Vec::new(),
+                };
+                if rows.len() != group_count || masses.len() != group_count {
+                    return Err(invalid("persisted exact-avg cell count differs"));
+                }
+                Ok(rows
+                    .into_iter()
+                    .zip(masses)
+                    .map(|(states, mass)| Cell::ExactIntegerAverage { states, mass })
+                    .collect())
+            }
+            (
+                Maintenance::Moments(_),
+                FunctionCellsSnapshot::Moments {
+                    entries,
+                    values_batch,
+                },
+            ) => {
+                if entries.len() != group_count {
+                    return Err(invalid("persisted moment cell count differs"));
+                }
+                let mut per_group: Vec<Vec<(ScalarValue, i64)>> = vec![Vec::new(); group_count];
+                if let Some(batch) = values_batch {
+                    for (idx, v, c) in batch_to_counted_values(&batch)? {
+                        let slot = per_group
+                            .get_mut(idx as usize)
+                            .ok_or_else(|| invalid("moment value group index out of bounds"))?;
+                        slot.push((v, c));
+                    }
+                }
+                entries
+                    .into_iter()
+                    .zip(per_group)
+                    .map(|(meta, vals)| Ok(Cell::Moments(Moments::from_persisted(meta, vals)?)))
+                    .collect()
+            }
+            (
+                Maintenance::Extremum { converter, .. },
+                FunctionCellsSnapshot::Values { values_batch },
+            ) => {
+                let mut per_group: Vec<Vec<(ScalarValue, i64)>> = vec![Vec::new(); group_count];
+                if let Some(batch) = values_batch {
+                    for (idx, v, c) in batch_to_counted_values(&batch)? {
+                        let slot = per_group
+                            .get_mut(idx as usize)
+                            .ok_or_else(|| invalid("extremum value group index out of bounds"))?;
+                        slot.push((v, c));
+                    }
+                }
+                per_group
+                    .into_iter()
+                    .map(|vals| {
+                        Ok(Cell::Values(OrderedValues::from_persisted(
+                            converter, vals,
+                        )?))
+                    })
+                    .collect()
+            }
+            (
+                Maintenance::Distinct { converter, .. },
+                FunctionCellsSnapshot::Distinct {
+                    values_batch,
+                    states_batch,
+                },
+            ) => {
+                let rows = match states_batch {
+                    Some(batch) => batch_to_scalar_rows(&batch)?,
+                    None => Vec::new(),
+                };
+                if rows.len() != group_count {
+                    return Err(invalid("persisted distinct state count differs"));
+                }
+                let mut per_group: Vec<Vec<(ScalarValue, i64)>> = vec![Vec::new(); group_count];
+                if let Some(batch) = values_batch {
+                    for (idx, v, c) in batch_to_counted_values(&batch)? {
+                        let slot = per_group
+                            .get_mut(idx as usize)
+                            .ok_or_else(|| invalid("distinct value group index out of bounds"))?;
+                        slot.push((v, c));
+                    }
+                }
+                rows.into_iter()
+                    .zip(per_group)
+                    .map(|(states, vals)| {
+                        Ok(Cell::Distinct {
+                            values: OrderedValues::from_persisted(converter, vals)?,
+                            states,
+                        })
+                    })
+                    .collect()
+            }
+            _ => Err(invalid(
+                "persisted aggregate cell variant does not match compiled function mode",
+            )),
+        }
     }
 
     /// Empty native states have identical outputs for ordinary and DISTINCT inputs.

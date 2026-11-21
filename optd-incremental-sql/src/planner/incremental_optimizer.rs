@@ -1,10 +1,12 @@
 //! Rule registration, deterministic selection and verified maintenance plans.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::logical_expr::LogicalPlan;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::{Error, Result};
 
@@ -484,5 +486,68 @@ impl IncrementalPlan {
             ));
         }
         explanation
+    }
+
+    /// Deterministic SHA-256 binding SQL, dependency schemas, rule versions and physical programs.
+    /// Any SQL, schema, rule-version or compiled-plan change yields a distinct fingerprint.
+    pub fn fingerprint(&self, sql: &str, schemas: &BTreeMap<String, SchemaRef>) -> Result<String> {
+        let schema_entries: Vec<_> = schemas
+            .iter()
+            .map(|(name, schema)| {
+                let fields: Vec<_> = schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        serde_json::json!({
+                            "name": f.name(),
+                            "type": f.data_type().to_string(),
+                            "nullable": f.is_nullable(),
+                            "metadata": f.metadata(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "table": name,
+                    "fields": fields,
+                    "metadata": schema.metadata(),
+                })
+            })
+            .collect();
+        let node_entries: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, node)| {
+                let program = self.programs.get(id);
+                let state_kind = program.and_then(|p| p.state.as_ref()).map(|spec| match spec {
+                    plan::StateSpec::Rank { .. } => "Rank",
+                    plan::StateSpec::Accumulator { .. } => "Accumulator",
+                    plan::StateSpec::Keyed(index) => match index.algorithm {
+                        plan::IndexAlgorithm::Scoped => "KeyedScoped",
+                        plan::IndexAlgorithm::MatchCounts(_) => "KeyedMatchCounts",
+                    },
+                    plan::StateSpec::Group { .. } => "Group",
+                });
+                serde_json::json!({
+                    "id": node.id,
+                    "operator": node.operator,
+                    "inputs": node.inputs,
+                    "ordered": node.ordered,
+                    "rule": node.rule,
+                    "strategy": program.map_or_else(|| node.maintenance.strategy(), plan::CompiledProgram::strategy),
+                    "state_kind": state_kind,
+                    "physical": program.map(|p| plan::explain(&p.physical)),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "codec": crate::state_codec::STATE_CODEC_FORMAT,
+            "sql": sql,
+            "schemas": schema_entries,
+            "nodes": node_entries,
+        });
+        let bytes = serde_json::to_vec(&payload)
+            .map_err(|e| Error::Invalid(format!("plan fingerprint serialization: {e}")))?;
+        Ok(format!("{:x}", Sha256::digest(&bytes)))
     }
 }

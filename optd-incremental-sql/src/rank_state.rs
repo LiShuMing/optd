@@ -17,6 +17,10 @@ use crate::bag::Bag;
 use crate::error::invalid;
 use crate::group_state::{supported_key, KeyPolicy};
 use crate::planner::plan::RelationOperator;
+use crate::state_codec::{
+    batch_to_indexed_bags, decode_hex, encode_hex, indexed_bags_to_batch, RankPeerMeta,
+    RankSnapshot,
+};
 use crate::state_directory::StateDirectory;
 use crate::{Error, RankWork, Result};
 
@@ -88,6 +92,16 @@ impl RankState {
         operator: &RelationOperator,
         input: &RecordBatch,
     ) -> Result<Self> {
+        let empty = RecordBatch::new_empty(input.schema());
+        let state = Self::compile_empty(ctx, operator, input.schema())?;
+        Ok(state.update(input, &empty)?.0)
+    }
+
+    fn compile_empty(
+        ctx: &SessionContext,
+        operator: &RelationOperator,
+        input_schema: SchemaRef,
+    ) -> Result<Self> {
         if !eligible(&operator.template)? {
             return Err(invalid("unqualified rank state"));
         }
@@ -115,15 +129,76 @@ impl RankState {
                 },
             ));
         }
-        let empty = RecordBatch::new_empty(input.schema());
-        let state = Self {
+        Ok(Self {
             schema: operator.schema(),
-            input_schema: input.schema(),
+            input_schema,
             expressions,
             converter: Arc::new(RowConverter::new(fields)?),
             peers: StateDirectory::new(),
-        };
-        Ok(state.update(input, &empty)?.0)
+        })
+    }
+
+    /// Export ordered rank peers and their weighted input rows.
+    pub(crate) fn export_persisted(&self) -> Result<RankSnapshot> {
+        let mut peers = Vec::with_capacity(self.peers.len());
+        let mut bags = Vec::with_capacity(self.peers.len());
+        for (idx, (key, peer)) in self.peers.iter().enumerate() {
+            peers.push(RankPeerMeta {
+                key_hex: encode_hex(key),
+                count: peer.count,
+                rank: peer.rank,
+            });
+            bags.push((idx as u64, &peer.rows));
+        }
+        Ok(RankSnapshot {
+            peers,
+            rows_batch: indexed_bags_to_batch(&self.input_schema, &bags)?,
+        })
+    }
+
+    /// Restore a `RankState` from verified persisted peers without rescanning inputs.
+    pub(crate) fn from_persisted(
+        ctx: &SessionContext,
+        operator: &RelationOperator,
+        input_schema: SchemaRef,
+        snapshot: RankSnapshot,
+    ) -> Result<Self> {
+        let mut state = Self::compile_empty(ctx, operator, Arc::clone(&input_schema))?;
+        let mut bags = batch_to_indexed_bags(&snapshot.rows_batch, &input_schema)?;
+        let mut expected_rank = 1u64;
+        for (idx, meta) in snapshot.peers.into_iter().enumerate() {
+            if meta.count == 0 || meta.rank != expected_rank {
+                return Err(invalid(
+                    "persisted rank peer count or rank invariant violated",
+                ));
+            }
+            let key = decode_hex(&meta.key_hex)?;
+            let rows = bags
+                .remove(&(idx as u64))
+                .ok_or_else(|| invalid("missing persisted rank peer rows"))?;
+            let volume = rows.materialization_volume()?;
+            if volume.rows as u64 != meta.count {
+                return Err(invalid("persisted rank peer row count differs"));
+            }
+            expected_rank = expected_rank
+                .checked_add(meta.count)
+                .ok_or(Error::Overflow)?;
+            if state
+                .peers
+                .insert(
+                    key,
+                    Arc::new(Peer {
+                        rows,
+                        count: meta.count,
+                        rank: meta.rank,
+                    }),
+                )
+                .is_some()
+            {
+                return Err(invalid("duplicate peer key in persisted rank state"));
+            }
+        }
+        Ok(state)
     }
 
     fn partition(&self, batch: &RecordBatch) -> Result<BTreeMap<Key, Bag>> {

@@ -7,6 +7,7 @@ use datafusion::common::ScalarValue;
 
 use super::value_index::OrderedValues;
 use crate::metrics::{NumericWork, ValueIndexWork};
+use crate::state_codec::MomentMeta;
 use crate::{Error, Result};
 
 /// Output choice shares one numerical algorithm and explicit empty conventions.
@@ -28,6 +29,38 @@ pub(super) struct Moments {
 }
 
 impl Moments {
+    /// Export bit-exact moment metadata and counted values for persistence.
+    pub(super) fn export_persisted(&self) -> (MomentMeta, Vec<(ScalarValue, i64)>) {
+        let meta = MomentMeta {
+            count: self.count,
+            origin_bits: self.origin.to_bits(),
+            mean_bits: self.mean.to_bits(),
+            m2_bits: self.m2.to_bits(),
+        };
+        let entries = self
+            .values
+            .entries()
+            .map(|(v, c)| (v.clone(), c as i64))
+            .collect();
+        (meta, entries)
+    }
+
+    /// Restore bit-exact centered moments and their counted-value index.
+    pub(super) fn from_persisted(
+        meta: MomentMeta,
+        entries: Vec<(ScalarValue, i64)>,
+    ) -> Result<Self> {
+        let converter = RowConverter::new(vec![SortField::new(DataType::Float64)])?;
+        let values = OrderedValues::from_persisted(&converter, entries)?;
+        Ok(Self {
+            count: meta.count,
+            origin: f64::from_bits(meta.origin_bits),
+            mean: f64::from_bits(meta.mean_bits),
+            m2: f64::from_bits(meta.m2_bits),
+            values,
+        })
+    }
+
     fn value(scalar: &ScalarValue) -> Result<Option<f64>> {
         match scalar {
             ScalarValue::Float64(None) => Ok(None),

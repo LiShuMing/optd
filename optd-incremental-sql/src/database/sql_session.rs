@@ -10,6 +10,7 @@ use super::transaction_workspace::{PreparedCommit, TransactionWorkspace};
 use crate::bag::Bag;
 use crate::error::invalid;
 use crate::planner::IncrementalOptimizer;
+use crate::state_codec::ViewStateSnapshot;
 use crate::store::PublishPoint;
 use crate::{Error, PreparedSqlRefresh, Result, SqlView};
 use datafusion::arrow::array::{Array, Int64Array, RecordBatch};
@@ -22,6 +23,34 @@ use std::path::Path;
 struct RequestIdentity {
     id: String,
     fingerprint: String,
+}
+
+/// Policy when persisted operator state is absent, corrupt or incompatible with the compiled plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncompatibleStatePolicy {
+    /// Fail closed without modifying disk or silently rebuilding derived state.
+    Fail,
+    /// Explicitly rebuild the view from committed base tables and record `rebuilt_views`.
+    Rebuild,
+}
+
+/// Configuration for opening a host-local SQL session and scheduling operator-state checkpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenOptions {
+    /// Maximum affected commits per view before persisting a fresh operator-state checkpoint.
+    /// Intermediate commits persist only changed blocks and `table_deltas` (O(delta)).
+    pub checkpoint_interval: u64,
+    /// Behavior when persisted operator state cannot be restored incrementally.
+    pub incompatible_state: IncompatibleStatePolicy,
+}
+
+impl Default for OpenOptions {
+    fn default() -> Self {
+        Self {
+            checkpoint_interval: 16,
+            incompatible_state: IncompatibleStatePolicy::Fail,
+        }
+    }
 }
 
 /// A host-local SQL session with synchronous, strictly incremental materialized views.
@@ -38,24 +67,30 @@ pub struct SqlSession {
     transaction: Option<TransactionWorkspace>,
     fenced: bool,
     recovery: RecoveryWork,
+    options: OpenOptions,
 }
 
 impl SqlSession {
-    /// Open a database, acquire its exclusive writer lock and reconstruct all views.
-    ///
-    /// Rebuilds strict incremental plans and derived state from committed base
-    /// tables, then checks outputs and dependencies against the durable catalog.
-    /// Recovery includes full reads and computation; it is not a delta-only path.
+    /// Open a database with default incremental-restore and checkpoint options (`K = 16`, fail-closed).
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let store = DatabaseStore::open(path.as_ref())?;
+        Self::open_with_options(path, OpenOptions::default()).await
+    }
+
+    /// Open a database, acquire its exclusive writer lock and restore all materialized views.
+    ///
+    /// Views with matching `PlanFingerprint` and valid persisted operator state are restored
+    /// incrementally by loading their latest state checkpoint and replaying bounded `table_deltas`.
+    /// Incompatible or missing state follows [`OpenOptions::incompatible_state`].
+    pub async fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
+        if options.checkpoint_interval == 0 {
+            return Err(invalid("checkpoint_interval must be at least 1"));
+        }
+        let mut store = DatabaseStore::open(path.as_ref())?;
         let committed = store.snapshot();
-        let mut recovery = RecoveryWork {
-            store: store.work()?,
-            ..Default::default()
-        };
+        let mut recovery = RecoveryWork::default();
         let mut views = BTreeMap::new();
         for (name, v) in &committed.views {
-            let tables: BTreeMap<String, RecordBatch> = v
+            let schemas: BTreeMap<String, datafusion::arrow::datatypes::SchemaRef> = v
                 .dependencies
                 .iter()
                 .map(|n| {
@@ -63,34 +98,71 @@ impl SqlSession {
                         .tables
                         .get(n)
                         .ok_or_else(|| invalid("unbound restored view dependency"))?;
-                    Ok((n.clone(), t.rows.materialize()?.batch))
+                    Ok((n.clone(), t.rows.schema()))
                 })
                 .collect::<Result<_>>()?;
-            let dependency_rows = tables
-                .values()
-                .try_fold(0u64, |rows, batch: &RecordBatch| {
-                    rows.checked_add(batch.num_rows() as u64)
-                        .ok_or(Error::Overflow)
-                })?;
-            let engine = SqlView::new_with_optimizer(
+            let expected_fp = SqlView::compile_fingerprint(
                 &v.sql,
-                tables,
+                &schemas,
                 IncrementalOptimizer::default().require_incremental(),
             )
             .await?;
-            let output = engine.contents()?;
-            if Bag::from_batch(&output)? != v.output.to_bag()? {
-                return Err(invalid(
-                    "restored materialized view differs from committed result",
-                ));
-            }
-            if let ViewOutput::Ordered(expected) = &v.output {
-                if !crate::store::batches_equal(&output, expected) {
-                    return Err(invalid(
-                        "restored ordered materialized view differs from committed order",
-                    ));
+
+            let restored = try_restore_view(&mut store, &committed, name, v, &expected_fp).await;
+            let engine = match restored {
+                Ok((engine, replayed_epochs, replayed_delta_rows, state_reads)) => {
+                    recovery.record_restored_view(
+                        replayed_epochs,
+                        replayed_delta_rows,
+                        &state_reads,
+                        v.output.num_rows(),
+                    )?;
+                    engine
                 }
-            }
+                Err(err) => match options.incompatible_state {
+                    IncompatibleStatePolicy::Fail => return Err(err),
+                    IncompatibleStatePolicy::Rebuild => {
+                        let tables: BTreeMap<String, RecordBatch> =
+                            v.dependencies
+                                .iter()
+                                .map(|n| {
+                                    let t = committed.tables.get(n).ok_or_else(|| {
+                                        invalid("unbound restored view dependency")
+                                    })?;
+                                    Ok((n.clone(), t.rows.materialize()?.batch))
+                                })
+                                .collect::<Result<_>>()?;
+                        let dependency_rows =
+                            tables
+                                .values()
+                                .try_fold(0u64, |rows, batch: &RecordBatch| {
+                                    rows.checked_add(batch.num_rows() as u64)
+                                        .ok_or(Error::Overflow)
+                                })?;
+                        let engine = SqlView::new_with_optimizer(
+                            &v.sql,
+                            tables,
+                            IncrementalOptimizer::default().require_incremental(),
+                        )
+                        .await?;
+                        let output = engine.contents()?;
+                        if Bag::from_batch(&output)? != v.output.to_bag()? {
+                            return Err(invalid(
+                                "restored materialized view differs from committed result",
+                            ));
+                        }
+                        if let ViewOutput::Ordered(expected) = &v.output {
+                            if !crate::store::batches_equal(&output, expected) {
+                                return Err(invalid(
+                                    "restored ordered materialized view differs from committed order",
+                                ));
+                            }
+                        }
+                        recovery.record_view(dependency_rows, &output, v.output.num_rows())?;
+                        engine
+                    }
+                },
+            };
             let plan = sql::plan_query(
                 &sql::context(&committed, RelationScope::BaseTables)?,
                 &v.sql,
@@ -99,9 +171,9 @@ impl SqlSession {
             if sql::reads(&plan)? != v.dependencies {
                 return Err(invalid("restored dependency catalog differs from SQL"));
             }
-            recovery.record_view(dependency_rows, &output, v.output.num_rows())?;
             views.insert(name.clone(), engine);
         }
+        recovery.store = store.work()?;
         Ok(Self {
             store,
             committed,
@@ -109,6 +181,7 @@ impl SqlSession {
             transaction: None,
             fenced: false,
             recovery,
+            options,
         })
     }
 
@@ -593,7 +666,12 @@ impl SqlSession {
             candidates,
             snapshot: next,
         } = tx.prepare(self.committed.epoch, &self.views).await?;
-        self.publish(next, request, &response, observer)?;
+        let mut checkpoints = self.select_checkpoints(&next, &candidates)?;
+        if let Some((name, engine)) = &created {
+            let schemas = view_schemas(&next, name)?;
+            checkpoints.insert(name.clone(), engine.export_state(&schemas)?);
+        }
+        self.publish(next, checkpoints, request, &response, observer)?;
         self.install(candidates)?;
         if let Some((name, engine)) = created {
             self.views.insert(name, engine);
@@ -617,9 +695,35 @@ impl SqlSession {
             candidates,
             snapshot: next,
         } = tx.prepare(self.committed.epoch, &self.views).await?;
-        self.publish(next, request, &report, observer)?;
+        let checkpoints = self.select_checkpoints(&next, &candidates)?;
+        self.publish(next, checkpoints, request, &report, observer)?;
         self.install(candidates)?;
         Ok(SqlResponse::committed(report, false))
+    }
+
+    fn select_checkpoints(
+        &self,
+        next: &DatabaseSnapshot,
+        candidates: &BTreeMap<String, PreparedSqlRefresh>,
+    ) -> Result<BTreeMap<String, ViewStateSnapshot>> {
+        let mut out = BTreeMap::new();
+        for (name, candidate) in candidates {
+            let needs_checkpoint = match self.store.view_state_ref(name) {
+                None => true,
+                Some(prev) => {
+                    prev.affected_commits.saturating_add(1) >= self.options.checkpoint_interval
+                }
+            };
+            if needs_checkpoint {
+                let view = self
+                    .views
+                    .get(name)
+                    .ok_or_else(|| invalid("prepared view missing during checkpoint export"))?;
+                let schemas = view_schemas(next, name)?;
+                out.insert(name.clone(), candidate.export_state(view, &schemas)?);
+            }
+        }
+        Ok(out)
     }
 
     /// Publish the shared root while keeping the session fenced until installation.
@@ -627,6 +731,7 @@ impl SqlSession {
     fn publish(
         &mut self,
         next: DatabaseSnapshot,
+        checkpoints: BTreeMap<String, ViewStateSnapshot>,
         request: Option<RequestIdentity>,
         report: &CommitReport,
         observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
@@ -638,7 +743,8 @@ impl SqlSession {
         });
         // Any publication error fences this session, including an ambiguous fsync.
         self.fenced = true;
-        self.store.commit(next.clone(), receipt, observer)?;
+        self.store
+            .commit(next.clone(), checkpoints, receipt, observer)?;
         self.committed = next;
         Ok(())
     }
@@ -663,6 +769,113 @@ fn allocate(snapshot: &mut DatabaseSnapshot) -> Result<u64> {
     let id = snapshot.next_id;
     snapshot.next_id = id.checked_add(1).ok_or(Error::Overflow)?;
     Ok(id)
+}
+
+fn view_schemas(
+    snapshot: &DatabaseSnapshot,
+    view_name: &str,
+) -> Result<BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>> {
+    let view = snapshot
+        .views
+        .get(view_name)
+        .ok_or_else(|| invalid("unknown view while collecting schemas"))?;
+    view.dependencies
+        .iter()
+        .map(|dep| {
+            let table = snapshot
+                .tables
+                .get(dep)
+                .ok_or_else(|| invalid("unbound view dependency table"))?;
+            Ok((dep.clone(), table.rows.schema()))
+        })
+        .collect()
+}
+
+async fn try_restore_view(
+    store: &mut DatabaseStore,
+    committed: &DatabaseSnapshot,
+    name: &str,
+    view: &ViewData,
+    expected_fp: &str,
+) -> Result<(SqlView, u64, u64, crate::state_codec::StateReadStats)> {
+    let checkpoint_epoch = store
+        .view_state_ref(name)
+        .ok_or_else(|| invalid("missing persisted operator state checkpoint for view"))?
+        .checkpoint_epoch;
+    let (state_snap, state_reads) = store.load_view_state(name, expected_fp)?;
+    let raw_deltas = store.table_deltas_since(checkpoint_epoch)?;
+    // Decode only deltas belonging to this view's dependency tables and accumulate net
+    // post-checkpoint change per dependency so `B_checkpoint = B_head - sum(D)`.
+    let mut cumulative_by_table = BTreeMap::<String, Bag>::new();
+    let mut per_epoch_changes = Vec::new();
+    let mut replayed_delta_rows = 0u64;
+    for (_ep, epoch_deltas) in raw_deltas {
+        let mut epoch_changes = Vec::new();
+        for dep in &view.dependencies {
+            let Some(delta_batch) = epoch_deltas.get(dep) else {
+                continue;
+            };
+            let table = committed
+                .tables
+                .get(dep)
+                .ok_or_else(|| invalid("unbound view dependency during restore"))?;
+            let bag = read_delta(delta_batch, table.rows.schema())?;
+            if bag.is_empty() {
+                continue;
+            }
+            replayed_delta_rows = replayed_delta_rows
+                .checked_add(bag.len() as u64)
+                .ok_or(Error::Overflow)?;
+            let next_cum = match cumulative_by_table.remove(dep) {
+                Some(prev) => prev.add(&bag)?,
+                None => bag.clone(),
+            };
+            cumulative_by_table.insert(dep.clone(), next_cum);
+            epoch_changes.extend(sql::changes(dep, &bag)?);
+        }
+        if !epoch_changes.is_empty() {
+            per_epoch_changes.push(epoch_changes);
+        }
+    }
+    let mut source_bags = BTreeMap::new();
+    for dep in &view.dependencies {
+        let table = committed
+            .tables
+            .get(dep)
+            .ok_or_else(|| invalid("unbound view dependency during restore"))?;
+        let head_bag = table.rows.to_bag()?;
+        let cp_bag = match cumulative_by_table.get(dep) {
+            Some(total_delta) => head_bag.difference(total_delta)?,
+            None => head_bag,
+        };
+        cp_bag.validate_relation()?;
+        source_bags.insert(dep.clone(), cp_bag);
+    }
+    let mut engine = SqlView::restore_from_state(
+        &view.sql,
+        source_bags,
+        IncrementalOptimizer::default().require_incremental(),
+        state_snap,
+    )
+    .await?;
+    let replayed_epochs = per_epoch_changes.len() as u64;
+    for changes in per_epoch_changes {
+        let candidate = engine.prepare(&changes).await?;
+        engine.acknowledge(candidate)?;
+    }
+    if engine.output_blocks()?.to_bag()? != view.output.to_bag()? {
+        return Err(invalid(
+            "incrementally restored view differs from committed output",
+        ));
+    }
+    if let ViewOutput::Ordered(expected) = &view.output {
+        if !crate::store::batches_equal(&engine.contents()?, expected) {
+            return Err(invalid(
+                "incrementally restored ordered view differs from committed order",
+            ));
+        }
+    }
+    Ok((engine, replayed_epochs, replayed_delta_rows, state_reads))
 }
 
 fn read_delta(batch: &RecordBatch, schema: datafusion::arrow::datatypes::SchemaRef) -> Result<Bag> {

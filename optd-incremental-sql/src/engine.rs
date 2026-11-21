@@ -22,6 +22,7 @@ use crate::planner::{IncrementalOptimizer, IncrementalPlan, Strategy};
 use crate::rank_state::RankState;
 use crate::row_blocks::RowBlocks;
 use crate::source_state::SourceState;
+use crate::state_codec::{OperatorStateSnapshot, ViewStateSnapshot};
 use crate::store::Snapshot;
 use crate::{Error, Result};
 
@@ -81,6 +82,77 @@ impl PreparedSqlRefresh {
             .rows
             .clone())
     }
+    /// Export this prepared candidate's complete derived state before acknowledging it.
+    pub(crate) fn export_state(
+        &self,
+        view: &SqlView,
+        schemas: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+    ) -> Result<ViewStateSnapshot> {
+        export_view_parts(
+            view,
+            self.epoch(),
+            schemas,
+            &self.states,
+            &self.accumulators,
+            &self.keyed,
+            &self.groups,
+            &self.ranks,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_view_parts(
+    view: &SqlView,
+    view_epoch: u64,
+    schemas: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+    states: &[Relation],
+    accumulators: &[Option<AccumulatorState>],
+    keyed: &[Option<KeyedState>],
+    groups: &[Option<GroupState>],
+    ranks: &[Option<RankState>],
+) -> Result<ViewStateSnapshot> {
+    let plan_fingerprint = view.incremental_plan.fingerprint(&view.sql, schemas)?;
+    let node_relations = states.iter().map(|rel| rel.rows.clone()).collect();
+    let mut operators = Vec::with_capacity(view.nodes.len());
+    for id in 0..view.nodes.len() {
+        let op = match &view.incremental_plan.programs()[id].state {
+            Some(StateSpec::Accumulator { .. }) => {
+                let state = accumulators[id]
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing accumulator state on export".into()))?;
+                Some(OperatorStateSnapshot::Accumulator(
+                    state.export_persisted()?,
+                ))
+            }
+            Some(StateSpec::Keyed(_)) => {
+                let state = keyed[id]
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing keyed state on export".into()))?;
+                Some(OperatorStateSnapshot::Keyed(state.export_persisted()?))
+            }
+            Some(StateSpec::Group { .. }) => {
+                let state = groups[id]
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing group state on export".into()))?;
+                Some(OperatorStateSnapshot::Group(state.export_persisted()?))
+            }
+            Some(StateSpec::Rank { .. }) => {
+                let state = ranks[id]
+                    .as_ref()
+                    .ok_or_else(|| Error::Invalid("missing rank state on export".into()))?;
+                Some(OperatorStateSnapshot::Rank(state.export_persisted()?))
+            }
+            None => None,
+        };
+        operators.push(op);
+    }
+    Ok(ViewStateSnapshot {
+        view_epoch,
+        plan_fingerprint,
+        node_relations,
+        operators,
+    })
 }
 
 /// A typed SQL definition with operator-local maintained relations.
@@ -359,6 +431,165 @@ impl SqlView {
             .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
             .rows
             .clone())
+    }
+
+    /// Export this view's committed derived state for operator-state checkpointing.
+    pub(crate) fn export_state(
+        &self,
+        schemas: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+    ) -> Result<ViewStateSnapshot> {
+        export_view_parts(
+            self,
+            self.epoch,
+            schemas,
+            &self.states,
+            &self.accumulators,
+            &self.keyed,
+            &self.groups,
+            &self.ranks,
+        )
+    }
+
+    /// Compile the strict incremental plan against schemas only and return its fingerprint.
+    pub(crate) async fn compile_fingerprint(
+        sql: &str,
+        schemas: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+        optimizer: IncrementalOptimizer,
+    ) -> Result<String> {
+        let ctx = context();
+        for (name, schema) in schemas {
+            ctx.register_batch(name, RecordBatch::new_empty(Arc::clone(schema)))?;
+        }
+        let compilation = crate::planning::compile(&ctx, sql, &optimizer).await?;
+        let (_, plan) = compilation.into_plan(optimizer.requires_incremental())?;
+        plan.fingerprint(sql, schemas)
+    }
+
+    /// Restore a `SqlView` directly from persisted operator states without full SQL evaluation.
+    pub(crate) async fn restore_from_state(
+        sql: &str,
+        source_bags: BTreeMap<String, Bag>,
+        optimizer: IncrementalOptimizer,
+        snapshot: ViewStateSnapshot,
+    ) -> Result<Self> {
+        let ctx = context();
+        let schemas: BTreeMap<String, datafusion::arrow::datatypes::SchemaRef> = source_bags
+            .iter()
+            .map(|(name, bag)| (name.clone(), bag.schema()))
+            .collect();
+        for (name, schema) in &schemas {
+            ctx.register_batch(name, RecordBatch::new_empty(Arc::clone(schema)))?;
+        }
+        let compilation = crate::planning::compile(&ctx, sql, &optimizer).await?;
+        let (nodes, incremental_plan) = compilation.into_plan(optimizer.requires_incremental())?;
+        let actual_fingerprint = incremental_plan.fingerprint(sql, &schemas)?;
+        if actual_fingerprint != snapshot.plan_fingerprint {
+            return Err(Error::Invalid(
+                "persisted view state fingerprint differs from compiled plan".into(),
+            ));
+        }
+        if snapshot.node_relations.len() != nodes.len() || snapshot.operators.len() != nodes.len() {
+            return Err(Error::Invalid(
+                "persisted view state node count differs from compiled plan".into(),
+            ));
+        }
+        let templates = incremental_plan
+            .programs()
+            .iter()
+            .map(|program| ProgramTemplates::compile(&ctx, program))
+            .collect::<Result<Vec<_>>>()?;
+        let states: Vec<Relation> = snapshot
+            .node_relations
+            .into_iter()
+            .map(|rows| Relation { rows })
+            .collect();
+        let mut accumulators = vec![None; nodes.len()];
+        let mut keyed = vec![None; nodes.len()];
+        let mut groups = vec![None; nodes.len()];
+        let mut ranks = vec![None; nodes.len()];
+        for (id, op_snap) in snapshot.operators.into_iter().enumerate() {
+            match (&incremental_plan.programs()[id].state, op_snap) {
+                (
+                    Some(StateSpec::Accumulator {
+                        input, operator, ..
+                    }),
+                    Some(OperatorStateSnapshot::Accumulator(snap)),
+                ) => {
+                    accumulators[id] = Some(AccumulatorState::from_persisted(
+                        &ctx,
+                        operator,
+                        states[*input].rows.schema(),
+                        snap,
+                    )?);
+                }
+                (Some(StateSpec::Keyed(spec)), Some(OperatorStateSnapshot::Keyed(snap))) => {
+                    let input_schemas = spec
+                        .inputs
+                        .iter()
+                        .map(|i| states[*i].rows.schema())
+                        .collect();
+                    let output_schema = spec
+                        .output_projection
+                        .as_ref()
+                        .map(|_| states[id].rows.schema());
+                    keyed[id] = Some(KeyedState::from_persisted(
+                        &ctx,
+                        spec,
+                        input_schemas,
+                        output_schema,
+                        snap,
+                    )?);
+                }
+                (
+                    Some(StateSpec::Group { input, .. }),
+                    Some(OperatorStateSnapshot::Group(snap)),
+                ) => {
+                    groups[id] = Some(GroupState::from_persisted(
+                        states[*input].rows.schema(),
+                        states[id].rows.schema(),
+                        snap,
+                    )?);
+                }
+                (
+                    Some(StateSpec::Rank {
+                        input, operator, ..
+                    }),
+                    Some(OperatorStateSnapshot::Rank(snap)),
+                ) => {
+                    ranks[id] = Some(RankState::from_persisted(
+                        &ctx,
+                        operator,
+                        states[*input].rows.schema(),
+                        snap,
+                    )?);
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(Error::Invalid(
+                        "persisted operator state variant differs from compiled StateSpec".into(),
+                    ));
+                }
+            }
+        }
+        let tables = source_bags
+            .into_iter()
+            .map(|(name, bag)| Ok((name, SourceState::new(bag)?)))
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            sql: sql.into(),
+            owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
+            epoch: snapshot.view_epoch,
+            nodes,
+            incremental_plan,
+            templates,
+            states,
+            groups,
+            keyed,
+            accumulators,
+            ranks,
+            tables,
+            ctx,
+        })
     }
     /// Canonical source snapshots at this epoch, suitable for a separate oracle.
     pub fn tables(&self) -> Result<BTreeMap<String, RecordBatch>> {

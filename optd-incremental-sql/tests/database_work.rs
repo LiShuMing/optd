@@ -185,14 +185,14 @@ async fn reopen_history_and_retry_have_separate_actual_work() {
     assert_eq!(open.tables.read.rows, 12);
     assert_eq!(open.view_outputs.read.rows, 11);
     assert_eq!(open.output_deltas.read.rows, 1);
-    // The head is read for restoration and again during complete lineage validation.
-    assert_eq!(open.manifest_reads.files, epoch + 1);
+    // The head is read for restoration, complete lineage is validated, plus 1 delta manifest for replay.
+    assert_eq!(open.manifest_reads.files, epoch + 2);
     assert_eq!(open.manifests_visited, epoch);
-    assert_eq!(recovery.rebuilt_views, 1);
-    assert_eq!(recovery.dependency_rows, 11);
-    assert_eq!(recovery.output_rows, 11);
+    assert_eq!(recovery.rebuilt_views, 0);
+    assert_eq!(recovery.restored_views, Some(1));
+    assert_eq!(recovery.replayed_epochs, Some(1));
+    assert_eq!(recovery.dependency_rows, 0);
     assert_eq!(recovery.verified_output_rows, 11);
-    assert!(recovery.output_array_bytes > 0);
     let retry = db.execute_request("once", sql).await.unwrap();
     assert!(retry.replayed);
     assert_eq!(
@@ -306,11 +306,12 @@ async fn recovery_counts_shared_dependencies_once_per_reconstructed_view() {
     drop(db);
     let db = SqlSession::open(root.path()).await.unwrap();
     let recovery = db.recovery_work();
-    assert_eq!(recovery.rebuilt_views, 2);
-    assert_eq!(recovery.dependency_rows, 20);
-    assert_eq!(recovery.output_rows, 19);
+    assert_eq!(recovery.rebuilt_views, 0);
+    assert_eq!(recovery.restored_views, Some(2));
+    assert_eq!(recovery.replayed_epochs, Some(0));
+    assert_eq!(recovery.dependency_rows, 0);
     assert_eq!(recovery.verified_output_rows, 19);
-    // Payload decode reads t once, even though both engines rebuild using it.
+    // Payload decode reads t once, and both views restore directly from persisted operator state.
     assert_eq!(recovery.store.tables.read.files, 2);
     assert_eq!(recovery.store.tables.read.rows, 11);
     assert_eq!(recovery.store.view_outputs.read.files, 2);

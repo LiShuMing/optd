@@ -16,6 +16,9 @@ use crate::bag::Bag;
 use crate::group_state::{encode_keys, supported_group_key, supported_key, KeyPolicy};
 use crate::metrics::AccumulatorWork;
 use crate::planner::plan::RelationOperator;
+use crate::state_codec::{
+    batch_to_scalar_rows, decode_hex, encode_hex, scalar_rows_to_batch, AccumulatorSnapshot,
+};
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
@@ -234,6 +237,21 @@ impl AccumulatorState {
         operator: &RelationOperator,
         input: &RecordBatch,
     ) -> Result<Self> {
+        let mut state = Self::compile_empty(ctx, operator, input.schema())?;
+        if state.keys.is_empty() {
+            let entry = state.empty_entry(Vec::new())?;
+            state.entries.insert(Vec::new(), Arc::new(entry));
+        }
+        let empty = RecordBatch::new_empty(input.schema());
+        let (state, _, _) = state.update(input, &empty)?;
+        Ok(state)
+    }
+
+    fn compile_empty(
+        ctx: &SessionContext,
+        operator: &RelationOperator,
+        input_schema: SchemaRef,
+    ) -> Result<Self> {
         let LogicalPlan::Aggregate(agg) = operator.template.as_ref() else {
             return Err(Error::Invalid("accumulator requires aggregate".into()));
         };
@@ -255,7 +273,7 @@ impl AccumulatorState {
                 .map(|e| session.create_physical_expr(e.clone(), &operator.inputs[0]))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             let fun = AggregateExprBuilder::new(f.func.clone(), args)
-                .schema(input.schema())
+                .schema(Arc::clone(&input_schema))
                 .alias(operator.schema().field(agg.group_expr.len() + i).name())
                 .build()?;
             // The native cell receives ordinary values or DISTINCT zero crossings.
@@ -271,18 +289,125 @@ impl AccumulatorState {
             };
             functions.push(AggregateSpec::new(fun, f.func.name(), mode)?);
         }
-        let mut state = Self {
+        Ok(Self {
             schema: operator.schema(),
             keys,
             functions,
             entries: StateDirectory::new(),
-        };
-        if state.keys.is_empty() {
-            let entry = state.empty_entry(Vec::new())?;
-            state.entries.insert(Vec::new(), Arc::new(entry));
+        })
+    }
+
+    /// Export all group entries and aggregate cells in deterministic key order.
+    pub(crate) fn export_persisted(&self) -> Result<AccumulatorSnapshot> {
+        let mut group_keys_hex = Vec::with_capacity(self.entries.len());
+        let mut group_rows = Vec::with_capacity(self.entries.len());
+        let mut key_rows = Vec::with_capacity(self.entries.len());
+        let mut output_rows = Vec::with_capacity(self.entries.len());
+        let mut ordered_entries = Vec::with_capacity(self.entries.len());
+        for (key, entry) in self.entries.iter() {
+            group_keys_hex.push(encode_hex(key));
+            group_rows.push(entry.rows);
+            if !self.keys.is_empty() {
+                key_rows.push(entry.keys.clone());
+            }
+            output_rows.push(entry.output.clone());
+            ordered_entries.push(entry.as_ref());
         }
-        let empty = RecordBatch::new_empty(input.schema());
-        let (state, _, _) = state.update(input, &empty)?;
+        let keys_batch = if key_rows.is_empty() {
+            None
+        } else {
+            Some(scalar_rows_to_batch(None, &key_rows)?)
+        };
+        let outputs_batch = scalar_rows_to_batch(Some(Arc::clone(&self.schema)), &output_rows)?;
+        let mut functions = Vec::with_capacity(self.functions.len());
+        for (f_idx, spec) in self.functions.iter().enumerate() {
+            functions.push(spec.export_cells(ordered_entries.iter().map(|e| &e.states[f_idx]))?);
+        }
+        Ok(AccumulatorSnapshot {
+            group_keys_hex,
+            group_rows,
+            keys_batch,
+            outputs_batch,
+            functions,
+        })
+    }
+
+    /// Restore an `AccumulatorState` from a verified persisted snapshot without scanning inputs.
+    pub(crate) fn from_persisted(
+        ctx: &SessionContext,
+        operator: &RelationOperator,
+        input_schema: SchemaRef,
+        snapshot: AccumulatorSnapshot,
+    ) -> Result<Self> {
+        let mut state = Self::compile_empty(ctx, operator, input_schema)?;
+        let group_count = snapshot.group_keys_hex.len();
+        if snapshot.group_rows.len() != group_count
+            || snapshot.outputs_batch.num_rows() != group_count
+            || snapshot.functions.len() != state.functions.len()
+        {
+            return Err(Error::Invalid(
+                "persisted accumulator dimensions differ from compiled aggregate".into(),
+            ));
+        }
+        let outputs = batch_to_scalar_rows(&snapshot.outputs_batch)?;
+        let group_keys: Vec<Vec<ScalarValue>> = if state.keys.is_empty() {
+            if snapshot.keys_batch.is_some() {
+                return Err(Error::Invalid(
+                    "global accumulator snapshot has unexpected group keys".into(),
+                ));
+            }
+            vec![Vec::new(); group_count]
+        } else if group_count == 0 {
+            Vec::new()
+        } else {
+            let batch = snapshot
+                .keys_batch
+                .ok_or_else(|| Error::Invalid("grouped accumulator missing keys batch".into()))?;
+            let rows = batch_to_scalar_rows(&batch)?;
+            if rows.len() != group_count {
+                return Err(Error::Invalid("persisted group key count differs".into()));
+            }
+            rows
+        };
+        let mut restored_cols: Vec<Vec<Cell>> = Vec::with_capacity(state.functions.len());
+        for (spec, fn_snap) in state.functions.iter().zip(snapshot.functions) {
+            restored_cols.push(spec.restore_cells(group_count, fn_snap)?);
+        }
+        // Transpose function-major cells into group-major `Entry`s.
+        let mut per_group_cells: Vec<Vec<Cell>> = (0..group_count)
+            .map(|_| Vec::with_capacity(state.functions.len()))
+            .collect();
+        for col in restored_cols {
+            for (g_idx, cell) in col.into_iter().enumerate() {
+                per_group_cells[g_idx].push(cell);
+            }
+        }
+        for (((key_hex, rows), (keys, output)), states) in snapshot
+            .group_keys_hex
+            .into_iter()
+            .zip(snapshot.group_rows)
+            .zip(group_keys.into_iter().zip(outputs))
+            .zip(per_group_cells)
+        {
+            let key = decode_hex(&key_hex)?;
+            if state
+                .entries
+                .insert(
+                    key,
+                    Arc::new(Entry {
+                        rows,
+                        keys,
+                        states,
+                        output,
+                    }),
+                )
+                .is_some()
+            {
+                return Err(Error::Invalid(
+                    "duplicate group key in persisted accumulator".into(),
+                ));
+            }
+        }
         Ok(state)
     }
 

@@ -12,6 +12,10 @@ use crate::group_state::{encode_keys, partition};
 use crate::metrics::MatchJoinWork;
 use crate::planner::plan::{IndexAlgorithm, IndexSpec};
 use crate::planner::SnapshotVersion;
+use crate::state_codec::{
+    batch_to_indexed_bags, decode_hex, encode_hex, indexed_bags_to_batch, IndexedBagsSnapshot,
+    KeyedBucketMeta, KeyedPortSnapshot, KeyedSnapshot,
+};
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
@@ -162,6 +166,169 @@ impl KeyedState {
             work.record_window_output(outputs.copied_entries()?)?;
         }
         Ok(())
+    }
+
+    /// Export input buckets (preserving row order), optional residual counts and window outputs.
+    pub(crate) fn export_persisted(&self) -> Result<KeyedSnapshot> {
+        let mut ports = Vec::with_capacity(self.inputs.len());
+        for (port_idx, dir) in self.inputs.iter().enumerate() {
+            let schema = &self.schemas[port_idx];
+            let mut buckets = Vec::with_capacity(dir.len());
+            let mut batches = Vec::with_capacity(dir.len());
+            let mut offset = 0usize;
+            for (key, bucket) in dir.iter() {
+                let row_len = bucket.batch.num_rows();
+                buckets.push(KeyedBucketMeta {
+                    key_hex: encode_hex(key),
+                    row_start: offset,
+                    row_len,
+                    key_has_null: bucket.key_has_null,
+                });
+                batches.push(bucket.batch.clone());
+                offset = offset.checked_add(row_len).ok_or(Error::Overflow)?;
+            }
+            let rows_batch = if batches.is_empty() {
+                RecordBatch::new_empty(Arc::clone(schema))
+            } else {
+                concat_batches(schema, &batches)?
+            };
+            ports.push(KeyedPortSnapshot {
+                buckets,
+                rows_batch,
+            });
+        }
+        let residual = self
+            .residual
+            .as_ref()
+            .map(|r| r.export_persisted(&self.schemas))
+            .transpose()?;
+        let outputs = self
+            .outputs
+            .as_ref()
+            .map(|(schema, dir)| -> Result<IndexedBagsSnapshot> {
+                let mut keys_hex = Vec::with_capacity(dir.len());
+                let mut bags = Vec::with_capacity(dir.len());
+                for (idx, (key, bag)) in dir.iter().enumerate() {
+                    keys_hex.push(encode_hex(key));
+                    bags.push((idx as u64, bag.as_ref()));
+                }
+                Ok(IndexedBagsSnapshot {
+                    keys_hex,
+                    rows_batch: indexed_bags_to_batch(schema, &bags)?,
+                })
+            })
+            .transpose()?;
+        Ok(KeyedSnapshot {
+            ports,
+            residual,
+            outputs,
+        })
+    }
+
+    /// Restore a `KeyedState` from a verified persisted snapshot without scanning inputs.
+    pub(crate) fn from_persisted(
+        ctx: &datafusion::prelude::SessionContext,
+        spec: &IndexSpec,
+        input_schemas: Vec<SchemaRef>,
+        output_schema: Option<SchemaRef>,
+        snapshot: KeyedSnapshot,
+    ) -> Result<Self> {
+        if snapshot.ports.len() != input_schemas.len() || spec.projections.is_empty() {
+            return Err(invalid("persisted keyed state port count differs"));
+        }
+        let key_types = spec.projections[0]
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect::<Vec<_>>();
+        let mut inputs = Vec::with_capacity(input_schemas.len());
+        for (port_idx, port_snap) in snapshot.ports.into_iter().enumerate() {
+            let schema = &input_schemas[port_idx];
+            if port_snap.rows_batch.schema() != *schema {
+                return Err(invalid("persisted keyed port schema differs"));
+            }
+            let mut dir = StateDirectory::new();
+            for meta in port_snap.buckets {
+                let end = meta
+                    .row_start
+                    .checked_add(meta.row_len)
+                    .ok_or(Error::Overflow)?;
+                if end > port_snap.rows_batch.num_rows() {
+                    return Err(invalid("persisted keyed bucket slice out of bounds"));
+                }
+                let batch = port_snap.rows_batch.slice(meta.row_start, meta.row_len);
+                let bag = Bag::from_batch(&batch)?;
+                bag.validate_relation()?;
+                let key = decode_hex(&meta.key_hex)?;
+                if dir
+                    .insert(
+                        key,
+                        Arc::new(Bucket {
+                            bag,
+                            batch,
+                            key_has_null: meta.key_has_null,
+                        }),
+                    )
+                    .is_some()
+                {
+                    return Err(invalid("duplicate bucket key in persisted keyed state"));
+                }
+            }
+            inputs.push(dir);
+        }
+        let residual = match (&spec.algorithm, snapshot.residual) {
+            (IndexAlgorithm::MatchCounts(operator), Some(sides)) => Some(
+                match_join::ResidualState::from_persisted(ctx, operator, &input_schemas, sides)?,
+            ),
+            (IndexAlgorithm::MatchCounts(operator), None) => {
+                if let datafusion::logical_expr::LogicalPlan::Join(join) =
+                    operator.template.as_ref()
+                {
+                    if join.filter.is_some() {
+                        return Err(invalid(
+                            "missing persisted residual state for residual match join",
+                        ));
+                    }
+                }
+                None
+            }
+            (IndexAlgorithm::Scoped, None) => None,
+            (IndexAlgorithm::Scoped, Some(_)) => {
+                return Err(invalid(
+                    "unexpected persisted residual state for scoped index",
+                ));
+            }
+        };
+        let outputs = match (output_schema, snapshot.outputs) {
+            (Some(schema), Some(out_snap)) => {
+                let mut bags_by_idx = batch_to_indexed_bags(&out_snap.rows_batch, &schema)?;
+                let mut dir = StateDirectory::new();
+                for (idx, key_hex) in out_snap.keys_hex.into_iter().enumerate() {
+                    let key = decode_hex(&key_hex)?;
+                    let bag = bags_by_idx
+                        .remove(&(idx as u64))
+                        .unwrap_or_else(|| Bag::empty(Arc::clone(&schema)));
+                    if dir.insert(key, Arc::new(bag)).is_some() {
+                        return Err(invalid("duplicate output key in persisted keyed state"));
+                    }
+                }
+                Some((schema, dir))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(invalid(
+                    "persisted keyed window output presence differs from compiled plan",
+                ));
+            }
+        };
+        Ok(Self {
+            schemas: input_schemas,
+            key_types,
+            inputs,
+            residual,
+            outputs,
+        })
     }
 
     /// Bootstrap complete input indexes from aligned row/key batches.

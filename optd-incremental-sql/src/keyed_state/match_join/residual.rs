@@ -3,8 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, BooleanArray, RecordBatch};
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::array::{
+    Array, ArrayRef, BooleanArray, Int64Array, RecordBatch, RecordBatchOptions, UInt64Array,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{NullEquality, ScalarValue};
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_expr::PhysicalExpr;
@@ -14,6 +16,9 @@ use super::super::{Bucket, Key, KeyedDelta, KeyedState};
 use super::{invalid, Output};
 use crate::bag::Bag;
 use crate::planner::plan::RelationOperator;
+use crate::state_codec::{
+    batch_to_scalar_rows, decode_hex, encode_hex, scalar_rows_to_batch, ResidualSideSnapshot,
+};
 use crate::state_directory::StateDirectory;
 use crate::{Error, Result};
 
@@ -50,6 +55,130 @@ fn zero_counts(bucket: Option<&Bucket>) -> Counts {
 }
 
 impl ResidualState {
+    /// Export per-side full-row match counts (including zero-count entries).
+    pub(in crate::keyed_state) fn export_persisted(
+        &self,
+        input_schemas: &[SchemaRef],
+    ) -> Result<[ResidualSideSnapshot; 2]> {
+        let mut sides = Vec::with_capacity(2);
+        for (side, dir) in self.counts.iter().enumerate() {
+            let row_schema = &input_schemas[side];
+            let width = row_schema.fields().len();
+            let mut fields = Vec::with_capacity(width + 2);
+            fields.push(Field::new("__optd_key_idx", DataType::UInt64, false));
+            fields.extend(row_schema.fields().iter().map(|f| f.as_ref().clone()));
+            fields.push(Field::new("__optd_match_count", DataType::Int64, false));
+            let combined_schema = Arc::new(Schema::new(fields));
+
+            let mut keys_hex = Vec::with_capacity(dir.len());
+            let mut key_indices = Vec::new();
+            let mut rows = Vec::new();
+            let mut counts = Vec::new();
+            for (k_idx, (key, map)) in dir.iter().enumerate() {
+                keys_hex.push(encode_hex(key));
+                for (row, &count) in map.iter() {
+                    key_indices.push(k_idx as u64);
+                    rows.push(row.clone());
+                    counts.push(count);
+                }
+            }
+            let counts_batch = if key_indices.is_empty() {
+                RecordBatch::new_empty(combined_schema)
+            } else {
+                let row_batch = scalar_rows_to_batch(Some(Arc::clone(row_schema)), &rows)?;
+                let mut columns = Vec::with_capacity(width + 2);
+                columns.push(Arc::new(UInt64Array::from(key_indices)) as ArrayRef);
+                columns.extend(row_batch.columns().iter().cloned());
+                columns.push(Arc::new(Int64Array::from(counts)) as ArrayRef);
+                RecordBatch::try_new_with_options(
+                    combined_schema,
+                    columns,
+                    &RecordBatchOptions::new().with_row_count(Some(row_batch.num_rows())),
+                )?
+            };
+            sides.push(ResidualSideSnapshot {
+                keys_hex,
+                counts_batch,
+            });
+        }
+        let [left, right]: [ResidualSideSnapshot; 2] = sides
+            .try_into()
+            .map_err(|_| invalid("residual snapshot requires two sides"))?;
+        Ok([left, right])
+    }
+
+    /// Restore compiled residual predicate and persisted per-row match counts.
+    pub(in crate::keyed_state) fn from_persisted(
+        ctx: &SessionContext,
+        operator: &RelationOperator,
+        input_schemas: &[SchemaRef],
+        sides: [ResidualSideSnapshot; 2],
+    ) -> Result<Self> {
+        let LogicalPlan::Join(join) = operator.template.as_ref() else {
+            return Err(invalid("residual state without join"));
+        };
+        let Some(filter) = &join.filter else {
+            return Err(invalid("persisted residual state for non-residual join"));
+        };
+        let schema = operator.inputs[0].join(&operator.inputs[1])?;
+        let expression = ctx.state().create_physical_expr(filter.clone(), &schema)?;
+        let pair_schema = Arc::new(schema.as_arrow().clone());
+        let mut counts = [StateDirectory::new(), StateDirectory::new()];
+        for (side, snap) in sides.into_iter().enumerate() {
+            let row_schema = &input_schemas[side];
+            let width = row_schema.fields().len();
+            if snap.counts_batch.num_columns() != width + 2 {
+                return Err(invalid("persisted residual count batch width differs"));
+            }
+            let key_idx = snap
+                .counts_batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .ok_or_else(|| invalid("invalid residual key index column"))?;
+            let match_counts = snap
+                .counts_batch
+                .column(width + 1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or_else(|| invalid("invalid residual match count column"))?;
+            if key_idx.null_count() != 0 || match_counts.null_count() != 0 {
+                return Err(invalid("NULL metadata in persisted residual counts"));
+            }
+            let row_batch = RecordBatch::try_new_with_options(
+                Arc::clone(row_schema),
+                snap.counts_batch.columns()[1..=width].to_vec(),
+                &RecordBatchOptions::new().with_row_count(Some(snap.counts_batch.num_rows())),
+            )?;
+            let rows = batch_to_scalar_rows(&row_batch)?;
+            let mut per_key: Vec<Counts> =
+                (0..snap.keys_hex.len()).map(|_| Counts::new()).collect();
+            for (i, row) in rows.into_iter().enumerate() {
+                let c = match_counts.value(i);
+                if c < 0 {
+                    return Err(invalid("negative persisted residual match count"));
+                }
+                let map = per_key
+                    .get_mut(key_idx.value(i) as usize)
+                    .ok_or_else(|| invalid("residual key index out of bounds"))?;
+                if map.insert(row, c).is_some() {
+                    return Err(invalid("duplicate row in persisted residual match counts"));
+                }
+            }
+            for (key_hex, map) in snap.keys_hex.into_iter().zip(per_key) {
+                let key = decode_hex(&key_hex)?;
+                if counts[side].insert(key, Arc::new(map)).is_some() {
+                    return Err(invalid("duplicate key in persisted residual state"));
+                }
+            }
+        }
+        Ok(Self {
+            expression,
+            pair_schema,
+            counts,
+        })
+    }
+
     /// Full bootstrap is deliberate; refresh never repeats unchanged row pairs.
     pub(in crate::keyed_state) fn initialize(
         state: &KeyedState,

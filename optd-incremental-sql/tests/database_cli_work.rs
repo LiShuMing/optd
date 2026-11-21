@@ -49,11 +49,13 @@ async fn sql_command_separates_retry_recovery_and_verification_work() {
     assert_eq!(retry["work"]["storage"]["tables"]["written"]["rows"], 0);
     // O(1) receipt index resolves retry without traversing historical manifests.
     assert_eq!(retry["work"]["storage"]["manifest_reads"]["files"], 0);
+    // R07b restores the view incrementally (replayed 1 delta epoch, zero full rebuilds).
     assert_eq!(
         retry["work"]["recovery"]["store"]["manifest_reads"]["files"],
-        5
+        6
     );
-    assert_eq!(retry["work"]["recovery"]["rebuilt_views"], 1);
+    assert_eq!(retry["work"]["recovery"]["rebuilt_views"], 0);
+    assert_eq!(retry["work"]["recovery"]["restored_views"], 1);
     let replay = run(&root, &["--replay"]).await;
     assert_eq!(replay["output_history_verified"], true);
     assert_eq!(replay["work"]["storage"]["manifest_reads"]["files"], 4);

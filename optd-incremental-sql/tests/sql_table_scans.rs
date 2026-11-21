@@ -97,10 +97,10 @@ async fn fixed_transaction_prefix_reads_do_not_expand_untouched_tables_or_duplic
         let response = session.execute("SELECT k FROM t LIMIT 1").await.unwrap();
         let reads = response.table_reads.unwrap();
         assert_eq!(reads.leaf_chunks, 1);
-        // Before R07b operator-state restore, open materializes `t` to rebuild `v`,
-        // warming the leaf cache so this prefix read is served as a cache hit.
-        assert_eq!(reads.cache_hits, 1);
-        assert_eq!(reads.materialization.materialized_rows, 0);
+        // R07b restores `v` from persisted operator state without materializing `t`,
+        // so this prefix read materializes only 1 row from the uncached first leaf.
+        assert_eq!(reads.cache_hits, 0);
+        assert_eq!(reads.materialization.materialized_rows, 1);
         session.verify_output_history().unwrap();
     }
 }

@@ -243,26 +243,55 @@ impl StoreWork {
 /// Successful SQL open work, immutable for the lifetime of the session.
 ///
 /// Reconstruction rows count the inputs/results of each rebuilt view separately.
-/// They do not count internal operator visits, planning work or allocator traffic.
-/// CREATE MV bootstrap is outside this open-time record.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Incrementally restored views leave `rebuilt_views` and `dependency_rows` at zero
+/// and report actual state loads and bounded delta replays separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryWork {
     /// Actual completed store operations while opening the database.
     pub store: StoreWork,
-    /// Views whose strict plans and derived execution state were rebuilt.
+    /// Views whose strict plans and derived execution state were fully rebuilt from base tables.
     pub rebuilt_views: u64,
-    /// Expanded dependency rows supplied to those view reconstructions.
+    /// Expanded dependency rows supplied to full view reconstructions.
     pub dependency_rows: u64,
     /// Expanded rows materialized for reconstructed view-output verification.
     pub output_rows: u64,
     /// Sum of Arrow array buffer sizes for those reconstructed output batches.
     pub output_array_bytes: u64,
-    /// Durable view-output rows compared with reconstructed output Bags.
+    /// Durable view-output rows compared with reconstructed or restored output Bags.
     pub verified_output_rows: u64,
+    /// Views restored directly from persisted operator-state checkpoints plus bounded replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_views: Option<u64>,
+    /// Number of delta epochs replayed after loading persisted operator-state checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_epochs: Option<u64>,
+    /// Consolidated signed base-table delta rows replayed during incremental recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replayed_delta_rows: Option<u64>,
+    /// Operator-state checkpoint files, bytes and rows read during incremental recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_payload_reads: Option<PayloadWork>,
+}
+
+impl Default for RecoveryWork {
+    fn default() -> Self {
+        Self {
+            store: StoreWork::default(),
+            rebuilt_views: 0,
+            dependency_rows: 0,
+            output_rows: 0,
+            output_array_bytes: 0,
+            verified_output_rows: 0,
+            restored_views: Some(0),
+            replayed_epochs: Some(0),
+            replayed_delta_rows: Some(0),
+            state_payload_reads: Some(PayloadWork::default()),
+        }
+    }
 }
 
 impl RecoveryWork {
-    /// Called only after the reconstruction output and dependency checks succeeded.
+    /// Called only after full reconstruction output and dependency checks succeeded.
     pub(super) fn record_view(
         &mut self,
         dependency_rows: u64,
@@ -277,6 +306,42 @@ impl RecoveryWork {
             &mut next.output_array_bytes,
             output.get_array_memory_size() as u64,
         )?;
+        add(&mut next.verified_output_rows, verified_rows as u64)?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Called only after incremental operator-state restore and output verification succeeded.
+    pub(super) fn record_restored_view(
+        &mut self,
+        replayed_epochs: u64,
+        replayed_delta_rows: u64,
+        state_reads: &crate::state_codec::StateReadStats,
+        verified_rows: usize,
+    ) -> Result<()> {
+        let mut next = self.clone();
+        let restored = next
+            .restored_views
+            .as_mut()
+            .ok_or_else(|| invalid("live recovery lacks restored_views domain"))?;
+        add(restored, 1)?;
+        let epochs = next
+            .replayed_epochs
+            .as_mut()
+            .ok_or_else(|| invalid("live recovery lacks replayed_epochs domain"))?;
+        add(epochs, replayed_epochs)?;
+        let delta_rows = next
+            .replayed_delta_rows
+            .as_mut()
+            .ok_or_else(|| invalid("live recovery lacks replayed_delta_rows domain"))?;
+        add(delta_rows, replayed_delta_rows)?;
+        let reads = next
+            .state_payload_reads
+            .as_mut()
+            .ok_or_else(|| invalid("live recovery lacks state_payload_reads domain"))?;
+        add(&mut reads.files, state_reads.files)?;
+        add(&mut reads.bytes, state_reads.bytes)?;
+        add(&mut reads.rows, state_reads.rows)?;
         add(&mut next.verified_output_rows, verified_rows as u64)?;
         *self = next;
         Ok(())

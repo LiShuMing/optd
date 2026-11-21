@@ -577,7 +577,8 @@ mod tests {
         for round in result["rounds"].as_array().ok_or("rounds")? {
             assert_eq!(round["storage_work"]["manifest_writes"]["files"], 1);
             assert_eq!(round["storage_work"]["tables"]["read"]["files"], 0);
-            assert_eq!(round["recovery_work"]["rebuilt_views"], 1);
+            assert_eq!(round["recovery_work"]["rebuilt_views"], 0);
+            assert_eq!(round["recovery_work"]["restored_views"], 1);
             assert!(
                 round["verification_store_work_before_reopen"]["manifest_reads"]["files"]
                     .as_u64()

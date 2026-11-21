@@ -53,6 +53,32 @@ impl OrderedValues {
             .map(|entry| (&entry.value, entry.count as u64))
     }
 
+    /// Reconstruct an ordered value index from persisted positive `(value, count)` pairs.
+    pub(super) fn from_persisted(
+        converter: &RowConverter,
+        entries: Vec<(ScalarValue, i64)>,
+    ) -> Result<Self> {
+        let mut values = StateDirectory::new();
+        if entries.is_empty() {
+            return Ok(Self { values });
+        }
+        let array = ScalarValue::iter_to_array(entries.iter().map(|(v, _)| v.clone()))?;
+        let encoded = converter.convert_columns(&[array])?;
+        for (i, (value, count)) in entries.into_iter().enumerate() {
+            if value.is_null() || count <= 0 {
+                return Err(invalid("invalid persisted ordered-value entry"));
+            }
+            let key = encoded.row(i).as_ref().to_vec();
+            if values
+                .insert(key, Arc::new(ValueCount { value, count }))
+                .is_some()
+            {
+                return Err(invalid("duplicate key in persisted ordered-value index"));
+            }
+        }
+        Ok(Self { values })
+    }
+
     /// Update one private cloned cell; callers discard it after any error.
     /// Full-row deletion validity belongs to the graph; this index checks value counts.
     pub(super) fn apply(

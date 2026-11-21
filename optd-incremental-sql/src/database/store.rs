@@ -19,6 +19,7 @@ use super::table_rows::TableRows;
 use crate::bag::{Bag, MAX_MATERIALIZED_BYTES};
 use crate::error::invalid;
 use crate::row_blocks::{BlockOrderMode, BlockUid, PersistedBlock};
+use crate::state_codec::{self, StateReadStats, ViewStateSnapshot};
 use crate::store::{
     batches_equal, component, json_bytes, read_batch, read_json_file, sync_dir, verified_file,
     write_batch, write_bytes, CheckpointDirectories, FileEntry, PublishPoint,
@@ -195,6 +196,18 @@ struct ViewEntry {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ViewStateRef {
+    pub checkpoint_epoch: u64,
+    pub affected_commits: u64,
+    pub plan_fingerprint: String,
+    directory: String,
+    state_subdir: String,
+    operator_manifest: FileEntry,
+    node_relations: Vec<BlockRelationEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     format: String,
     epoch: u64,
@@ -204,6 +217,8 @@ struct Manifest {
     views: BTreeMap<String, ViewEntry>,
     table_deltas: BTreeMap<String, Payload>,
     deltas: BTreeMap<String, Payload>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    view_states: BTreeMap<String, ViewStateRef>,
     receipt_index: Option<Payload>,
     receipt: Option<Receipt>,
 }
@@ -357,6 +372,11 @@ impl DatabaseStore {
         }
         if m.table_deltas.keys().any(|n| !m.tables.contains_key(n)) {
             return Err(invalid("table delta has no live base table"));
+        }
+        if m.view_states.keys().any(|n| !m.views.contains_key(n)) {
+            return Err(invalid(
+                "persisted view state has no live materialized view",
+            ));
         }
         Ok(m)
     }
@@ -566,8 +586,95 @@ impl DatabaseStore {
         Ok(Some(receipt.report.clone()))
     }
 
+    /// Return the latest persisted operator-state descriptor for a view, if any.
+    pub fn view_state_ref(&self, name: &str) -> Option<&ViewStateRef> {
+        self.manifest.as_ref()?.view_states.get(name)
+    }
+
+    /// Load and SHA-256-verify persisted operator state and intermediate relation blocks for a view.
+    pub fn load_view_state(
+        &mut self,
+        name: &str,
+        expected_fingerprint: &str,
+    ) -> Result<(ViewStateSnapshot, StateReadStats)> {
+        let state_ref = self
+            .manifest
+            .as_ref()
+            .and_then(|m| m.view_states.get(name))
+            .cloned()
+            .ok_or_else(|| invalid("missing persisted operator state for view"))?;
+        if state_ref.plan_fingerprint != expected_fingerprint {
+            return Err(invalid(
+                "persisted view state fingerprint differs from compiled plan",
+            ));
+        }
+        if !component(&state_ref.state_subdir) || !state_ref.state_subdir.starts_with("states-v-") {
+            return Err(invalid("invalid persisted view state subdirectory"));
+        }
+        let state_dir = self
+            .directory(&state_ref.directory)?
+            .join(&state_ref.state_subdir);
+        let mut loaded = state_codec::read_operator_states(
+            &state_dir,
+            &state_ref.operator_manifest,
+            expected_fingerprint,
+        )?;
+        let mut node_relations = Vec::with_capacity(state_ref.node_relations.len());
+        for rel_entry in &state_ref.node_relations {
+            let schema_batch = read_batch(
+                &self.directory(&rel_entry.schema.directory)?,
+                &rel_entry.schema.file,
+            )?;
+            if schema_batch.num_rows() != 0 {
+                return Err(invalid(
+                    "persisted state relation schema must have zero rows",
+                ));
+            }
+            let schema = schema_batch.schema();
+            let entries = self.read_block_list(&rel_entry.blocks)?;
+            let mut persisted = Vec::with_capacity(entries.len());
+            for block in &entries {
+                let weighted_batch = read_batch(
+                    &self.directory(&block.payload.directory)?,
+                    &block.payload.file,
+                )?;
+                loaded.stats.files = loaded.stats.files.checked_add(1).ok_or(Error::Overflow)?;
+                loaded.stats.bytes = loaded
+                    .stats
+                    .bytes
+                    .checked_add(block.payload.file.bytes)
+                    .ok_or(Error::Overflow)?;
+                loaded.stats.rows = loaded
+                    .stats
+                    .rows
+                    .checked_add(block.row_count as u64)
+                    .ok_or(Error::Overflow)?;
+                persisted.push(PersistedBlock {
+                    expected_min_key_sha256: block.min_key_sha256.clone(),
+                    expected_row_count: block.row_count,
+                    expected_distinct_entries: block.distinct_entries,
+                    weighted_batch,
+                });
+            }
+            let (rows, uids, _) =
+                TableRows::from_persisted_blocks(schema, rel_entry.order_mode.into(), persisted)?;
+            for (uid, block) in uids.into_iter().zip(entries) {
+                self.committed_blocks.insert(uid, block);
+            }
+            node_relations.push(rows);
+        }
+        Ok((
+            ViewStateSnapshot {
+                view_epoch: loaded.view_epoch,
+                plan_fingerprint: loaded.plan_fingerprint,
+                node_relations,
+                operators: loaded.operators,
+            },
+            loaded.stats,
+        ))
+    }
+
     /// Read consolidated base-table deltas strictly after `after_epoch` through `CURRENT`.
-    #[allow(dead_code)]
     pub fn table_deltas_since(
         &self,
         after_epoch: u64,
@@ -686,6 +793,68 @@ impl DatabaseStore {
         })
     }
 
+    fn write_state_block_relation(
+        &self,
+        stage: &mut CommitStage<'_>,
+        prefix: &str,
+        rows: &TableRows,
+    ) -> Result<BlockRelationEntry> {
+        let empty = RecordBatch::new_empty(rows.schema());
+        let schema_file = write_batch(stage.dir, &format!("schema-{prefix}.arrow"), &empty)?;
+        let schema = Payload {
+            directory: stage.dir_name.to_owned(),
+            file: schema_file,
+        };
+        let mut entries = Vec::with_capacity(rows.block_count());
+        for (seq, block) in rows.iter_blocks().enumerate() {
+            let uid = block.uid();
+            let entry = if let Some(existing) = stage
+                .next_blocks
+                .get(&uid)
+                .or_else(|| self.committed_blocks.get(&uid))
+            {
+                existing.clone()
+            } else {
+                let weighted = block.weighted_batch()?;
+                let filename = format!("{prefix}-b-{seq}.arrow");
+                let file = write_batch(stage.dir, &filename, &weighted)?;
+                BlockEntry {
+                    min_key_sha256: block.min_key_sha256(),
+                    row_count: block.row_count(),
+                    distinct_entries: block.distinct_entries(),
+                    payload: Payload {
+                        directory: stage.dir_name.to_owned(),
+                        file,
+                    },
+                }
+            };
+            stage.next_blocks.insert(uid, entry.clone());
+            entries.push(entry);
+        }
+        let blocks = if entries.len() <= INLINE_BLOCK_LIMIT {
+            BlockListRef::Inline(entries)
+        } else {
+            let block_count = entries.len();
+            let file = write_bytes(
+                stage.dir,
+                &format!("blocks-{prefix}.json"),
+                &json_bytes(&entries)?,
+            )?;
+            BlockListRef::External {
+                block_count,
+                payload: Payload {
+                    directory: stage.dir_name.to_owned(),
+                    file,
+                },
+            }
+        };
+        Ok(BlockRelationEntry {
+            schema,
+            order_mode: rows.order_mode().into(),
+            blocks,
+        })
+    }
+
     /// Publish exactly the successor epoch, checking that `CURRENT` still matches.
     ///
     /// Unchanged blocks are reused by immutable `BlockUid` without flattening or
@@ -694,6 +863,7 @@ impl DatabaseStore {
     pub fn commit(
         &mut self,
         next: DatabaseSnapshot,
+        mut view_state_checkpoints: BTreeMap<String, ViewStateSnapshot>,
         receipt: Option<Receipt>,
         observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
     ) -> Result<()> {
@@ -905,6 +1075,53 @@ impl DatabaseStore {
             })
             .collect::<Result<_>>()?;
 
+        let mut view_states = BTreeMap::new();
+        for (n, v) in &next.views {
+            if let Some(snap) = view_state_checkpoints.remove(n) {
+                let state_subdir = format!("states-v-{}", v.id);
+                let state_dir = dir.join(&state_subdir);
+                let operator_manifest = state_codec::write_operator_states(
+                    &state_dir,
+                    snap.view_epoch,
+                    &snap.plan_fingerprint,
+                    &snap.operators,
+                )?;
+                let mut node_relations = Vec::with_capacity(snap.node_relations.len());
+                for (node_id, rel) in snap.node_relations.iter().enumerate() {
+                    node_relations.push(self.write_state_block_relation(
+                        &mut stage,
+                        &format!("s{}-n{node_id}", v.id),
+                        rel,
+                    )?);
+                }
+                view_states.insert(
+                    n.clone(),
+                    ViewStateRef {
+                        checkpoint_epoch: next.epoch,
+                        affected_commits: 0,
+                        plan_fingerprint: snap.plan_fingerprint,
+                        directory: name.clone(),
+                        state_subdir,
+                        operator_manifest,
+                        node_relations,
+                    },
+                );
+            } else if let Some(prev_ref) = self
+                .manifest
+                .as_ref()
+                .and_then(|manifest| manifest.view_states.get(n))
+            {
+                let mut carried = prev_ref.clone();
+                if next.deltas.contains_key(n) {
+                    carried.affected_commits = carried
+                        .affected_commits
+                        .checked_add(1)
+                        .ok_or(Error::Overflow)?;
+                }
+                view_states.insert(n.clone(), carried);
+            }
+        }
+
         let mut next_receipts = self.receipts.clone();
         let receipt_index = if let Some(r) = &receipt {
             next_receipts.insert(r.id.clone(), r.clone());
@@ -928,6 +1145,7 @@ impl DatabaseStore {
             views,
             table_deltas,
             deltas,
+            view_states,
             receipt_index,
             receipt,
         };
