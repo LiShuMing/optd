@@ -13,7 +13,7 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 
 use crate::accumulator_state::AccumulatorState;
 use crate::bag::Bag;
-use crate::executor::{self, cache_scan, Bindings, Relation};
+use crate::executor::{self, cache_scan, Bindings, ProgramTemplates, Relation};
 use crate::graph::Node;
 use crate::group_state::{supported_key, GroupState, KeyPolicy};
 use crate::keyed_state::KeyedState;
@@ -81,6 +81,7 @@ pub struct SqlView {
     epoch: u64,
     nodes: Vec<Node>,
     incremental_plan: IncrementalPlan,
+    templates: Vec<ProgramTemplates>,
     states: Vec<Relation>,
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
@@ -208,6 +209,11 @@ impl SqlView {
         }
         let compilation = crate::planning::compile(&ctx, sql, &optimizer).await?;
         let (nodes, incremental_plan) = compilation.into_plan(optimizer.requires_incremental())?;
+        let templates = incremental_plan
+            .programs()
+            .iter()
+            .map(|program| ProgramTemplates::compile(&ctx, program))
+            .collect::<Result<Vec<_>>>()?;
         // Reject the complete plan before encoding source rows or creating any state.
         let source = tables
             .into_iter()
@@ -220,6 +226,7 @@ impl SqlView {
             epoch: 0,
             nodes,
             incremental_plan,
+            templates,
             states: vec![],
             keyed: vec![None; group_slots.len()],
             accumulators: vec![None; group_slots.len()],
@@ -590,6 +597,7 @@ impl SqlView {
                 let result = executor::run(
                     &self.ctx,
                     &self.incremental_plan.programs()[id].steps,
+                    &self.templates[id],
                     Bindings {
                         deltas: &deltas,
                         before: &self.states,

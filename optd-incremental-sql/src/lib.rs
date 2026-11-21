@@ -44,8 +44,8 @@ pub use metrics::{
 pub use planner::Strategy;
 pub use planning::{NodePreflight, PlanBlocker, PlanPreflight};
 pub use work::{
-    CacheRelationWork, RefreshWork, RelationWork, RowEncodingWork, RowReadWork, SourceStateWork,
-    StateCopyWork,
+    CacheRelationWork, ExecutionTemplateWork, RefreshWork, RelationWork, RowEncodingWork,
+    RowReadWork, SourceStateWork, StateCopyWork,
 };
 
 #[cfg(all(test, feature = "iceberg"))]

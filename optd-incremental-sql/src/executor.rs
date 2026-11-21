@@ -22,9 +22,11 @@ use crate::planner::SnapshotVersion;
 use crate::rank_state::RankState;
 use crate::row_blocks::RowBlocks;
 use crate::source_state::SourceState;
-use crate::{Error, Result};
+use crate::{Error, ExecutionTemplateWork, Result};
 
 mod scalar_product;
+pub(crate) mod template;
+pub(crate) use template::{CompiledOperator, ProgramTemplates};
 
 pub(crate) async fn execute(ctx: &SessionContext, plan: LogicalPlan) -> Result<RecordBatch> {
     let schema = Arc::new(plan.schema().as_arrow().clone());
@@ -173,11 +175,27 @@ fn source<'a, T>(tables: &'a BTreeMap<String, T>, name: &str) -> Result<&'a T> {
 async fn project_change(
     ctx: &SessionContext,
     projection: &RelationOperator,
+    compiled: Option<&CompiledOperator>,
     bag: &Bag,
+    work: &mut ExecutionTemplateWork,
 ) -> Result<ProjectedChange> {
     let (positive, negative) = bag.signed_parts()?;
-    let positive_keys = apply(ctx, projection, std::slice::from_ref(&positive)).await?;
-    let negative_keys = apply(ctx, projection, std::slice::from_ref(&negative)).await?;
+    let positive_keys = apply_compiled(
+        ctx,
+        projection,
+        compiled,
+        std::slice::from_ref(&positive),
+        work,
+    )
+    .await?;
+    let negative_keys = apply_compiled(
+        ctx,
+        projection,
+        compiled,
+        std::slice::from_ref(&negative),
+        work,
+    )
+    .await?;
     Ok(ProjectedChange {
         positive,
         negative,
@@ -185,21 +203,41 @@ async fn project_change(
         negative_keys,
     })
 }
+
+async fn apply_compiled(
+    ctx: &SessionContext,
+    operator: &RelationOperator,
+    compiled: Option<&CompiledOperator>,
+    batches: &[RecordBatch],
+    work: &mut ExecutionTemplateWork,
+) -> Result<RecordBatch> {
+    if let Some(compiled) = compiled {
+        compiled.apply(ctx, batches, work).await
+    } else {
+        work.record_fallback()?;
+        apply(ctx, operator, batches).await
+    }
+}
+
 async fn signed_apply(
     ctx: &SessionContext,
     operator: &RelationOperator,
+    compiled: Option<&CompiledOperator>,
     mode: ApplyMode,
     inputs: &[&RelationValue],
+    work: &mut ExecutionTemplateWork,
 ) -> Result<RelationValue> {
     if mode == ApplyMode::Positive {
         return RelationValue::new(
-            apply(
+            apply_compiled(
                 ctx,
                 operator,
+                compiled,
                 &inputs
                     .iter()
                     .map(|r| r.batch())
                     .collect::<Result<Vec<_>>>()?,
+                work,
             )
             .await?,
         );
@@ -212,11 +250,12 @@ async fn signed_apply(
         let positive = parts.iter().map(|p| p.0.clone()).collect::<Vec<_>>();
         let negative = parts.iter().map(|p| p.1.clone()).collect::<Vec<_>>();
         return RelationValue::from_signed(Bag::from_parts(
-            &apply(ctx, operator, &positive).await?,
-            &apply(ctx, operator, &negative).await?,
+            &apply_compiled(ctx, operator, compiled, &positive, work).await?,
+            &apply_compiled(ctx, operator, compiled, &negative, work).await?,
         )?);
     }
-    let mut result = Bag::empty(operator.schema());
+    let mut result =
+        Bag::empty(compiled.map_or_else(|| operator.schema(), CompiledOperator::schema));
     let (lp, ln) = &parts[0];
     let (rp, rn) = &parts[1];
     for (left, right, negative) in [
@@ -230,9 +269,10 @@ async fn signed_apply(
         }
         let fragments = [left.clone(), right.clone()];
         let output = if mode == ApplyMode::SignedScalarProduct {
+            work.record_fallback()?;
             scalar_product::apply(ctx, operator, &fragments).await?
         } else {
-            apply(ctx, operator, &fragments).await?
+            apply_compiled(ctx, operator, compiled, &fragments, work).await?
         };
         let value = Bag::from_batch(&output)?;
         result = if negative {
@@ -248,6 +288,7 @@ async fn signed_apply(
 pub(crate) async fn run(
     ctx: &SessionContext,
     steps: &[PhysicalStep],
+    templates: &ProgramTemplates,
     bindings: Bindings<'_>,
     refresh_work: &mut crate::RefreshWork,
 ) -> Result<ExecutionResult> {
@@ -263,7 +304,8 @@ pub(crate) async fn run(
     let mut rank_work = None;
     let mut accumulator_work = None;
     let mut replacement = None;
-    for step in steps {
+    for (step_idx, step) in steps.iter().enumerate() {
+        let compiled = templates.step(step_idx);
         let inputs = step.inputs.iter().map(|i| &values[*i]).collect::<Vec<_>>();
         let value = match &step.operation {
             Operation::UpdateRank { state, .. } => {
@@ -361,17 +403,26 @@ pub(crate) async fn run(
                 signed_apply(
                     ctx,
                     operator,
+                    compiled,
                     *mode,
                     &inputs
                         .iter()
                         .map(|v| v.relation())
                         .collect::<Result<Vec<_>>>()?,
+                    &mut refresh_work.cache_work.template_execution,
                 )
                 .await?,
             ),
-            Operation::ProjectKeys(projection) => {
-                Value::Projected(project_change(ctx, projection, &inputs[0].relation()?.bag).await?)
-            }
+            Operation::ProjectKeys(projection) => Value::Projected(
+                project_change(
+                    ctx,
+                    projection,
+                    compiled,
+                    &inputs[0].relation()?.bag,
+                    &mut refresh_work.cache_work.template_execution,
+                )
+                .await?,
+            ),
             Operation::PrepareIndex(spec) => {
                 let changes = inputs
                     .iter()
@@ -498,7 +549,15 @@ pub(crate) async fn run(
                         }
                     }
                     Value::Relation(
-                        signed_apply(ctx, operator, ApplyMode::Positive, &relations).await?,
+                        signed_apply(
+                            ctx,
+                            operator,
+                            compiled,
+                            ApplyMode::Positive,
+                            &relations,
+                            &mut refresh_work.cache_work.template_execution,
+                        )
+                        .await?,
                     )
                 }
             }
@@ -508,7 +567,14 @@ pub(crate) async fn run(
                     .ok_or_else(|| Error::Invalid("missing completed index".into()))?;
                 let output = inputs[1].relation()?;
                 if let Some(projection) = &spec.output_projection {
-                    let projected = project_change(ctx, projection, &output.bag).await?;
+                    let projected = project_change(
+                        ctx,
+                        projection,
+                        compiled,
+                        &output.bag,
+                        &mut refresh_work.cache_work.template_execution,
+                    )
+                    .await?;
                     update.apply_window_delta(
                         &projected.positive,
                         &projected.positive_keys,

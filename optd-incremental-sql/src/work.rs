@@ -140,6 +140,8 @@ pub struct CacheRelationWork {
     /// Complete snapshot reads enabled/skipped by explicit upstream delta guards.
     /// Counts actual consumed rows even when an Arrow cache is already materialized.
     pub guarded_snapshots: GuardedSnapshotWork,
+    /// Precompiled physical template hits, fallbacks and stateless empty shortcuts.
+    pub template_execution: ExecutionTemplateWork,
     /// Actual graph leaf expansions demanded by complete snapshots/root outputs.
     pub demanded_leaves: RelationWork,
     /// Distinct-row Arrow batches used for lazy graph leaf identity/boundary checks.
@@ -154,6 +156,38 @@ pub struct CacheRelationWork {
     pub complete_caches: RowMaterializationWork,
     /// Arrow collection and leaf bootstrap for complete physical replacements.
     pub replacement_bootstrap: RowBootstrapWork,
+}
+
+/// Physical operator template reuse counters during candidate preparation.
+///
+/// Direct invocations run precompiled Arrow/DataFusion `PhysicalExpr` pipelines
+/// without re-invoking DataFusion's logical-to-physical planner. Fallback
+/// invocations count complex/stateful operators routed through full planning.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ExecutionTemplateWork {
+    /// Nonempty operator calls served by precompiled stateless templates.
+    pub direct_invocations: usize,
+    /// Operator calls routed through DataFusion's physical planner.
+    pub fallback_invocations: usize,
+    /// Empty-batch calls resolved immediately by row-preserving templates.
+    pub empty_short_circuits: usize,
+}
+
+impl ExecutionTemplateWork {
+    /// Record one direct template execution.
+    pub(crate) fn record_direct(&mut self) -> Result<()> {
+        add(&mut self.direct_invocations, 1)
+    }
+
+    /// Record one full physical planner fallback execution.
+    pub(crate) fn record_fallback(&mut self) -> Result<()> {
+        add(&mut self.fallback_invocations, 1)
+    }
+
+    /// Record one stateless empty-input shortcut.
+    pub(crate) fn record_empty_short_circuit(&mut self) -> Result<()> {
+        add(&mut self.empty_short_circuits, 1)
+    }
 }
 
 /// Actual conditional complete-snapshot accesses, excluding indexed reads and root output.
