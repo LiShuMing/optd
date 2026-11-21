@@ -404,13 +404,55 @@ async fn source_and_output_checksums_are_validated_on_reopen() {
     let dir = root.path().join(pointer["directory"].as_str().unwrap());
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
-    let payload = &manifest["tables"]["t"]["data"];
+    let payload = &manifest["tables"]["t"]["data"]["blocks"]["Inline"][0]["payload"];
     let path = root
         .path()
         .join(payload["directory"].as_str().unwrap())
         .join(payload["file"]["name"].as_str().unwrap());
     std::fs::write(path, b"corrupt").unwrap();
     assert!(SqlSession::open(root.path()).await.is_err());
+}
+
+#[tokio::test]
+async fn legacy_v1_database_format_is_rejected_explicitly() {
+    let root = tempfile::tempdir().unwrap();
+    let mut db = SqlSession::open(root.path()).await.unwrap();
+    db.execute("CREATE TABLE t(a BIGINT)").await.unwrap();
+    drop(db);
+    let pointer: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("CURRENT")).unwrap()).unwrap();
+    let dir_name = pointer["directory"].as_str().unwrap();
+    let dir = root.path().join(dir_name);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+    manifest["format"] = serde_json::Value::String("optd-sql-database/1".into());
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(dir.join("manifest.json"), &manifest_bytes).unwrap();
+    // Recompute manifest checksum in CURRENT so the format check (not SHA-256) triggers.
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(&manifest_bytes));
+    let next_pointer = serde_json::json!({
+        "directory": dir_name,
+        "manifest": {
+            "name": "manifest.json",
+            "bytes": manifest_bytes.len() as u64,
+            "sha256": digest,
+        }
+    });
+    std::fs::write(
+        root.path().join("CURRENT"),
+        serde_json::to_vec(&next_pointer).unwrap(),
+    )
+    .unwrap();
+    let err = SqlSession::open(root.path())
+        .await
+        .err()
+        .expect("v1 database must be rejected");
+    assert!(
+        err.to_string()
+            .contains("unsupported database format optd-sql-database/1"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]

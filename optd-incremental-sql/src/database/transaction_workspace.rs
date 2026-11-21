@@ -3,7 +3,7 @@
 use super::dml_compiler::{DmlCompiler, TransactionMode};
 use super::response::{CommitReport, DmlWork};
 use super::sql;
-use super::store::DatabaseSnapshot;
+use super::store::{DatabaseSnapshot, ViewOutput};
 use super::table_rows::TableRows;
 use crate::bag::Bag;
 use crate::error::invalid;
@@ -31,9 +31,10 @@ pub(super) struct TransactionWorkspace {
 }
 
 impl TransactionWorkspace {
-    /// Own a candidate snapshot, clearing output deltas from the previous epoch.
+    /// Own a candidate snapshot, clearing deltas from the previous epoch.
     pub(super) fn new(mut snapshot: DatabaseSnapshot) -> Self {
         snapshot.deltas.clear();
+        snapshot.table_deltas.clear();
         Self {
             snapshot,
             changes: BTreeMap::new(),
@@ -104,6 +105,13 @@ impl TransactionWorkspace {
         views: &BTreeMap<String, SqlView>,
     ) -> Result<PreparedCommit> {
         self.snapshot.epoch = committed_epoch.checked_add(1).ok_or(Error::Overflow)?;
+        for (table, delta) in &self.changes {
+            if !delta.is_empty() {
+                self.snapshot
+                    .table_deltas
+                    .insert(table.clone(), delta.weighted_batch()?);
+            }
+        }
         let mut candidates = BTreeMap::new();
         let mut maintenance = BTreeMap::new();
         for (name, view) in views {
@@ -120,7 +128,11 @@ impl TransactionWorkspace {
                 continue;
             }
             let candidate = view.prepare(&changes).await?;
-            definition.output = candidate.contents().clone();
+            definition.output = if view.is_ordered() {
+                ViewOutput::Ordered(candidate.contents().clone())
+            } else {
+                ViewOutput::Blocks(candidate.output_blocks()?)
+            };
             self.snapshot
                 .deltas
                 .insert(name.clone(), candidate.delta()?);
@@ -157,10 +169,19 @@ mod tests {
             .execute_script("CREATE TABLE t(v BIGINT NOT NULL); INSERT INTO t VALUES (1),(2),(3);")
             .await
             .unwrap();
-        // Reopen reconstructs the original committed table with its full input cache.
+        // Reopen loads lazy blocks without eagerly flattening; populate the flat cache once.
         drop(session);
         let store = super::super::store::DatabaseStore::open(root.path()).unwrap();
         let mut workspace = TransactionWorkspace::new(store.snapshot());
+        assert_eq!(
+            workspace.snapshot.tables["t"]
+                .rows
+                .materialize()
+                .unwrap()
+                .work
+                .misses,
+            1
+        );
         assert_eq!(
             workspace.snapshot.tables["t"]
                 .rows

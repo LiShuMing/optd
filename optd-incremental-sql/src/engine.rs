@@ -72,6 +72,15 @@ impl PreparedSqlRefresh {
     pub fn epoch(&self) -> u64 {
         self.stats.epoch
     }
+    /// Candidate maintained output blocks, sharing unchanged leaves with the prior revision.
+    pub(crate) fn output_blocks(&self) -> Result<RowBlocks> {
+        Ok(self
+            .states
+            .last()
+            .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
+            .rows
+            .clone())
+    }
 }
 
 /// A typed SQL definition with operator-local maintained relations.
@@ -337,6 +346,19 @@ impl SqlView {
             .rows
             .materialize()
             .map(|m| m.batch)
+    }
+    /// Whether the root node retains a presentation ordering.
+    pub(crate) fn is_ordered(&self) -> bool {
+        self.nodes.last().is_some_and(|node| node.ordered)
+    }
+    /// Shared maintained root output blocks for block-level database persistence.
+    pub(crate) fn output_blocks(&self) -> Result<RowBlocks> {
+        Ok(self
+            .states
+            .last()
+            .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
+            .rows
+            .clone())
     }
     /// Canonical source snapshots at this epoch, suitable for a separate oracle.
     pub fn tables(&self) -> Result<BTreeMap<String, RecordBatch>> {

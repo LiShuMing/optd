@@ -59,13 +59,20 @@ impl MeasuredSelector {
             )?;
         }
         for (name, view) in &snapshot.views {
+            let input: Arc<dyn TableProvider> = match &view.output {
+                super::store::ViewOutput::Blocks(rows) => Arc::new(RowTable::new(
+                    rows.clone(),
+                    Arc::new(TableReadCounter::default()),
+                )),
+                super::store::ViewOutput::Ordered(batch) => Arc::new(MemTable::try_new(
+                    batch.schema(),
+                    vec![vec![batch.clone()]],
+                )?),
+            };
             context.register_table(
                 name.as_str(),
                 Arc::new(CountedTable {
-                    input: Arc::new(MemTable::try_new(
-                        view.output.schema(),
-                        vec![vec![view.output.clone()]],
-                    )?),
+                    input,
                     counter: Arc::clone(&counter),
                 }),
             )?;

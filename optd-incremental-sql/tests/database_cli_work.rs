@@ -47,7 +47,8 @@ async fn sql_command_separates_retry_recovery_and_verification_work() {
     assert_eq!(retry["execution_work"]["dml"], Value::Null);
     assert_eq!(retry["execution_work"]["maintenance"], Value::Null);
     assert_eq!(retry["work"]["storage"]["tables"]["written"]["rows"], 0);
-    assert_eq!(retry["work"]["storage"]["manifest_reads"]["files"], 4);
+    // O(1) receipt index resolves retry without traversing historical manifests.
+    assert_eq!(retry["work"]["storage"]["manifest_reads"]["files"], 0);
     assert_eq!(
         retry["work"]["recovery"]["store"]["manifest_reads"]["files"],
         5

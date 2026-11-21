@@ -65,6 +65,7 @@ async fn fixed_transaction_prefix_reads_do_not_expand_untouched_tables_or_duplic
         assert_eq!(target.delta_update.materialized_rows, 0);
         assert_eq!(target.delta_update.old_row_entries_copied, 256);
         assert_eq!(target.leaf_validation.as_ref().unwrap().rows, 257);
+        // R07a block checkpoints persist only the touched leaf without flattening the full table.
         let storage = session.store_work().unwrap().since(&before).unwrap();
         assert_eq!(
             storage
@@ -72,13 +73,12 @@ async fn fixed_transaction_prefix_reads_do_not_expand_untouched_tables_or_duplic
                 .as_ref()
                 .unwrap()
                 .materialized_rows,
-            257
+            0
         );
-        assert_eq!(
-            storage.table_materialization.as_ref().unwrap().rows,
-            count as u64 + 1
-        );
-        assert_eq!(storage.tables.written.rows, count as u64 + 1);
+        assert_eq!(storage.table_materialization.as_ref().unwrap().rows, 0);
+        assert_eq!(storage.tables.written.rows, 257);
+        // Untouched leaves of `t` (count - 256) plus untouched table `unused` (2 rows).
+        assert_eq!(storage.tables.reused.rows, count as u64 - 256 + 2);
         let response = session.execute("SELECT * FROM v").await.unwrap();
         assert_eq!(response.table_reads, Some(RowReadWork::default()));
         let expected = count * (count - 1) / 2 - 1;
@@ -95,14 +95,12 @@ async fn fixed_transaction_prefix_reads_do_not_expand_untouched_tables_or_duplic
         );
         assert!(recovery.table_leaf_validation.as_ref().unwrap().rows > count);
         let response = session.execute("SELECT k FROM t LIMIT 1").await.unwrap();
-        assert_eq!(
-            response
-                .table_reads
-                .unwrap()
-                .materialization
-                .materialized_rows,
-            1
-        );
+        let reads = response.table_reads.unwrap();
+        assert_eq!(reads.leaf_chunks, 1);
+        // Before R07b operator-state restore, open materializes `t` to rebuild `v`,
+        // warming the leaf cache so this prefix read is served as a cache hit.
+        assert_eq!(reads.cache_hits, 1);
+        assert_eq!(reads.materialization.materialized_rows, 0);
         session.verify_output_history().unwrap();
     }
 }

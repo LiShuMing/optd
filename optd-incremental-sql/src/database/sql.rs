@@ -14,7 +14,7 @@ use datafusion::sql::parser::{DFParser, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{ObjectName, Statement};
 
 use super::dml_compiler::TransactionMode;
-use super::store::DatabaseSnapshot;
+use super::store::{DatabaseSnapshot, ViewOutput};
 use super::table_provider::{RowTable, TableReadCounter};
 use crate::bag::Bag;
 use crate::error::invalid;
@@ -105,7 +105,20 @@ pub(super) fn measured_context(
     }
     if scope == RelationScope::AllRelations {
         for (name, v) in &snapshot.views {
-            ctx.register_batch(TableReference::bare(name.as_str()), v.output.clone())?;
+            match &v.output {
+                ViewOutput::Blocks(rows) => {
+                    ctx.register_table(
+                        TableReference::bare(name.as_str()),
+                        Arc::new(RowTable::new(
+                            rows.clone(),
+                            Arc::new(TableReadCounter::default()),
+                        )),
+                    )?;
+                }
+                ViewOutput::Ordered(batch) => {
+                    ctx.register_batch(TableReference::bare(name.as_str()), batch.clone())?;
+                }
+            }
         }
     }
     Ok(TableContext {

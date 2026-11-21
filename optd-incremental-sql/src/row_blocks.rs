@@ -1,13 +1,15 @@
 //! Shared positive row blocks; only touched leaves are rebuilt by signed changes.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::array::{Array, Int64Array, RecordBatch, RecordBatchOptions};
 use datafusion::arrow::compute::concat_batches;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::row::{RowConverter, SortField};
 use datafusion::common::ScalarValue;
+use sha2::{Digest, Sha256};
 
 use crate::bag::{self, Bag};
 use crate::error::invalid;
@@ -23,6 +25,61 @@ pub(crate) use cursor::RowCursor;
 
 /// Bound historical distinct-entry copying; expanded duplicate rows may be larger.
 const BLOCK_ENTRIES: usize = 256;
+
+static NEXT_BLOCK_UID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-local immutable identity for one `RowBlock`; untouched leaves keep their UID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct BlockUid(u64);
+
+fn next_block_uid() -> BlockUid {
+    BlockUid(NEXT_BLOCK_UID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Serializable leaf-ordering strategy matching `RowOrder`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BlockOrderMode {
+    Encoded,
+    SingleLeaf,
+}
+
+/// One persisted weighted leaf validated before installing into `RowBlocks`.
+pub(crate) struct PersistedBlock {
+    pub(crate) expected_min_key_sha256: String,
+    pub(crate) expected_row_count: usize,
+    pub(crate) expected_distinct_entries: usize,
+    pub(crate) weighted_batch: RecordBatch,
+}
+
+/// Borrowed view of one immutable leaf for block-level checkpoint persistence.
+pub(crate) struct BlockView<'a> {
+    min_key: &'a [u8],
+    block: &'a RowBlock,
+}
+
+impl<'a> BlockView<'a> {
+    /// Fixed-length SHA-256 digest of this leaf's minimum encoded key.
+    pub(crate) fn min_key_sha256(&self) -> String {
+        format!("{:x}", Sha256::digest(self.min_key))
+    }
+
+    pub(crate) fn uid(&self) -> BlockUid {
+        self.block.uid
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.block.row_count
+    }
+
+    pub(crate) fn distinct_entries(&self) -> usize {
+        self.block.rows.len()
+    }
+
+    /// Encode this leaf as complete typed columns followed by positive `__optd_weight`.
+    pub(crate) fn weighted_batch(&self) -> Result<RecordBatch> {
+        self.block.rows.weighted_batch()
+    }
+}
 
 /// Unsupported row encoders retain Bag's existing singleton admission behavior.
 #[derive(Clone)]
@@ -41,6 +98,7 @@ enum LeafCachePolicy {
 
 /// Shared weighted row state; a graph consumer alone demands its expanded cache.
 struct RowBlock {
+    uid: BlockUid,
     rows: Bag,
     batch: Mutex<Option<RecordBatch>>,
     row_count: usize,
@@ -194,6 +252,148 @@ impl RowBlocks {
     /// Cached exact logical NULL totals; reading metadata never walks row leaves.
     pub(crate) fn null_counts(&self) -> &[usize] {
         &self.0.null_counts
+    }
+
+    /// Ordering strategy used for this relation's block directory keys.
+    pub(crate) fn order_mode(&self) -> BlockOrderMode {
+        match self.0.order {
+            RowOrder::Encoded(_) => BlockOrderMode::Encoded,
+            RowOrder::SingleLeaf => BlockOrderMode::SingleLeaf,
+        }
+    }
+
+    /// Number of nonempty leaves in this revision.
+    pub(crate) fn block_count(&self) -> usize {
+        self.0.blocks.len()
+    }
+
+    /// Iterate leaves in deterministic directory key order for block persistence.
+    pub(crate) fn iter_blocks(&self) -> impl Iterator<Item = BlockView<'_>> {
+        self.0.blocks.iter().map(|(key, block)| BlockView {
+            min_key: key.as_slice(),
+            block: block.as_ref(),
+        })
+    }
+
+    /// Combine leaf bags without materializing expanded Arrow batches.
+    pub(crate) fn to_bag(&self) -> Result<Bag> {
+        let mut combined = Bag::empty(self.schema());
+        for block in self.0.blocks.values() {
+            combined = combined.add(&block.rows)?;
+        }
+        Ok(combined)
+    }
+
+    /// Reconstruct `RowBlocks` directly from validated weighted block IPC payloads.
+    /// Returns the fresh `BlockUid` assigned to each leaf in input order so callers
+    /// can populate their committed block cache for subsequent reuse.
+    pub(crate) fn from_persisted_blocks(
+        schema: SchemaRef,
+        mode: BlockOrderMode,
+        persisted: Vec<PersistedBlock>,
+    ) -> Result<(Self, Vec<BlockUid>, RowEncodingWork)> {
+        let order = match mode {
+            BlockOrderMode::SingleLeaf => {
+                if persisted.len() > 1 {
+                    return Err(invalid("single-leaf block relation has multiple blocks"));
+                }
+                RowOrder::SingleLeaf
+            }
+            BlockOrderMode::Encoded => {
+                if schema.fields().is_empty() {
+                    return Err(invalid(
+                        "zero-column relation cannot use encoded block mode",
+                    ));
+                }
+                let converter = RowConverter::new(
+                    schema
+                        .fields()
+                        .iter()
+                        .map(|f| SortField::new(f.data_type().clone()))
+                        .collect(),
+                )?;
+                RowOrder::Encoded(Arc::new(converter))
+            }
+        };
+        let mut blocks = StateDirectory::new();
+        let mut row_count = 0usize;
+        let mut scalar_bytes = 0usize;
+        let mut null_counts = vec![0usize; schema.fields().len()];
+        let mut uids = Vec::with_capacity(persisted.len());
+        let mut validation = RowEncodingWork::default();
+        let mut previous_key: Option<Vec<u8>> = None;
+        for loaded in persisted {
+            if loaded.expected_distinct_entries == 0 {
+                return Err(invalid("persisted relation block is empty"));
+            }
+            let bag = decode_positive_weighted_batch(&loaded.weighted_batch, &schema)?;
+            if bag.len() != loaded.expected_distinct_entries {
+                return Err(invalid("persisted block distinct entry count differs"));
+            }
+            let volume = bag.materialization_volume()?;
+            if volume.rows != loaded.expected_row_count {
+                return Err(invalid("persisted block row count differs"));
+            }
+            let distinct = bag.distinct_rows()?;
+            validation.record(&distinct.batch)?;
+            let computed_key = match &order {
+                RowOrder::SingleLeaf => {
+                    let empty_digest = format!("{:x}", Sha256::digest([]));
+                    if loaded.expected_min_key_sha256 != empty_digest {
+                        return Err(invalid("single-leaf persisted block key digest differs"));
+                    }
+                    Vec::new()
+                }
+                RowOrder::Encoded(converter) => {
+                    let encoded = converter.convert_columns(distinct.batch.columns())?;
+                    if distinct.batch.num_rows() == 0 {
+                        return Err(invalid("empty persisted leaf"));
+                    }
+                    let key = encoded.row(0).as_ref().to_vec();
+                    let actual_digest = format!("{:x}", Sha256::digest(&key));
+                    if actual_digest != loaded.expected_min_key_sha256 {
+                        return Err(invalid("persisted block minimum key differs from contents"));
+                    }
+                    if let Some(prev) = &previous_key {
+                        if prev >= &key {
+                            return Err(invalid("persisted blocks are not strictly ordered"));
+                        }
+                    }
+                    previous_key = Some(key.clone());
+                    key
+                }
+            };
+            row_count = row_count.checked_add(volume.rows).ok_or(Error::Overflow)?;
+            scalar_bytes = scalar_bytes
+                .checked_add(volume.scalar_bytes)
+                .ok_or(Error::Overflow)?;
+            add_null_counts(&mut null_counts, &distinct.null_counts)?;
+            let uid = next_block_uid();
+            uids.push(uid);
+            let block = RowBlock {
+                uid,
+                rows: bag,
+                batch: Mutex::new(None),
+                row_count: volume.rows,
+                scalar_bytes: volume.scalar_bytes,
+                null_counts: distinct.null_counts,
+            };
+            if blocks.insert(computed_key, Arc::new(block)).is_some() {
+                return Err(invalid("duplicate persisted block key"));
+            }
+        }
+        bag::check_materialization_volume(row_count, scalar_bytes)?;
+        let snapshot = RowSnapshot {
+            schema,
+            blocks,
+            row_count,
+            scalar_bytes,
+            null_counts,
+            order,
+            leaf_policy: LeafCachePolicy::OnDemand,
+            flat: Mutex::new(None),
+        };
+        Ok((Self(Arc::new(snapshot)), uids, validation))
     }
 
     fn leaf_batches(&self) -> Result<LeafBatches> {
@@ -509,6 +709,7 @@ fn make_block(rows: Bag, order: &RowOrder, policy: LeafCachePolicy) -> Result<Bl
     Ok(BlockBuild {
         key,
         block: RowBlock {
+            uid: next_block_uid(),
             rows,
             batch: Mutex::new(cached),
             row_count: volume.rows,
@@ -518,6 +719,38 @@ fn make_block(rows: Bag, order: &RowOrder, policy: LeafCachePolicy) -> Result<Bl
         materialization,
         validation,
     })
+}
+
+fn decode_positive_weighted_batch(batch: &RecordBatch, schema: &SchemaRef) -> Result<Bag> {
+    let width = schema.fields().len();
+    if batch.num_columns() != width + 1 || batch.schema().field(width).name() != "__optd_weight" {
+        return Err(invalid("invalid persisted block weighted schema"));
+    }
+    if batch.schema().fields()[..width]
+        .iter()
+        .zip(schema.fields())
+        .any(|(a, b)| a.name() != b.name() || a.data_type() != b.data_type())
+    {
+        return Err(invalid(
+            "persisted block fields differ from relation schema",
+        ));
+    }
+    let weights = batch
+        .column(width)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| invalid("invalid persisted block weight column"))?;
+    if weights.null_count() != 0 || weights.values().iter().any(|w| *w <= 0) {
+        return Err(invalid("non-positive or NULL persisted block weight"));
+    }
+    let rows = RecordBatch::try_new_with_options(
+        Arc::clone(schema),
+        batch.columns()[..width].to_vec(),
+        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+    )?;
+    let bag = Bag::from_weighted(&rows, weights.values())?;
+    bag.validate_relation()?;
+    Ok(bag)
 }
 
 /// Combine only replaced-leaf metadata; untouched directory payloads remain borrowed.

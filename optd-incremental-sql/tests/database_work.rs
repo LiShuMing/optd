@@ -49,34 +49,79 @@ async fn setup(root: &Path, count: usize) -> SqlSession {
     db
 }
 
+fn block_payload_bytes(root: &Path, relation: &Value) -> Vec<(String, u64)> {
+    let entries = if let Some(inline) = relation["blocks"]["Inline"].as_array() {
+        inline.clone()
+    } else {
+        let ext = &relation["blocks"]["External"]["payload"];
+        let path = root
+            .join(ext["directory"].as_str().unwrap())
+            .join(ext["file"]["name"].as_str().unwrap());
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let p = &entry["payload"];
+            (
+                p["directory"].as_str().unwrap().to_owned(),
+                payload_bytes(root, p),
+            )
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn file_counts_match_serialized_files_and_expose_full_changed_payloads() {
-    for count in [32, 256] {
+async fn file_counts_match_serialized_files_and_reuse_untouched_blocks() {
+    for count in [32, 1024] {
         let root = tempfile::tempdir().unwrap();
         let mut db = setup(root.path(), count).await;
         let before = db.store_work().unwrap();
         db.execute("UPDATE t SET k=-1 WHERE k=1").await.unwrap();
         let after = db.store_work().unwrap();
         let (m, pointer_bytes, manifest_bytes) = manifest(root.path());
-        assert_eq!(after.tables.written.files - before.tables.written.files, 1);
-        assert_eq!(
-            after.tables.written.rows - before.tables.written.rows,
-            (count + 2) as u64
-        );
+        let pointer: Value =
+            serde_json::from_slice(&std::fs::read(root.path().join("CURRENT")).unwrap()).unwrap();
+        let head_dir = pointer["directory"].as_str().unwrap();
+
+        let table_blocks = block_payload_bytes(root.path(), &m["tables"]["t"]["data"]);
+        let written_table_bytes: u64 = table_blocks
+            .iter()
+            .filter(|(dir, _)| dir == head_dir)
+            .map(|(_, bytes)| *bytes)
+            .sum();
+        let view_blocks =
+            block_payload_bytes(root.path(), &m["views"]["v"]["output"]["BlockRelation"]);
+        let written_view_bytes: u64 = view_blocks
+            .iter()
+            .filter(|(dir, _)| dir == head_dir)
+            .map(|(_, bytes)| *bytes)
+            .sum();
+
+        // Only the touched leaf (<= 2 blocks if split) is written regardless of total table size.
+        assert!((1..=2).contains(&(after.tables.written.files - before.tables.written.files)));
+        assert!(after.tables.written.rows - before.tables.written.rows <= 512);
         assert_eq!(
             after.tables.written.bytes - before.tables.written.bytes,
-            payload_bytes(root.path(), &m["tables"]["t"]["data"])
+            written_table_bytes
         );
-        assert_eq!(after.tables.reused.files - before.tables.reused.files, 1);
-        assert_eq!(after.tables.reused.rows - before.tables.reused.rows, 1);
         assert_eq!(
-            after.view_outputs.written.rows - before.view_outputs.written.rows,
-            (count + 2) as u64
+            after.table_materialization.as_ref().unwrap().misses
+                - before.table_materialization.as_ref().unwrap().misses,
+            0
         );
+        assert!((1..=2)
+            .contains(&(after.view_outputs.written.files - before.view_outputs.written.files)));
+        assert!(after.view_outputs.written.rows - before.view_outputs.written.rows <= 512);
         assert_eq!(
             after.view_outputs.written.bytes - before.view_outputs.written.bytes,
-            payload_bytes(root.path(), &m["views"]["v"]["output"])
+            written_view_bytes
         );
+        if count == 1024 {
+            // Untouched blocks from the 1024-row table & view are reused without rewriting.
+            assert!(after.tables.reused.rows - before.tables.reused.rows >= 700);
+            assert!(after.view_outputs.reused.rows - before.view_outputs.reused.rows >= 700);
+        }
         assert_eq!(
             after.output_deltas.written.rows - before.output_deltas.written.rows,
             2
@@ -85,11 +130,18 @@ async fn file_counts_match_serialized_files_and_expose_full_changed_payloads() {
             after.output_deltas.written.bytes - before.output_deltas.written.bytes,
             payload_bytes(root.path(), &m["deltas"]["v"])
         );
+        let td_written = after.table_deltas.as_ref().unwrap().written.bytes
+            - before.table_deltas.as_ref().unwrap().written.bytes;
+        assert_eq!(
+            td_written,
+            payload_bytes(root.path(), &m["table_deltas"]["t"])
+        );
         assert_eq!(
             after.checksum_reads.bytes - before.checksum_reads.bytes,
             (after.tables.written.bytes - before.tables.written.bytes)
                 + (after.view_outputs.written.bytes - before.view_outputs.written.bytes)
                 + (after.output_deltas.written.bytes - before.output_deltas.written.bytes)
+                + td_written
         );
         assert_eq!(
             after.manifest_writes.bytes - before.manifest_writes.bytes,
@@ -107,11 +159,8 @@ async fn file_counts_match_serialized_files_and_expose_full_changed_payloads() {
         assert_eq!(after.tables.written, before.tables.written);
         assert_eq!(after.view_outputs.written, before.view_outputs.written);
         assert_eq!(after.output_deltas.written, before.output_deltas.written);
-        assert_eq!(after.tables.reused.files - before.tables.reused.files, 2);
-        assert_eq!(
-            after.view_outputs.reused.files - before.view_outputs.reused.files,
-            1
-        );
+        assert!(after.tables.reused.files > before.tables.reused.files);
+        assert!(after.view_outputs.reused.files > before.view_outputs.reused.files);
     }
 }
 
@@ -150,16 +199,20 @@ async fn reopen_history_and_retry_have_separate_actual_work() {
         serde_json::to_value(retry.commit.unwrap()).unwrap(),
         serde_json::to_value(original).unwrap()
     );
+    // O(1) receipt index resolves retry without traversing historical manifests.
     let retried = db.store_work().unwrap();
-    assert_eq!(
-        retried.manifest_reads.files - open.manifest_reads.files,
-        epoch
-    );
+    assert_eq!(retried.manifest_reads.files - open.manifest_reads.files, 0);
+    assert_eq!(retried.history_traversals - open.history_traversals, 0);
     assert_eq!(retried.tables, open.tables);
     assert_eq!(retried.view_outputs, open.view_outputs);
     assert_eq!(retried.output_deltas, open.output_deltas);
     assert_eq!(retried.manifest_writes, open.manifest_writes);
     assert_eq!(db.recovery_work(), &recovery);
+    // Reusing the same request ID with different SQL is rejected from the index.
+    assert!(db
+        .execute_request("once", "INSERT INTO t VALUES (11)")
+        .await
+        .is_err());
     db.verify_output_history().unwrap();
     let history = db.store_work().unwrap();
     assert_eq!(

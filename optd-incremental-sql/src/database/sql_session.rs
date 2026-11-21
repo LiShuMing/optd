@@ -3,7 +3,7 @@
 use super::dml_compiler::TransactionMode;
 use super::response::{CommitReport, SqlResponse};
 use super::sql::{self, RelationScope};
-use super::store::{DatabaseSnapshot, DatabaseStore, Receipt, TableData, ViewData};
+use super::store::{DatabaseSnapshot, DatabaseStore, Receipt, TableData, ViewData, ViewOutput};
 use super::store_work::{RecoveryWork, StoreWork};
 use super::table_rows::TableRows;
 use super::transaction_workspace::{PreparedCommit, TransactionWorkspace};
@@ -79,10 +79,17 @@ impl SqlSession {
             )
             .await?;
             let output = engine.contents()?;
-            if Bag::from_batch(&output)? != Bag::from_batch(&v.output)? {
+            if Bag::from_batch(&output)? != v.output.to_bag()? {
                 return Err(invalid(
                     "restored materialized view differs from committed result",
                 ));
+            }
+            if let ViewOutput::Ordered(expected) = &v.output {
+                if !crate::store::batches_equal(&output, expected) {
+                    return Err(invalid(
+                        "restored ordered materialized view differs from committed order",
+                    ));
+                }
             }
             let plan = sql::plan_query(
                 &sql::context(&committed, RelationScope::BaseTables)?,
@@ -337,7 +344,7 @@ impl SqlSession {
                     value = value.add(&read_delta(delta, v.output.schema())?)?;
                 }
                 value.validate_relation()?;
-                if value != Bag::from_batch(&v.output)? {
+                if value != v.output.to_bag()? {
                     return Err(invalid(
                         "database output-log replay differs from committed view",
                     ));
@@ -551,6 +558,11 @@ impl SqlSession {
                 tx.snapshot
                     .deltas
                     .insert(name.clone(), Bag::from_batch(&output)?.weighted_batch()?);
+                let view_output = if engine.is_ordered() {
+                    ViewOutput::Ordered(output)
+                } else {
+                    ViewOutput::Blocks(engine.output_blocks()?)
+                };
                 let id = allocate(&mut tx.snapshot)?;
                 tx.snapshot.views.insert(
                     name.clone(),
@@ -558,7 +570,7 @@ impl SqlSession {
                         id,
                         sql: definition,
                         dependencies,
-                        output,
+                        output: view_output,
                     },
                 );
                 created = Some((name, engine));

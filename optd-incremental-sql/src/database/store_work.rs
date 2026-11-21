@@ -128,6 +128,9 @@ pub struct StoreWork {
     /// Distinct-row identity encoding while restoring table leaves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_leaf_validation: Option<crate::RowEncodingWork>,
+    /// Per-epoch consolidated base-table signed delta payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_deltas: Option<PayloadIoWork>,
 }
 
 impl Default for StoreWork {
@@ -147,6 +150,7 @@ impl Default for StoreWork {
             table_bootstrap: Some(TableBootstrapWork::default()),
             table_leaf_demand: Some(crate::RelationWork::default()),
             table_leaf_validation: Some(crate::RowEncodingWork::default()),
+            table_deltas: Some(PayloadIoWork::default()),
         }
     }
 }
@@ -226,6 +230,12 @@ impl StoreWork {
                     })
                 })
                 .transpose()?,
+            table_deltas: self
+                .table_deltas
+                .as_ref()
+                .zip(before.table_deltas.as_ref())
+                .map(|(a, b)| a.since(b))
+                .transpose()?,
         })
     }
 }
@@ -279,6 +289,7 @@ pub(super) enum PayloadKind {
     Table,
     ViewOutput,
     OutputDelta,
+    TableDelta,
 }
 
 /// A descriptor reuse is deliberately distinct from a completed file operation.
@@ -311,26 +322,6 @@ impl StoreWorkCounter {
         event(&mut next)?;
         *work = next;
         Ok(())
-    }
-
-    pub(super) fn table_materialization(
-        &self,
-        work: &TableMaterializationWork,
-        leaves: &crate::RelationWork,
-    ) -> Result<()> {
-        self.record(|w| {
-            let next = w
-                .table_materialization
-                .as_mut()
-                .ok_or_else(|| invalid("live counter lacks table materialization domain"))?;
-            add(&mut next.misses, work.misses)?;
-            add(&mut next.rows, work.rows)?;
-            add(&mut next.array_bytes, work.array_bytes)?;
-            w.table_leaf_demand
-                .as_mut()
-                .ok_or_else(|| invalid("live counter lacks leaf demand domain"))?
-                .absorb(leaves)
-        })
     }
 
     pub(super) fn table_bootstrap(
@@ -397,6 +388,10 @@ impl StoreWorkCounter {
                 PayloadKind::Table => &mut w.tables,
                 PayloadKind::ViewOutput => &mut w.view_outputs,
                 PayloadKind::OutputDelta => &mut w.output_deltas,
+                PayloadKind::TableDelta => w
+                    .table_deltas
+                    .as_mut()
+                    .ok_or_else(|| invalid("live counter lacks table delta domain"))?,
             };
             let counts = match action {
                 PayloadAction::Read => &mut payload.read,
@@ -522,16 +517,19 @@ mod legacy_table_domains {
             .as_object_mut()
             .unwrap()
             .remove("table_leaf_validation");
+        value.as_object_mut().unwrap().remove("table_deltas");
         let old: StoreWork = serde_json::from_value(value.clone()).unwrap();
         assert!(old.table_materialization.is_none());
         assert!(old.table_bootstrap.is_none());
         assert!(old.table_leaf_demand.is_none());
         assert!(old.table_leaf_validation.is_none());
+        assert!(old.table_deltas.is_none());
         assert_eq!(serde_json::to_value(&old).unwrap(), value);
         let interval = StoreWork::default().since(&old).unwrap();
         assert!(interval.table_materialization.is_none());
         assert!(interval.table_bootstrap.is_none());
         assert!(interval.table_leaf_demand.is_none());
         assert!(interval.table_leaf_validation.is_none());
+        assert!(interval.table_deltas.is_none());
     }
 }

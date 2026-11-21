@@ -35,12 +35,15 @@ async fn fixed_write_copies_only_one_bounded_leaf_as_untouched_blocks_grow() {
         assert_eq!(target["delta_update"]["old_row_entries_copied"], 256);
         assert_eq!(target["delta_update"]["materialized_rows"], 0);
         assert_eq!(target["leaf_validation"]["rows"], 257);
-        // Full checkpoint flattening remains separate from statement-local leaf work.
+        // R07a block checkpoints persist only touched leaves without flattening the full table.
         let storage =
             serde_json::to_value(db.store_work().unwrap().since(&before).unwrap()).unwrap();
-        assert_eq!(storage["table_materialization"]["rows"], n + 1);
-        assert_eq!(storage["table_leaf_demand"]["materialized_rows"], 257);
-        assert_eq!(storage["tables"]["written"]["rows"], n + 1);
+        assert_eq!(storage["table_materialization"]["misses"], 0);
+        assert_eq!(storage["table_materialization"]["rows"], 0);
+        assert_eq!(storage["table_leaf_demand"]["materialized_rows"], 0);
+        assert!(storage["tables"]["written"]["files"].as_u64().unwrap() <= 2);
+        assert_eq!(storage["tables"]["written"]["rows"], 257);
+        assert_eq!(storage["tables"]["reused"]["rows"], n - 256);
         let actual = db
             .execute("SELECT k,v FROM t ORDER BY k")
             .await
@@ -176,7 +179,7 @@ async fn canceled_table_changes_and_other_table_writes_publish_one_exact_epoch()
     let storage = db.store_work().unwrap().since(&before).unwrap();
     assert_eq!(storage.tables.reused.rows, 512);
     assert_eq!(storage.tables.written.rows, 2);
-    assert_eq!(storage.table_materialization.as_ref().unwrap().rows, 2);
+    assert_eq!(storage.table_materialization.as_ref().unwrap().rows, 0);
     let epoch = db.epoch();
     drop(db);
     let mut db = SqlSession::open(root.path()).await.unwrap();
