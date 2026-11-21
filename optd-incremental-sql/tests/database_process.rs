@@ -5,7 +5,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use optd_incremental_sql::database::{display_rows, SqlSession};
+use optd_incremental_sql::database::{
+    display_rows, IncompatibleStatePolicy, OpenOptions, SqlSession,
+};
 use optd_incremental_sql::store::PublishPoint;
 
 const WRITE: &str = "UPDATE a SET k=2,v=20 WHERE k=1; DELETE FROM b; INSERT INTO b VALUES (2,3)";
@@ -17,7 +19,7 @@ impl Drop for OwnedChild {
     }
 }
 
-fn kill_at(root: &Path, point: &str, epoch: u64) {
+fn kill_at(root: &Path, point: &str, epoch: u64, checkpoint_interval: u64) {
     let mut child = OwnedChild(
         Command::new(std::env::current_exe().unwrap())
             .args([
@@ -28,6 +30,10 @@ fn kill_at(root: &Path, point: &str, epoch: u64) {
             ])
             .env("OPTD_DATABASE_KILL_ROOT", root)
             .env("OPTD_DATABASE_KILL_POINT", point)
+            .env(
+                "OPTD_DATABASE_CHECKPOINT_INTERVAL",
+                checkpoint_interval.to_string(),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -66,12 +72,24 @@ fn database_worker() {
         return;
     };
     let point = std::env::var("OPTD_DATABASE_KILL_POINT").unwrap();
+    let interval: u64 = std::env::var("OPTD_DATABASE_CHECKPOINT_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            let mut db = SqlSession::open(&root).await.unwrap();
+            let mut db = SqlSession::open_with_options(
+                &root,
+                OpenOptions {
+                    checkpoint_interval: interval,
+                    incompatible_state: IncompatibleStatePolicy::Fail,
+                },
+            )
+            .await
+            .unwrap();
             let epoch = db.epoch() + 1;
             db.execute_transaction_observed("atomic-write", WRITE, |p| {
                 if matches!(
@@ -125,37 +143,45 @@ async fn assert_contents(db: &mut SqlSession, new: bool) {
 
 #[tokio::test]
 async fn sigkill_recovers_all_tables_views_and_identified_transaction_exactly_once() {
-    for point in ["files", "current"] {
-        let root = tempfile::tempdir().unwrap();
-        let mut db = SqlSession::open(root.path()).await.unwrap();
-        db.execute_script("CREATE TABLE a(k BIGINT,v BIGINT); CREATE TABLE b(k BIGINT,v BIGINT); INSERT INTO a VALUES (1,10); INSERT INTO b VALUES (1,2); CREATE MATERIALIZED VIEW joined AS SELECT a.k,a.v*b.v AS total FROM a JOIN b ON a.k=b.k; CREATE MATERIALIZED VIEW grouped AS SELECT k,SUM(v) AS total FROM a GROUP BY k").await.unwrap();
-        let epoch = db.epoch();
-        drop(db);
-        let before = fs::read(root.path().join("CURRENT")).unwrap();
-        kill_at(root.path(), point, epoch + 1);
-        let mut recovered = SqlSession::open(root.path()).await.unwrap();
-        let published = point == "current";
-        assert_eq!(recovered.epoch(), epoch + u64::from(published));
-        assert_eq!(
-            fs::read(root.path().join("CURRENT")).unwrap() == before,
-            !published
-        );
-        assert_contents(&mut recovered, published).await;
-        let retry = recovered
-            .execute_transaction("atomic-write", WRITE)
-            .await
-            .unwrap();
-        assert_eq!(retry.replayed, published);
-        assert_eq!(retry.epoch, epoch + 1);
-        assert_contents(&mut recovered, true).await;
-        assert!(
-            recovered
+    // Exercise both bounded-replay commits (interval=16) and operator-state checkpoint commits (interval=1).
+    for interval in [16u64, 1] {
+        for point in ["files", "current"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut db = SqlSession::open(root.path()).await.unwrap();
+            db.execute_script("CREATE TABLE a(k BIGINT,v BIGINT); CREATE TABLE b(k BIGINT,v BIGINT); INSERT INTO a VALUES (1,10); INSERT INTO b VALUES (1,2); CREATE MATERIALIZED VIEW joined AS SELECT a.k,a.v*b.v AS total FROM a JOIN b ON a.k=b.k; CREATE MATERIALIZED VIEW grouped AS SELECT k,SUM(v) AS total FROM a GROUP BY k").await.unwrap();
+            let epoch = db.epoch();
+            drop(db);
+            let before = fs::read(root.path().join("CURRENT")).unwrap();
+            kill_at(root.path(), point, epoch + 1, interval);
+            let mut recovered = SqlSession::open(root.path()).await.unwrap();
+            let published = point == "current";
+            assert_eq!(recovered.epoch(), epoch + u64::from(published));
+            assert_eq!(recovered.recovery_work().rebuilt_views, 0);
+            assert_eq!(recovered.recovery_work().restored_views, Some(2));
+            if published && interval == 1 {
+                assert_eq!(recovered.recovery_work().replayed_epochs, Some(0));
+            }
+            assert_eq!(
+                fs::read(root.path().join("CURRENT")).unwrap() == before,
+                !published
+            );
+            assert_contents(&mut recovered, published).await;
+            let retry = recovered
                 .execute_transaction("atomic-write", WRITE)
                 .await
-                .unwrap()
-                .replayed
-        );
-        drop(recovered);
-        assert_contents(&mut SqlSession::open(root.path()).await.unwrap(), true).await;
+                .unwrap();
+            assert_eq!(retry.replayed, published);
+            assert_eq!(retry.epoch, epoch + 1);
+            assert_contents(&mut recovered, true).await;
+            assert!(
+                recovered
+                    .execute_transaction("atomic-write", WRITE)
+                    .await
+                    .unwrap()
+                    .replayed
+            );
+            drop(recovered);
+            assert_contents(&mut SqlSession::open(root.path()).await.unwrap(), true).await;
+        }
     }
 }

@@ -48,14 +48,14 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R05a | P2 | Window-specific physical maintenance | Partition aggregates use accumulators; finite frames use ordered ranges; ranking tracks affected positions; preserve cached Before output and ties across restart | pending |
 | R05b | P2 | Unpartitioned windows, ordering and Top-K | Ordered state, ties, NULL order and delete refill preserve original SQL membership; internal ORDER BY/LIMIT remain semantic operators | in_progress |
 | R06 | P1 | Extensible dependency/impact contracts | Represent group keys, join keys, partitions, ranges and global dependencies; propagate threshold changes to unchanged source keys without missing outputs | in_progress |
-| R07a | P1 | Delta logs and block checkpoints | Changed blocks/deltas replace full changed-relation payload writes; publication and SIGKILL recovery remain atomic | pending |
-| R07b | P1 | Persist operator state and restore incrementally | Version states and rule identity; recover with bounded replay; incompatible states fail or rebuild explicitly | pending |
-| R07c | P1 | Request indexes, history retention and compaction | Retry lookup avoids history traversal; compaction retains retry/replay/recovery reachability and never deletes live referenced files | pending |
+| R07a | P1 | Delta logs and block checkpoints | Changed blocks/deltas replace full changed-relation payload writes; publication and SIGKILL recovery remain atomic | verified |
+| R07b | P1 | Persist operator state and restore incrementally | Version states and rule identity; recover with bounded replay; incompatible states fail or rebuild explicitly | verified |
+| R07c | P1 | Request indexes, history retention and compaction | Retry lookup avoids history traversal; compaction retains retry/replay/recovery reachability and never deletes live referenced files | in_progress |
 | R08 | P1 | Incremental source ingestion | Read changed files/native changes rather than both full endpoints; qualify delete-file semantics and source provenance separately from host-local atomicity | pending |
 | R09a | P2 | Physical algorithm alternatives and cost selection | Compare qualified delta/indexed/scoped algorithms using measured state and change sizes; strict mode never silently selects full recomputation | pending |
-| R09b | P2 | Reusable execution templates | Avoid repeatedly planning/materializing local DataFusion expressions; inputs remain epoch-correct and task-isolated | pending |
+| R09b | P2 | Reusable execution templates | Avoid repeatedly planning/materializing local DataFusion expressions; inputs remain epoch-correct and task-isolated | verified |
 | R09c | P1 | Plan preflight and complete blockers | Enumerate every blocking node with precise function/type/scope reason before CREATE MV; unsupported plans publish nothing | verified |
-| R10a | P0 | Scaling and work-scope regressions | Hold changes, bucket size and required output fixed; grow untouched data; assert source reads, state copies, materialization and writes separately | pending |
+| R10a | P0 | Scaling and work-scope regressions | Hold changes, bucket size and required output fixed; grow untouched data; assert source reads, state copies, materialization and writes separately | verified |
 | R10b | P1 | Long-running randomized SQL/recovery loops | Mix transactions, duplicate/NULL/key moves, hot keys, window peers, discarded candidates and deterministic crash points; independent SQL and delta-prefix oracles | pending |
 | R10c | P1 | Controlled performance qualification | Record machine, source/data/binary identities and isolated state; compare full vs incremental at multiple change ratios; no performance claim from correctness durations | pending |
 | R11 | P2 | Engineering quality and internal contract protection | Preserve Google Rust guidance, review critical internal docs, default/Iceberg format/lint/rustdoc/tests, and local source ownership; public missing_docs alone is insufficient | pending |
@@ -1889,3 +1889,86 @@ Final S2–S5 delivery checks: **344 default / 358 Iceberg passed**, with 2/3
 existing ignored gates; Python **48 passed**, both Clippy/private-rustdoc modes,
 fmt and mdBook passed. Final crate hashes and all process exits are recorded.
 These counts overlap repeated feature configurations; they are not unique cases.
+
+### Wave 1 — End-to-End Incremental Loop (W1.0, R09b, R07a, R07b, R07c partial, R10a)
+
+Designs:
+[reusable execution templates](docs/src/incremental/reusable_execution_templates.md),
+[block checkpoints and O(1) receipt index](docs/src/incremental/block_checkpoints.md),
+[persistent operator state and bounded-replay recovery](docs/src/incremental/persistent_operator_state.md)
+(design commit `6514972`).
+Ledger: **17 verified, 6 in_progress, 8 pending** (`R09b`, `R07a`, `R07b`, `R10a`
+verified; `R07c` in_progress for its O(1) request-receipt index subset only while
+history retention and compaction remain pending). Local branch
+`wave1-end-to-end-incremental` over `f6c12a3`; zero dependency or `Cargo.lock`
+changes.
+
+* **W1.0 — benchmark stage persistence** (`b36db5f`): `StageTracer` in
+  `benchmarks/database_harness.rs` atomically persists `progress.json` across
+  preflight, bootstrap and per-round DML/verify/reopen boundaries and exposes
+  `stage_timings` and `progress_file`.
+* **W1.1 (`R09b`) — reusable execution templates** (`c0a31e5`):
+  `executor/template.rs` precompiles per-operator physical expression templates
+  (`DirectPipeline`, `DirectUnion`, `Fallback`) once at `SqlView` compile time
+  and evaluates batches without per-refresh DataFusion re-planning.
+  `ExecutionTemplateWork` reports direct executions, fallback executions and
+  fallback plans separately; `tests/execution_templates.rs` verifies constant
+  zero fallback planning across growing data, concurrent/failed candidate
+  isolation, and complex subquery fallback preservation.
+* **W1.2 (`R07a` + `R07c` O(1) receipt index)** (`f37e033`): Clean break to
+  `optd-sql-database/2` (legacy `optd-sql-database/1` is explicitly refused;
+  standalone `CheckpointStore` and Iceberg CDC v1 formats are unchanged).
+  Tables and unordered MVs persist content-addressed `RowBlocks` leaves with
+  reused untouched blocks and `min_key_sha256` manifest entries; ordered MVs
+  retain `ViewOutput::Ordered`. Commits persist per-epoch `table_deltas` and an
+  incremental O(1) `receipts.json` index so retries avoid walking commit
+  history. Unchanged commits reuse prior manifests/blocks with zero full-table
+  flattening (`table_materialization == 0`).
+* **W1.3 (`R07b`) — persistent operator state & bounded replay** (`a1b65ed`):
+  `state_codec.rs` (`optd-operator-state/1`) persists columnar Arrow IPC + JSON
+  checkpoints for all four state families (accumulator + moments + value index,
+  keyed/match-join/residual, group, rank) bound to deterministic
+  `PlanFingerprint` digests. `SqlSession::open_with_options` restores from the
+  latest checkpoint (`K = 16` default) and replays at most `K - 1` persisted
+  `table_deltas` (reconstructing `SourceState` at checkpoint epoch by
+  subtracting replayed deltas from head without duplicating base-table storage).
+  `IncompatibleStatePolicy::{Fail, Rebuild}` governs fingerprint mismatch or
+  corrupted state payloads; `RecoveryWork` records `restored_views`,
+  `replayed_epochs`, `replayed_delta_rows` and `state_payload_reads`.
+* **W1.4 (`R10a`) — scaling & four-window SIGKILL verification** (this commit):
+  `tests/end_to_end_scaling.rs` verifies 1k → 8k → 65k single-row
+  INSERT/UPDATE/DELETE + reopen against an independent integer oracle,
+  separately bounding written blocks/rows, directory copies, zero template
+  re-planning, O(1) retry lookup across 20 commits, and `Fail`/`Rebuild`
+  handling on corrupted state IPC. `tests/database_process.rs` executes four
+  real subprocess `SIGKILL` crash windows covering both `FilesDurable` and
+  `CurrentDurable` across bounded-replay (`checkpoint_interval = 16`) and
+  operator-state checkpoint (`checkpoint_interval = 1`) epochs.
+
+**Verified gates (Rust 1.95.0, `--locked`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_INCREMENTAL=0`):**
+
+* `bash scripts/agent-check.sh sql`: exit 0 — `rustfmt --check`, all-target
+  default & Iceberg `clippy -D warnings`, **354 default tests passed / 0 failed
+  / 2 ignored** and **368 Iceberg tests passed / 0 failed / 3 ignored** (the
+  existing ignored full-TPC, Q21 warehouse and subprocess-driver gates remain
+  excluded).
+* `RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p optd-incremental-sql --features iceberg --no-deps --document-private-items`:
+  exit 0.
+* Fresh-target compilation check (`CARGO_TARGET_DIR=/tmp/optd-wave1-fresh-check cargo +1.95.0 check --locked -p optd-incremental-sql --all-targets --features iceberg`):
+  exit 0.
+* Python benchmark report/audit unit tests: `test_incremental_work.py`
+  (**19 passed**) and `test_summarize_coverage.py` (**13 passed**).
+
+**Explicit limitations & unexecuted gates:**
+
+* `mdbook` is not installed on this host, so `mdbook build docs` was not run.
+* External DuckDB fixture `optd-incremental-sql/benchmarks/tpcds/schema.sql` is
+  not present locally, so the 12 TPC-DS witness fixture/suite Python tests
+  (`test_query_witness_fixture.py`, `test_query_witness_suite.py`) errored with
+  `FileNotFoundError` (the 4 schema-independent tests in those files passed).
+* Unindexed `DELETE`/`UPDATE` SQL `WHERE` selector scans still scale with base
+  table rows and remain separately measured and reported.
+* `R07c` history retention / GC compaction, `R08` native Iceberg CDC delta
+  reads, `R10b` long-running randomized loops and `R10c` controlled performance
+  benchmarks remain open; no end-to-end latency speedup or full-TPC
+  certification is claimed here.
