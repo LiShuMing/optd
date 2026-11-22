@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use optd_incremental_sql::database::{display_rows, SqlResponse, SqlSession};
+use optd_incremental_sql::database::{display_rows, RetentionPolicy, SqlResponse, SqlSession};
 use optd_incremental_sql::{Error, Result};
 use serde_json::{json, Value};
 
@@ -34,7 +34,7 @@ fn script(path: &str) -> Result<String> {
 
 pub(crate) async fn run(args: &[String]) -> Result<Value> {
     let Some(root) = args.first() else {
-        return Err(Error::Invalid("usage: sql_database <warehouse> <script.sql> | --request <id> <script.sql> | --transaction <id> <script.sql> | --replay | --explain <view> | --explain-tree <view> | --explain-detailed <view> | --explain-query <query.sql> | --explain-query-detailed <query.sql>".into()));
+        return Err(Error::Invalid("usage: sql_database <warehouse> <script.sql> | --request <id> <script.sql> | --transaction <id> <script.sql> | --replay | --compact <retain_epochs> | --explain <view> | --explain-tree <view> | --explain-detailed <view> | --explain-query <query.sql> | --explain-query-detailed <query.sql>".into()));
     };
     let mut session = SqlSession::open(Path::new(root)).await?;
     let before = session.store_work()?;
@@ -43,6 +43,13 @@ pub(crate) async fn run(args: &[String]) -> Result<Value> {
         [path] if path == "--replay" => {
             session.verify_output_history()?;
             Ok(json!({"epoch":session.epoch(),"output_history_verified":true}))
+        }
+        [option, epochs] if option == "--compact" => {
+            let retain_epochs: u64 = epochs
+                .parse()
+                .map_err(|_| Error::Invalid("invalid retain_epochs integer".into()))?;
+            let report = session.compact(RetentionPolicy { retain_epochs })?;
+            Ok(json!({"epoch": session.epoch(), "compaction": report}))
         }
         [option, name] if option == "--explain" => Ok(json!({
             "epoch": session.epoch(),

@@ -50,7 +50,7 @@ Priority orders work; dependencies can move a prerequisite ahead of its consumer
 | R06 | P1 | Extensible dependency/impact contracts | Represent group keys, join keys, partitions, ranges and global dependencies; propagate threshold changes to unchanged source keys without missing outputs | in_progress |
 | R07a | P1 | Delta logs and block checkpoints | Changed blocks/deltas replace full changed-relation payload writes; publication and SIGKILL recovery remain atomic | verified |
 | R07b | P1 | Persist operator state and restore incrementally | Version states and rule identity; recover with bounded replay; incompatible states fail or rebuild explicitly | verified |
-| R07c | P1 | Request indexes, history retention and compaction | Retry lookup avoids history traversal; compaction retains retry/replay/recovery reachability and never deletes live referenced files | in_progress |
+| R07c | P1 | Request indexes, history retention and compaction | Retry lookup avoids history traversal; compaction retains retry/replay/recovery reachability and never deletes live referenced files | verified |
 | R08 | P1 | Incremental source ingestion | Read changed files/native changes rather than both full endpoints; qualify delete-file semantics and source provenance separately from host-local atomicity | pending |
 | R09a | P2 | Physical algorithm alternatives and cost selection | Compare qualified delta/indexed/scoped algorithms using measured state and change sizes; strict mode never silently selects full recomputation | pending |
 | R09b | P2 | Reusable execution templates | Avoid repeatedly planning/materializing local DataFusion expressions; inputs remain epoch-correct and task-isolated | verified |
@@ -1972,3 +1972,62 @@ changes.
   reads, `R10b` long-running randomized loops and `R10c` controlled performance
   benchmarks remain open; no end-to-end latency speedup or full-TPC
   certification is claimed here.
+
+### State Management Milestone 1 — EXPLAIN, Dead-Relation Elimination, Shared Sources & R07c Compaction
+
+Designs and catalogs:
+[incremental plan text EXPLAIN & TPC-H / TPC-DS catalog](docs/src/incremental/tpc_incremental_plans.md),
+[RFC: incremental state management & optimization TODO](docs/src/incremental/rfc_state_management.md).
+Ledger: **18 verified, 5 in_progress, 8 pending** (`R07c` moved to `verified`).
+Zero dependency or `Cargo.lock` changes; backward-compatible additive
+`retained_from_epoch` field in `optd-sql-database/2`.
+
+* **Text EXPLAIN & TPC-H/TPC-DS plan catalog** (`3df6e02`): Added Unicode DAG
+  tree and lowered `PhysicalStep` text EXPLAIN (`IncrementalPlan::explain_tree`,
+  `explain_detailed`, `PlanPreflight::explain_tree`, `SqlView::explain_query`,
+  SQL `EXPLAIN [VERBOSE] SELECT ...`, `examples/sql_database` flags, and
+  `examples/explain_benchmarks`). Schema-only compilation across all 22 TPC-H
+  and 99 TPC-DS queries confirms 22/22 TPC-H and 99/99 TPC-DS strict-eligible
+  plans in `relational_core` mode (and 4/22 TPC-H, 5/99 TPC-DS in `original`
+  mode, with 100% of original-mode blockers coming solely from `Sort` / `Limit`).
+* **RFC TODO-S1 — dead intermediate relation elimination** (`4dd466d`):
+  `IncrementalPlan::retained_relations()` identifies nodes actually needed by
+  root output, `ordered` sequence tracking, `SnapshotRead`,
+  `SnapshotReadWhenChanged`, or `Replace`. Unneeded linear intermediates are
+  dropped after bootstrap (`SqlView.states[id] = None`) and omitted from
+  `ViewStateRef.node_relations` checkpoints (`tests/dead_relation_elimination.rs`).
+* **RFC TODO-S2 — cross-view shared `SourceState`** (`f201a6e`):
+  `SqlSession` owns one `Arc`-shared `SourceState` per referenced base table
+  across all sibling materialized views (on `CREATE MV`, `commit`, and `open`),
+  applying net table deltas once per table and attributing source rebuild work
+  once (`tests/shared_source_state.rs`).
+* **RFC TODO-S3 (`R07c`) — history retention & reachability-protected GC compaction**
+  (this commit): Added `RetentionPolicy`, `CompactionReport`,
+  `SqlSession::compact` / `compact_with_observer`, and `sql_database --compact`.
+  Compaction atomically publishes `retained_from_epoch` (clamped at or below
+  every live view's `checkpoint_epoch`) before sweeping unreachable files,
+  stale `states-v-*` subdirectories and orphan `db-*` crash directories, while
+  preserving all live reused blocks, O(1) retry receipts and bounded-replay
+  recovery (`tests/database_compaction.rs`).
+
+**Verified gates (Rust 1.95.0, `--locked`, `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_INCREMENTAL=0`):**
+
+* `bash scripts/agent-check.sh sql`: exit 0 — `rustfmt --check`, default &
+  Iceberg all-target `clippy -D warnings`, **365 default tests passed / 0 failed
+  / 2 ignored** and **379 Iceberg tests passed / 0 failed / 3 ignored**.
+* `RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p optd-incremental-sql --features iceberg --no-deps --document-private-items`:
+  exit 0.
+* Python benchmark tool suite (`python3 -m unittest discover -s optd-incremental-sql/benchmarks/tools -p 'test_*.py'`):
+  **48/48 passed** (after extracting pinned TPC-H and fetching pinned DuckDB
+  TPC-DS v1.4.3 local ignored fixtures).
+
+**Explicit limitations & remaining open work:**
+
+* `mdbook` is not installed on this host, so `mdbook build docs` was not run.
+* Existing ignored full-TPC, Q21 warehouse and subprocess-driver gates remain
+  excluded; schema-only TPC-H/TPC-DS plan compilation does not replace runtime
+  correctness or controlled performance qualification (`R10c`).
+* RFC Milestone 2–4 items remain open: block-level incremental operator-state
+  checkpoints (`optd-operator-state/2`), columnar bucket compaction, ordered /
+  Top-K state (`R05b`), partition-window accumulators (`R05a`), and spillable /
+  on-disk state backends.

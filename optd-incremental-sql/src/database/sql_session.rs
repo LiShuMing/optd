@@ -3,7 +3,10 @@
 use super::dml_compiler::TransactionMode;
 use super::response::{CommitReport, SqlResponse};
 use super::sql::{self, RelationScope};
-use super::store::{DatabaseSnapshot, DatabaseStore, Receipt, TableData, ViewData, ViewOutput};
+use super::store::{
+    CompactionReport, DatabaseSnapshot, DatabaseStore, Receipt, RetentionPolicy, TableData,
+    ViewData, ViewOutput,
+};
 use super::store_work::{RecoveryWork, StoreWork};
 use super::table_rows::TableRows;
 use super::transaction_workspace::{PreparedCommit, TransactionWorkspace};
@@ -478,14 +481,49 @@ impl SqlSession {
         })
     }
 
-    /// Replay every committed view delta and compare each prefix to its stored output.
+    /// Reclaim unreachable historical files, stale operator-state directories and crash orphans
+    /// according to `policy`, preserving all live blocks, retry receipts and bounded-replay recovery.
+    pub fn compact(&mut self, policy: RetentionPolicy) -> Result<CompactionReport> {
+        self.compact_with_observer(policy, &mut |_| Ok(()))
+    }
+
+    /// Compaction with an explicit publication-barrier observer for durability testing.
+    pub fn compact_with_observer(
+        &mut self,
+        policy: RetentionPolicy,
+        observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
+    ) -> Result<CompactionReport> {
+        self.ensure_ready()?;
+        if self.transaction.is_some() {
+            return Err(invalid("compaction requires an autocommit session"));
+        }
+        // Any publication error fences this session until reopen resolves `CURRENT`.
+        self.fenced = true;
+        let report = self.store.compact(policy, observer)?;
+        self.fenced = false;
+        Ok(report)
+    }
+
+    /// Replay every retained committed view delta and compare each prefix to its stored output.
     ///
-    /// Reads historical snapshots and payloads, so work grows with retained history.
+    /// Reads retained historical snapshots and payloads, so work grows with retained history.
     /// View identities distinguish a recreated view from a dropped view of the same name.
     pub fn verify_output_history(&self) -> Result<()> {
         self.ensure_ready()?;
+        let floor = self.store.retained_from_epoch();
         let mut states = BTreeMap::<u64, Bag>::new();
+        let mut seeded_compacted_base = false;
         for snapshot in self.store.history()? {
+            if floor > 1 && !seeded_compacted_base {
+                // When history prior to `floor` was compacted, `floor` is the verified baseline.
+                for v in snapshot.views.values() {
+                    let bag = v.output.to_bag()?;
+                    bag.validate_relation()?;
+                    states.insert(v.id, bag);
+                }
+                seeded_compacted_base = true;
+                continue;
+            }
             let live = snapshot
                 .views
                 .values()

@@ -96,6 +96,39 @@ pub(super) struct DatabaseSnapshot {
     pub deltas: BTreeMap<String, RecordBatch>,
 }
 
+/// History retention policy governing database compaction (`R07c`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    /// Minimum number of trailing committed epochs to retain in lineage metadata (must be >= 1).
+    ///
+    /// Compaction always retains further back when any live view's operator-state checkpoint
+    /// requires earlier epochs for bounded-replay recovery.
+    pub retain_epochs: u64,
+}
+
+impl Default for RetentionPolicy {
+    fn default() -> Self {
+        Self { retain_epochs: 16 }
+    }
+}
+
+/// Observed file and directory reclamation summary from one compaction pass (`R07c`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CompactionReport {
+    /// Committed database epoch at compaction time (unchanged by compaction).
+    pub head_epoch: u64,
+    /// Earliest retained manifest epoch after compaction (`1` if uncompacted or `0` if empty).
+    pub retained_from_epoch: u64,
+    /// Number of retained manifests in `retained_from_epoch..=head_epoch`.
+    pub retained_manifests: u64,
+    /// Unreachable individual files removed from partially live epoch directories.
+    pub removed_files: u64,
+    /// Unreachable epoch/orphan directories and stale state subdirectories removed.
+    pub removed_dirs: u64,
+    /// Total bytes reclaimed across removed files and directories.
+    pub reclaimed_bytes: u64,
+}
+
 /// Persisted request identity and original outcome for exact identified-write retries.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -212,6 +245,8 @@ struct Manifest {
     format: String,
     epoch: u64,
     previous: Option<Root>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_from_epoch: Option<u64>,
     next_id: u64,
     tables: BTreeMap<String, TableEntry>,
     views: BTreeMap<String, ViewEntry>,
@@ -549,9 +584,28 @@ impl DatabaseStore {
         })
     }
 
-    fn manifests(&self) -> Result<Vec<Manifest>> {
+    /// Earliest retained manifest epoch (`0` for an empty database, `1` if uncompacted).
+    pub fn retained_from_epoch(&self) -> u64 {
+        match &self.manifest {
+            None => 0,
+            Some(m) => m.retained_from_epoch.unwrap_or(1),
+        }
+    }
+
+    fn manifests_with_roots(&self) -> Result<Vec<(Root, Manifest)>> {
         self.work.start_history()?;
-        let mut current = self.head.clone();
+        let Some(head_root) = self.head.clone() else {
+            return Ok(Vec::new());
+        };
+        let floor = self
+            .manifest
+            .as_ref()
+            .and_then(|m| m.retained_from_epoch)
+            .unwrap_or(1);
+        if floor == 0 || floor > self.snapshot.epoch {
+            return Err(invalid("invalid retained_from_epoch in database manifest"));
+        }
+        let mut current = Some(head_root);
         let mut result = Vec::new();
         let mut visited = BTreeSet::new();
         let mut expected = self.snapshot.epoch;
@@ -564,15 +618,32 @@ impl DatabaseStore {
                 return Err(invalid("noncontiguous database lineage"));
             }
             self.work.visit_manifest()?;
+            let prev = m.previous.clone();
+            let hit_floor = m.epoch == floor;
+            result.push((root, m));
+            if hit_floor {
+                if floor == 1 && prev.is_some() {
+                    return Err(invalid("epoch 1 manifest must not reference a predecessor"));
+                }
+                expected = floor.checked_sub(1).ok_or(Error::Overflow)?;
+                break;
+            }
             expected = expected.checked_sub(1).ok_or(Error::Overflow)?;
-            current = m.previous.clone();
-            result.push(m);
+            current = prev;
         }
-        if expected != 0 {
+        if expected != floor - 1 {
             return Err(invalid("truncated database lineage"));
         }
         result.reverse();
         Ok(result)
+    }
+
+    fn manifests(&self) -> Result<Vec<Manifest>> {
+        Ok(self
+            .manifests_with_roots()?
+            .into_iter()
+            .map(|(_, m)| m)
+            .collect())
     }
 
     /// O(log H) lookup in the persisted receipt index; zero manifest-history traversal.
@@ -1144,10 +1215,12 @@ impl DatabaseStore {
                 .and_then(|manifest| manifest.receipt_index.clone())
         };
 
+        let retained_from_epoch = self.manifest.as_ref().and_then(|m| m.retained_from_epoch);
         let m = Manifest {
             format: FORMAT.into(),
             epoch: next.epoch,
             previous: self.head.clone(),
+            retained_from_epoch,
             next_id: next.next_id,
             tables,
             views,
@@ -1180,4 +1253,268 @@ impl DatabaseStore {
         self.receipts = next_receipts;
         Ok(())
     }
+
+    /// Reclaim unreachable historical files, stale operator-state directories and crash orphans
+    /// while strictly preserving every live block, retry index and bounded-replay checkpoint (`R07c`).
+    ///
+    /// Publish-before-delete: if `retained_from_epoch` advances, the updated `CURRENT` pointer is
+    /// atomically published and fsynced *before* any unreachable file or directory is deleted.
+    pub fn compact(
+        &mut self,
+        policy: RetentionPolicy,
+        observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
+    ) -> Result<CompactionReport> {
+        if policy.retain_epochs == 0 {
+            return Err(invalid("retain_epochs must be at least 1"));
+        }
+        let Some(head_manifest) = self.manifest.clone() else {
+            // Empty database: still sweep any orphan `db-*` crash remnants.
+            let (removed_files, removed_dirs, reclaimed_bytes) =
+                sweep_unreachable(&self.root, &BTreeMap::new(), &BTreeMap::new())?;
+            return Ok(CompactionReport {
+                head_epoch: 0,
+                retained_from_epoch: 0,
+                retained_manifests: 0,
+                removed_files,
+                removed_dirs,
+                reclaimed_bytes,
+            });
+        };
+
+        let head_epoch = head_manifest.epoch;
+        let prev_floor = head_manifest.retained_from_epoch.unwrap_or(1);
+        let requested_floor = head_epoch
+            .saturating_sub(policy.retain_epochs.saturating_sub(1))
+            .max(1);
+        let min_view_checkpoint = head_manifest
+            .view_states
+            .values()
+            .map(|vs| vs.checkpoint_epoch)
+            .min();
+        let safe_floor = match min_view_checkpoint {
+            Some(cp) => requested_floor.min(cp),
+            None => requested_floor,
+        }
+        .max(prev_floor)
+        .min(head_epoch);
+
+        // Step 1: Atomically publish the new `retained_from_epoch` floor BEFORE any deletion.
+        if safe_floor > prev_floor {
+            let disk = match fs::read(self.root.join("CURRENT")) {
+                Ok(bytes) => {
+                    self.work.pointer_read(bytes.len())?;
+                    Some(serde_json::from_slice::<Root>(&bytes)?)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
+            if json_bytes(&disk)? != json_bytes(&self.head)? {
+                return Err(invalid("database CURRENT changed; reopen required"));
+            }
+            let (name, dir) = loop {
+                let name = format!(
+                    "db-{head_epoch}-c-{}-{}",
+                    std::process::id(),
+                    ATTEMPT.fetch_add(1, Ordering::Relaxed)
+                );
+                let dir = self.root.join(&name);
+                match fs::create_dir(&dir) {
+                    Ok(()) => break (name, dir),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            let mut updated = head_manifest.clone();
+            updated.retained_from_epoch = Some(safe_floor);
+            if safe_floor == head_epoch {
+                updated.previous = None;
+            }
+            let manifest = write_bytes(&dir, "manifest.json", &json_bytes(&updated)?)?;
+            self.work.manifest_write(manifest.bytes)?;
+            sync_dir(&dir)?;
+            sync_dir(&self.root)?;
+            observer(PublishPoint::FilesDurable)?;
+            let new_head = Root {
+                directory: name.clone(),
+                manifest,
+            };
+            let pointer = format!("CURRENT-{name}.tmp");
+            let entry = write_bytes(&self.root, &pointer, &json_bytes(&new_head)?)?;
+            self.work.pointer_write(entry.bytes)?;
+            fs::rename(self.root.join(pointer), self.root.join("CURRENT"))?;
+            sync_dir(&self.root)?;
+            observer(PublishPoint::CurrentDurable)?;
+            self.head = Some(new_head);
+            self.manifest = Some(updated);
+        }
+
+        // Step 2: Compute exact reachability across `safe_floor..=head_epoch`.
+        let retained = self.manifests_with_roots()?;
+        let mut reachable_files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut reachable_subdirs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mark_payload = |files: &mut BTreeMap<String, BTreeSet<String>>, payload: &Payload| {
+            files
+                .entry(payload.directory.clone())
+                .or_default()
+                .insert(payload.file.name.clone());
+        };
+
+        for (root, m) in &retained {
+            reachable_files
+                .entry(root.directory.clone())
+                .or_default()
+                .insert(root.manifest.name.clone());
+            for t in m.tables.values() {
+                self.mark_block_relation(&t.data, &mut reachable_files)?;
+            }
+            for v in m.views.values() {
+                match &v.output {
+                    ViewOutputEntry::BlockRelation(rel) => {
+                        self.mark_block_relation(rel, &mut reachable_files)?;
+                    }
+                    ViewOutputEntry::OrderedPayload(p) => mark_payload(&mut reachable_files, p),
+                }
+            }
+            for p in m.table_deltas.values() {
+                mark_payload(&mut reachable_files, p);
+            }
+            for p in m.deltas.values() {
+                mark_payload(&mut reachable_files, p);
+            }
+            if let Some(p) = &m.receipt_index {
+                mark_payload(&mut reachable_files, p);
+            }
+            for vs in m.view_states.values() {
+                reachable_subdirs
+                    .entry(vs.directory.clone())
+                    .or_default()
+                    .insert(vs.state_subdir.clone());
+                for rel in vs.node_relations.iter().flatten() {
+                    self.mark_block_relation(rel, &mut reachable_files)?;
+                }
+            }
+        }
+
+        // Step 3: Sweep unreachable files, stale state subdirectories and dead/orphan `db-*` dirs.
+        let (removed_files, removed_dirs, reclaimed_bytes) =
+            sweep_unreachable(&self.root, &reachable_files, &reachable_subdirs)?;
+
+        Ok(CompactionReport {
+            head_epoch,
+            retained_from_epoch: safe_floor,
+            retained_manifests: retained.len() as u64,
+            removed_files,
+            removed_dirs,
+            reclaimed_bytes,
+        })
+    }
+
+    fn mark_block_relation(
+        &self,
+        rel: &BlockRelationEntry,
+        reachable_files: &mut BTreeMap<String, BTreeSet<String>>,
+    ) -> Result<()> {
+        reachable_files
+            .entry(rel.schema.directory.clone())
+            .or_default()
+            .insert(rel.schema.file.name.clone());
+        if let BlockListRef::External { payload, .. } = &rel.blocks {
+            reachable_files
+                .entry(payload.directory.clone())
+                .or_default()
+                .insert(payload.file.name.clone());
+        }
+        for block in self.read_block_list(&rel.blocks)? {
+            reachable_files
+                .entry(block.payload.directory)
+                .or_default()
+                .insert(block.payload.file.name);
+        }
+        Ok(())
+    }
+}
+
+fn dir_size(path: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        let bytes = if meta.is_dir() {
+            dir_size(&entry.path())?
+        } else {
+            meta.len()
+        };
+        total = total.checked_add(bytes).ok_or(Error::Overflow)?;
+    }
+    Ok(total)
+}
+
+fn sweep_unreachable(
+    root: &Path,
+    reachable_files: &BTreeMap<String, BTreeSet<String>>,
+    reachable_subdirs: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(u64, u64, u64)> {
+    let mut removed_files = 0u64;
+    let mut removed_dirs = 0u64;
+    let mut reclaimed_bytes = 0u64;
+    let mut touched_root = false;
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(dir_name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !dir_name.starts_with("db-") {
+            continue;
+        }
+        let live_files = reachable_files.get(&dir_name);
+        let live_subdirs = reachable_subdirs.get(&dir_name);
+        let dir_path = entry.path();
+        if live_files.is_none() && live_subdirs.is_none() {
+            let bytes = dir_size(&dir_path)?;
+            fs::remove_dir_all(&dir_path)?;
+            removed_dirs = removed_dirs.checked_add(1).ok_or(Error::Overflow)?;
+            reclaimed_bytes = reclaimed_bytes.checked_add(bytes).ok_or(Error::Overflow)?;
+            touched_root = true;
+            continue;
+        }
+        let mut touched_dir = false;
+        for child in fs::read_dir(&dir_path)? {
+            let child = child?;
+            let Ok(child_name) = child.file_name().into_string() else {
+                continue;
+            };
+            let child_path = child.path();
+            if child.file_type()?.is_dir() {
+                let keep = live_subdirs.is_some_and(|set| set.contains(&child_name));
+                if !keep {
+                    let bytes = dir_size(&child_path)?;
+                    fs::remove_dir_all(&child_path)?;
+                    removed_dirs = removed_dirs.checked_add(1).ok_or(Error::Overflow)?;
+                    reclaimed_bytes = reclaimed_bytes.checked_add(bytes).ok_or(Error::Overflow)?;
+                    touched_dir = true;
+                }
+            } else {
+                let keep = live_files.is_some_and(|set| set.contains(&child_name));
+                if !keep {
+                    let bytes = child.metadata()?.len();
+                    fs::remove_file(&child_path)?;
+                    removed_files = removed_files.checked_add(1).ok_or(Error::Overflow)?;
+                    reclaimed_bytes = reclaimed_bytes.checked_add(bytes).ok_or(Error::Overflow)?;
+                    touched_dir = true;
+                }
+            }
+        }
+        if touched_dir {
+            sync_dir(&dir_path)?;
+        }
+    }
+    if touched_root {
+        sync_dir(root)?;
+    }
+    Ok((removed_files, removed_dirs, reclaimed_bytes))
 }

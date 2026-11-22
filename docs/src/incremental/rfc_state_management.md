@@ -128,17 +128,17 @@ flowchart TB
 
 ### P0：高 ROI 减负与存储闭环（零格式破坏或小步演进）
 
-* [ ] **TODO-S1：按需中间关系物化（Dead Relation State Elimination）**
+* [x] **TODO-S1：按需中间关系物化（Dead Relation State Elimination）** *(已落地：`4dd466d`)*
   * **方案**：在 `IncrementalPlan` 编译期做静态可达性分析——仅当节点 `#id` 是视图根节点，或被任一下游 `CompiledProgram` 的 `SnapshotRead` / `SnapshotReadWhenChanged` / `Replace` 引用，或为 `Ordered` 语义所需时，才标记 `materialize_relation = true`。其余纯 `NativeDelta` 节点在 `SqlView.states[id]` 中置为 `None`，跳过刷新期 `RowBlocks` 更新与 checkpoint 期 `node_relations` 导出。
   * **预期收益**：TPC-H / TPC-DS 视图中间关系内存占用与块更新拷贝直接下降 **60%–75%**；无需改动 `optd-operator-state/1` 外部契约（仅将对应槽位记为可省略）。
   * **验收标准**：新增规划与运行时回归测试验证线性链路上 `states[id].is_none()`，带 `SnapshotRead` / `ScalarProduct` 节点按需保留且重启恢复一致。
 
-* [ ] **TODO-S2：消除跨视图基表 `SourceState` 重复存储**
+* [x] **TODO-S2：消除跨视图基表 `SourceState` 重复存储** *(已落地：`f201a6e`)*
   * **方案**：统一基表内存表示——使 `SqlSession` 下的所有 `SqlView` 直接共享 `DatabaseSnapshot.tables` 的 `Arc<RowBlocks>`（或将单一 `SourceState` 提升到 `DatabaseSnapshot` 层按表共享），移除每个 `SqlView` 内部重复维护的一份完整 `tables: BTreeMap<String, SourceState>`。
   * **预期收益**：多 MV 场景下基表内存从 $O(M \cdot |T|)$ 降至 $O(|T|)$，同时简化 `restore_from_state` 的 checkpoint 反推逻辑。
   * **验收标准**：多视图共享同表测试验证基表引用计数共享（`Arc::ptr_eq`）且候选隔离/回滚不变。
 
-* [ ] **TODO-S3：历史保留策略与可达性保护 GC（`R07c` 闭环）**
+* [x] **TODO-S3：历史保留策略与可达性保护 GC（`R07c` 闭环）** *(已落地：本波次提交)*
   * **方案**：设计 `RetentionPolicy`（保留最近 $N$ 个 epoch 或最近 $M$ 个算子 checkpoint + 幂等窗口）与 `DatabaseStore::compact()`：
     1. 从当前 `CURRENT`、保留窗口内 manifests、每个活跃视图的最近 `ViewStateRef` 及其依赖的 `table_deltas` 出发，构建精确可达文件集合；
     2. 仅删除不可达的历史块文件、过期算子状态目录与淘汰 manifest；
