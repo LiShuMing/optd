@@ -34,7 +34,7 @@ fn script(path: &str) -> Result<String> {
 
 pub(crate) async fn run(args: &[String]) -> Result<Value> {
     let Some(root) = args.first() else {
-        return Err(Error::Invalid("usage: sql_database <warehouse> <script.sql> | --request <id> <script.sql> | --transaction <id> <script.sql> | --replay | --explain <view>".into()));
+        return Err(Error::Invalid("usage: sql_database <warehouse> <script.sql> | --request <id> <script.sql> | --transaction <id> <script.sql> | --replay | --explain <view> | --explain-tree <view> | --explain-detailed <view> | --explain-query <query.sql> | --explain-query-detailed <query.sql>".into()));
     };
     let mut session = SqlSession::open(Path::new(root)).await?;
     let before = session.store_work()?;
@@ -44,9 +44,25 @@ pub(crate) async fn run(args: &[String]) -> Result<Value> {
             session.verify_output_history()?;
             Ok(json!({"epoch":session.epoch(),"output_history_verified":true}))
         }
-        [option, name] if option == "--explain" => {
-            Ok(json!({"epoch":session.epoch(),"plan":session.explain_view(name)?}))
+        [option, name] if option == "--explain" => Ok(json!({
+            "epoch": session.epoch(),
+            "plan": session.explain_view(name)?,
+            "plan_tree": session.explain_view_tree(name)?
+        })),
+        [option, name] if option == "--explain-tree" => {
+            Ok(json!({"epoch":session.epoch(),"plan_tree":session.explain_view_tree(name)?}))
         }
+        [option, name] if option == "--explain-detailed" => Ok(
+            json!({"epoch":session.epoch(),"plan_detailed":session.explain_view_detailed(name)?}),
+        ),
+        [option, path] if option == "--explain-query" => Ok(json!({
+            "epoch": session.epoch(),
+            "plan_tree": session.explain_query(&script(path)?, false).await?
+        })),
+        [option, path] if option == "--explain-query-detailed" => Ok(json!({
+            "epoch": session.epoch(),
+            "plan_detailed": session.explain_query(&script(path)?, true).await?
+        })),
         [option, id, path] if option == "--request" => {
             response(session.execute_request(id, &script(path)?).await?)
         }

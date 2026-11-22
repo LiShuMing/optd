@@ -24,6 +24,11 @@ pub(crate) struct Compilation {
 }
 
 impl Compilation {
+    /// Extract diagnostic preflight and compiled incremental plan (if compilation succeeded).
+    pub(crate) fn into_explain(self) -> (PlanPreflight, Option<IncrementalPlan>) {
+        (self.report, self.plan.ok())
+    }
+
     /// Diagnostic continuation cannot escape as a partially executable plan.
     pub(crate) fn into_plan(self, strict: bool) -> Result<(Vec<Node>, IncrementalPlan)> {
         if strict && !self.report.strict_plan_eligible {

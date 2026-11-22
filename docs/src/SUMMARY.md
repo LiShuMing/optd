@@ -53,6 +53,8 @@
   - [Reusable Execution Templates](./incremental/reusable_execution_templates.md)
   - [Block-Level Checkpoints and Delta Logs](./incremental/block_checkpoints.md)
   - [Persistent Operator State and Bounded-Replay Recovery](./incremental/persistent_operator_state.md)
+  - [Incremental Plan Text EXPLAIN & TPC-H / TPC-DS Catalog](./incremental/tpc_incremental_plans.md)
+  - [RFC: Incremental State Management & Optimization TODO](./incremental/rfc_state_management.md)
   - [Float grouping, integer averages and ordered ranks](incremental/strict_numeric_and_rank_design.md)
   - [Numeric and Rank Repair Qualification](incremental/strict_batches_progress_20261106.md)
   - [Scalar-product Repair Qualification](./incremental/strict_gap_progress_20261106.md)

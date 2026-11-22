@@ -58,6 +58,13 @@ pub struct PlanPreflight {
     pub blockers: Vec<PlanBlocker>,
 }
 
+impl PlanPreflight {
+    /// Render this schema-only qualification graph (including any blockers) as a text DAG tree.
+    pub fn explain_tree(&self) -> String {
+        crate::planner::explain::format_preflight(self)
+    }
+}
+
 impl fmt::Display for PlanPreflight {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} blocking node(s)", self.blockers.len())?;

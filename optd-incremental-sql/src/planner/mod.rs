@@ -6,6 +6,7 @@
 //! their semantic identities.
 
 mod capability;
+pub(crate) mod explain;
 mod expr;
 pub(crate) mod lower;
 mod optd_rules;
@@ -15,6 +16,7 @@ mod verify_plan;
 
 mod incremental_optimizer;
 
+pub use explain::ExplainStyle;
 pub use expr::{DeltaExpr, KeyScope, Maintenance, SnapshotVersion, MAX_EXPR_DEPTH, MAX_EXPR_NODES};
 pub use incremental_optimizer::{
     IncrementalOptimizer, IncrementalPlan, IncrementalRule, MaintenanceNode, RuleContext,

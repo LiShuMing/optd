@@ -185,6 +185,39 @@ pub(crate) fn context() -> SessionContext {
     SessionContext::new_with_config(config)
 }
 
+/// Schema-only diagnostic explanation for an arbitrary SQL query.
+///
+/// Always includes the full `PlanPreflight` (including any blockers) and carries
+/// the compiled `IncrementalPlan` whenever compilation succeeded, even when
+/// strict mode rejects one or more nodes for complete recomputation.
+#[derive(Clone, Debug)]
+pub struct QueryExplain {
+    /// Complete schema-bound node qualification and blockers.
+    pub preflight: crate::PlanPreflight,
+    /// Compiled logical/physical incremental plan when compilation succeeded.
+    pub plan: Option<IncrementalPlan>,
+}
+
+impl QueryExplain {
+    /// Render the query's incremental plan as a readable Unicode DAG tree.
+    pub fn explain_tree(&self) -> String {
+        crate::planner::explain::format_query_explain(
+            &self.preflight,
+            self.plan.as_ref(),
+            crate::planner::ExplainStyle::Tree,
+        )
+    }
+
+    /// Render the DAG tree followed by lowered physical step DAGs for each node.
+    pub fn explain_detailed(&self) -> String {
+        crate::planner::explain::format_query_explain(
+            &self.preflight,
+            self.plan.as_ref(),
+            crate::planner::ExplainStyle::Detailed,
+        )
+    }
+}
+
 impl SqlView {
     /// Floating result positions with the explicitly documented stable numerical contract.
     /// Source images, other columns and signed-delta replay retain exact identity.
@@ -273,6 +306,23 @@ impl SqlView {
         Ok(crate::planning::compile(&ctx, sql, &optimizer)
             .await?
             .report)
+    }
+
+    /// Compile a SQL query against schemas only and return both preflight diagnostics
+    /// and the compiled incremental plan for text EXPLAIN rendering.
+    pub async fn explain_query(
+        sql: &str,
+        schemas: BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
+        optimizer: IncrementalOptimizer,
+    ) -> Result<QueryExplain> {
+        let ctx = context();
+        for (name, schema) in schemas {
+            ctx.register_batch(&name, RecordBatch::new_empty(schema))?;
+        }
+        let (preflight, plan) = crate::planning::compile(&ctx, sql, &optimizer)
+            .await?
+            .into_explain();
+        Ok(QueryExplain { preflight, plan })
     }
 
     /// Compile a caller-selected rule registry, then initialize its verified plan.

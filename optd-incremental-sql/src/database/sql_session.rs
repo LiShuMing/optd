@@ -13,11 +13,13 @@ use crate::planner::IncrementalOptimizer;
 use crate::state_codec::ViewStateSnapshot;
 use crate::store::PublishPoint;
 use crate::{Error, PreparedSqlRefresh, Result, SqlView};
-use datafusion::arrow::array::{Array, Int64Array, RecordBatch};
+use datafusion::arrow::array::{Array, Int64Array, RecordBatch, StringArray};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::sql::sqlparser::ast::Statement;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Caller retry key plus the digest of canonicalized SQL used to detect ID reuse.
 struct RequestIdentity {
@@ -395,6 +397,49 @@ impl SqlSession {
             .ok_or_else(|| invalid("unknown materialized view"))
     }
 
+    /// Render the executable incremental plan of an existing materialized view as a text DAG tree.
+    pub fn explain_view_tree(&self, name: &str) -> Result<String> {
+        self.ensure_ready()?;
+        self.views
+            .get(name)
+            .map(|v| v.incremental_plan().explain_tree())
+            .ok_or_else(|| invalid("unknown materialized view"))
+    }
+
+    /// Render the DAG tree and lowered physical step DAGs of an existing materialized view.
+    pub fn explain_view_detailed(&self, name: &str) -> Result<String> {
+        self.ensure_ready()?;
+        self.views
+            .get(name)
+            .map(|v| v.incremental_plan().explain_detailed())
+            .ok_or_else(|| invalid("unknown materialized view"))
+    }
+
+    /// Render the incremental plan of a SQL query against base-table schemas without scanning rows.
+    ///
+    /// Blocked or non-strict-eligible queries still render their full logical DAG tree with inline
+    /// blocker annotations so callers can inspect eligibility before `CREATE MATERIALIZED VIEW`.
+    pub async fn explain_query(&self, query: &str, verbose: bool) -> Result<String> {
+        self.ensure_ready()?;
+        let snapshot = self
+            .transaction
+            .as_ref()
+            .map(|t| &t.snapshot)
+            .unwrap_or(&self.committed);
+        let schemas = snapshot
+            .tables
+            .iter()
+            .map(|(name, table)| (name.clone(), table.rows.schema()))
+            .collect();
+        let explained =
+            SqlView::explain_query(query, schemas, IncrementalOptimizer::default()).await?;
+        Ok(if verbose {
+            explained.explain_detailed()
+        } else {
+            explained.explain_tree()
+        })
+    }
+
     /// Replay every committed view delta and compare each prefix to its stored output.
     ///
     /// Reads historical snapshots and payloads, so work grows with retained history.
@@ -497,6 +542,46 @@ impl SqlSession {
                     self.transaction = Some(aborted);
                 }
                 result
+            }
+            Statement::Explain {
+                describe_alias,
+                analyze,
+                verbose,
+                query_plan,
+                estimate,
+                statement,
+                format,
+                options,
+            } => {
+                if !describe_alias.to_string().eq_ignore_ascii_case("EXPLAIN") {
+                    return Err(invalid(
+                        "only EXPLAIN is supported for query plan inspection",
+                    ));
+                }
+                if *analyze {
+                    return Err(invalid(
+                        "EXPLAIN ANALYZE is not supported; use EXPLAIN or EXPLAIN VERBOSE",
+                    ));
+                }
+                if *query_plan || *estimate || options.is_some() {
+                    return Err(invalid("unsupported EXPLAIN modifier"));
+                }
+                if let Some(kind) = format {
+                    if !kind.to_string().eq_ignore_ascii_case("TEXT") {
+                        return Err(invalid("only TEXT EXPLAIN format is supported"));
+                    }
+                }
+                if !matches!(statement.as_ref(), Statement::Query(_)) {
+                    return Err(invalid("EXPLAIN only supports read-only SELECT queries"));
+                }
+                let plan_text = self.explain_query(&statement.to_string(), *verbose).await?;
+                Ok(SqlResponse {
+                    table_reads: None,
+                    epoch: self.epoch(),
+                    rows: Some(explain_batch(plan_text)?),
+                    commit: None,
+                    replayed: false,
+                })
             }
             Statement::Query(_) => {
                 let snapshot = self
@@ -876,6 +961,12 @@ async fn try_restore_view(
         }
     }
     Ok((engine, replayed_epochs, replayed_delta_rows, state_reads))
+}
+
+fn explain_batch(plan: String) -> Result<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![Field::new("plan", DataType::Utf8, false)]));
+    let array = Arc::new(StringArray::from(vec![plan]));
+    Ok(RecordBatch::try_new(schema, vec![array])?)
 }
 
 fn read_delta(batch: &RecordBatch, schema: datafusion::arrow::datatypes::SchemaRef) -> Result<Bag> {

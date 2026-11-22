@@ -488,6 +488,21 @@ impl IncrementalPlan {
         explanation
     }
 
+    /// Render a readable Unicode DAG tree with strategies, rules, states and snapshot dependencies.
+    pub fn explain_tree(&self) -> String {
+        super::explain::format_plan(self, super::ExplainStyle::Tree)
+    }
+
+    /// Render the DAG tree followed by each node's deduplicated lowered physical step DAG.
+    pub fn explain_detailed(&self) -> String {
+        super::explain::format_plan(self, super::ExplainStyle::Detailed)
+    }
+
+    /// Render the incremental plan using the selected text explanation style.
+    pub fn explain_with(&self, style: super::ExplainStyle) -> String {
+        super::explain::format_plan(self, style)
+    }
+
     /// Deterministic SHA-256 binding SQL, dependency schemas, rule versions and physical programs.
     /// Any SQL, schema, rule-version or compiled-plan change yields a distinct fingerprint.
     pub fn fingerprint(&self, sql: &str, schemas: &BTreeMap<String, SchemaRef>) -> Result<String> {

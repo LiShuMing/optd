@@ -32,6 +32,40 @@ pub(super) fn statements(sql: &str) -> Result<Vec<Statement>> {
         .into_iter()
         .map(|s| match s {
             DFStatement::Statement(s) => Ok(*s),
+            DFStatement::Explain(explain) => {
+                if explain.options.analyze {
+                    return Err(invalid(
+                        "EXPLAIN ANALYZE is not supported; use EXPLAIN or EXPLAIN VERBOSE",
+                    ));
+                }
+                if explain.options.analyze_level.is_some()
+                    || explain.options.analyze_categories.is_some()
+                    || explain.options.show_statistics.is_some()
+                {
+                    return Err(invalid("unsupported EXPLAIN modifier"));
+                }
+                if let Some(format) = &explain.options.format {
+                    let rendered = format.to_string();
+                    if !rendered.eq_ignore_ascii_case("TEXT")
+                        && !rendered.eq_ignore_ascii_case("INDENT")
+                    {
+                        return Err(invalid("only TEXT EXPLAIN format is supported"));
+                    }
+                }
+                let DFStatement::Statement(inner) = *explain.statement else {
+                    return Err(invalid("EXPLAIN only supports read-only SELECT queries"));
+                };
+                Ok(Statement::Explain {
+                    describe_alias: datafusion::sql::sqlparser::ast::DescribeAlias::Explain,
+                    analyze: false,
+                    verbose: explain.options.verbose,
+                    query_plan: false,
+                    estimate: false,
+                    statement: inner,
+                    format: None,
+                    options: None,
+                })
+            }
             _ => Err(invalid("unsupported SQL extension")),
         })
         .collect()

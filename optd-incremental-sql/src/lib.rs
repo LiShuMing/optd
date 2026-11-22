@@ -36,13 +36,14 @@ pub mod iceberg;
 pub use bag::MAX_MATERIALIZED_ROWS;
 pub use durable_sql_view::DurableSqlView;
 pub use engine::{
-    GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, RefreshStats, SqlView, TableChange,
+    GroupWork, KeyedWork, NodeStats, PreparedSqlRefresh, QueryExplain, RefreshStats, SqlView,
+    TableChange,
 };
 pub use error::{Error, Result};
 pub use metrics::{
     AccumulatorWork, DistinctWork, MatchJoinWork, NumericWork, RankWork, ValueIndexWork,
 };
-pub use planner::Strategy;
+pub use planner::{ExplainStyle, Strategy};
 pub use planning::{NodePreflight, PlanBlocker, PlanPreflight};
 pub use work::{
     CacheRelationWork, ExecutionTemplateWork, RefreshWork, RelationWork, RowEncodingWork,
