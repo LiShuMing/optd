@@ -86,8 +86,8 @@ pub(crate) async fn apply(
 /// Immutable versioned bindings supplied by refresh orchestration.
 pub(crate) struct Bindings<'a> {
     pub(crate) deltas: &'a [Bag],
-    pub(crate) before: &'a [Relation],
-    pub(crate) after: &'a [Relation],
+    pub(crate) before: &'a [Option<Relation>],
+    pub(crate) after: &'a [Option<Relation>],
     pub(crate) source_deltas: &'a BTreeMap<String, Bag>,
     pub(crate) source_after: &'a BTreeMap<String, SourceState>,
     pub(crate) keyed: &'a [Option<KeyedState>],
@@ -336,16 +336,19 @@ pub(crate) async fn run(
                 Value::Relation(RelationValue::from_signed(bindings.deltas[*input].clone())?)
             }
             Operation::SnapshotRead { input, version, .. } => {
-                Value::Relation(RelationValue::new(match version {
-                    SnapshotVersion::Before => bindings.before[*input].rows.materialize_recorded(
-                        &mut refresh_work.cache_work.complete_caches,
-                        &mut refresh_work.cache_work.demanded_leaves,
-                    )?,
-                    SnapshotVersion::After => bindings.after[*input].rows.materialize_recorded(
-                        &mut refresh_work.cache_work.complete_caches,
-                        &mut refresh_work.cache_work.demanded_leaves,
-                    )?,
-                })?)
+                let relation = match version {
+                    SnapshotVersion::Before => bindings.before[*input].as_ref(),
+                    SnapshotVersion::After => bindings.after[*input].as_ref(),
+                }
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "missing retained relation for snapshot read of node #{input}"
+                    ))
+                })?;
+                Value::Relation(RelationValue::new(relation.rows.materialize_recorded(
+                    &mut refresh_work.cache_work.complete_caches,
+                    &mut refresh_work.cache_work.demanded_leaves,
+                )?)?)
             }
             Operation::SnapshotReadWhenChanged {
                 input,
@@ -359,9 +362,14 @@ pub(crate) async fn run(
                     Value::Relation(RelationValue::from_signed(Bag::empty(schema.clone()))?)
                 } else {
                     let relation = match version {
-                        SnapshotVersion::Before => &bindings.before[*input],
-                        SnapshotVersion::After => &bindings.after[*input],
-                    };
+                        SnapshotVersion::Before => bindings.before[*input].as_ref(),
+                        SnapshotVersion::After => bindings.after[*input].as_ref(),
+                    }
+                    .ok_or_else(|| {
+                        Error::Invalid(format!(
+                            "missing retained relation for guarded snapshot read of node #{input}"
+                        ))
+                    })?;
                     let batch = relation.rows.materialize_recorded(
                         &mut refresh_work.cache_work.complete_caches,
                         &mut refresh_work.cache_work.demanded_leaves,

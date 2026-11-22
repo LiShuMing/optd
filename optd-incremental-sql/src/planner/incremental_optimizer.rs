@@ -458,6 +458,37 @@ impl IncrementalPlan {
         self.nodes.len() - 1
     }
 
+    /// Which nodes must retain a maintained full relation cache at runtime.
+    ///
+    /// Only the root output, ordered sequence-tracking nodes, and explicit
+    /// `SnapshotRead` / `SnapshotReadWhenChanged` / `Replace` targets need a
+    /// retained `RowBlocks` relation. Pure delta-only nodes (`NativeDelta`,
+    /// `AccumulatorDelta`, etc.) need no intermediate relation cache.
+    pub fn retained_relations(&self) -> Vec<bool> {
+        let mut retained = vec![false; self.nodes.len()];
+        retained[self.root()] = true;
+        for (id, node) in self.nodes.iter().enumerate() {
+            if node.ordered {
+                retained[id] = true;
+            }
+            if let Some(program) = self.programs.get(id) {
+                for step in &program.steps {
+                    match step.operation {
+                        plan::Operation::SnapshotRead { input, .. }
+                        | plan::Operation::SnapshotReadWhenChanged { input, .. } => {
+                            retained[input] = true;
+                        }
+                        plan::Operation::Replace => {
+                            retained[id] = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        retained
+    }
+
     /// Explain compatibility-rule results followed by actual Optd logical/physical plans.
     pub fn explain(&self) -> String {
         let mut explanation = String::new();

@@ -203,7 +203,7 @@ pub(super) struct ViewStateRef {
     directory: String,
     state_subdir: String,
     operator_manifest: FileEntry,
-    node_relations: Vec<BlockRelationEntry>,
+    node_relations: Vec<Option<BlockRelationEntry>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -621,6 +621,10 @@ impl DatabaseStore {
         )?;
         let mut node_relations = Vec::with_capacity(state_ref.node_relations.len());
         for rel_entry in &state_ref.node_relations {
+            let Some(rel_entry) = rel_entry else {
+                node_relations.push(None);
+                continue;
+            };
             let schema_batch = read_batch(
                 &self.directory(&rel_entry.schema.directory)?,
                 &rel_entry.schema.file,
@@ -661,7 +665,7 @@ impl DatabaseStore {
             for (uid, block) in uids.into_iter().zip(entries) {
                 self.committed_blocks.insert(uid, block);
             }
-            node_relations.push(rows);
+            node_relations.push(Some(rows));
         }
         Ok((
             ViewStateSnapshot {
@@ -1088,11 +1092,15 @@ impl DatabaseStore {
                 )?;
                 let mut node_relations = Vec::with_capacity(snap.node_relations.len());
                 for (node_id, rel) in snap.node_relations.iter().enumerate() {
-                    node_relations.push(self.write_state_block_relation(
-                        &mut stage,
-                        &format!("s{}-n{node_id}", v.id),
-                        rel,
-                    )?);
+                    let entry = match rel {
+                        Some(rel) => Some(self.write_state_block_relation(
+                            &mut stage,
+                            &format!("s{}-n{node_id}", v.id),
+                            rel,
+                        )?),
+                        None => None,
+                    };
+                    node_relations.push(entry);
                 }
                 view_states.insert(
                     n.clone(),

@@ -27,7 +27,7 @@ pub(crate) const STATE_CODEC_FORMAT: &str = "optd-operator-state/1";
 pub(crate) struct ViewStateSnapshot {
     pub(crate) view_epoch: u64,
     pub(crate) plan_fingerprint: String,
-    pub(crate) node_relations: Vec<RowBlocks>,
+    pub(crate) node_relations: Vec<Option<RowBlocks>>,
     pub(crate) operators: Vec<Option<OperatorStateSnapshot>>,
 }
 

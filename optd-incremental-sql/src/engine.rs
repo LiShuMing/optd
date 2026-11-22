@@ -47,7 +47,7 @@ pub struct PreparedSqlRefresh {
     owner: u64,
     before: u64,
     tables: BTreeMap<String, SourceState>,
-    states: Vec<Relation>,
+    states: Vec<Option<Relation>>,
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
     accumulators: Vec<Option<AccumulatorState>>,
@@ -78,7 +78,8 @@ impl PreparedSqlRefresh {
         Ok(self
             .states
             .last()
-            .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
+            .and_then(|rel| rel.as_ref())
+            .ok_or_else(|| Error::Invalid("empty plan graph or missing root relation".into()))?
             .rows
             .clone())
     }
@@ -106,14 +107,17 @@ fn export_view_parts(
     view: &SqlView,
     view_epoch: u64,
     schemas: &BTreeMap<String, datafusion::arrow::datatypes::SchemaRef>,
-    states: &[Relation],
+    states: &[Option<Relation>],
     accumulators: &[Option<AccumulatorState>],
     keyed: &[Option<KeyedState>],
     groups: &[Option<GroupState>],
     ranks: &[Option<RankState>],
 ) -> Result<ViewStateSnapshot> {
     let plan_fingerprint = view.incremental_plan.fingerprint(&view.sql, schemas)?;
-    let node_relations = states.iter().map(|rel| rel.rows.clone()).collect();
+    let node_relations = states
+        .iter()
+        .map(|rel| rel.as_ref().map(|r| r.rows.clone()))
+        .collect();
     let mut operators = Vec::with_capacity(view.nodes.len());
     for id in 0..view.nodes.len() {
         let op = match &view.incremental_plan.programs()[id].state {
@@ -161,9 +165,11 @@ pub struct SqlView {
     owner: u64,
     epoch: u64,
     nodes: Vec<Node>,
+    node_schemas: Vec<datafusion::arrow::datatypes::SchemaRef>,
+    retained_relations: Vec<bool>,
     incremental_plan: IncrementalPlan,
     templates: Vec<ProgramTemplates>,
-    states: Vec<Relation>,
+    states: Vec<Option<Relation>>,
     groups: Vec<Option<GroupState>>,
     keyed: Vec<Option<KeyedState>>,
     accumulators: Vec<Option<AccumulatorState>>,
@@ -350,15 +356,22 @@ impl SqlView {
             .into_iter()
             .map(|(name, batch)| Ok((name, SourceState::new(Bag::from_batch(&batch)?)?)))
             .collect::<Result<_>>()?;
+        let node_schemas: Vec<datafusion::arrow::datatypes::SchemaRef> = nodes
+            .iter()
+            .map(|n| Arc::new(n.plan.schema().as_arrow().clone()))
+            .collect();
+        let retained_relations = incremental_plan.retained_relations();
         let group_slots = vec![None; nodes.len()];
         let mut out = Self {
             sql: sql.into(),
             owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
             epoch: 0,
             nodes,
+            node_schemas,
+            retained_relations: retained_relations.clone(),
             incremental_plan,
             templates,
-            states: vec![],
+            states: Vec::new(),
             keyed: vec![None; group_slots.len()],
             accumulators: vec![None; group_slots.len()],
             ranks: vec![None; group_slots.len()],
@@ -366,6 +379,7 @@ impl SqlView {
             tables: source,
             ctx,
         };
+        let mut bootstrap_states: Vec<Relation> = Vec::with_capacity(out.nodes.len());
         for id in 0..out.nodes.len() {
             let batch = if let LogicalPlan::TableScan(scan) = &out.nodes[id].plan {
                 let table = out
@@ -375,9 +389,9 @@ impl SqlView {
                     .to_batch()?;
                 out.eval_scan(scan, table).await?
             } else {
-                out.eval_full(id, &out.states).await?
+                out.eval_full(id, &bootstrap_states).await?
             };
-            out.states.push(Relation::new(batch)?);
+            bootstrap_states.push(Relation::new(batch)?);
             match &out.incremental_plan.programs()[id].state {
                 Some(StateSpec::Rank {
                     input, operator, ..
@@ -385,7 +399,7 @@ impl SqlView {
                     out.ranks[id] = Some(RankState::new(
                         &out.ctx,
                         operator,
-                        &out.states[*input].rows.materialize()?.batch,
+                        &bootstrap_states[*input].rows.materialize()?.batch,
                     )?);
                 }
                 Some(StateSpec::Accumulator {
@@ -394,22 +408,22 @@ impl SqlView {
                     let state = AccumulatorState::new(
                         &out.ctx,
                         operator,
-                        &out.states[*input].rows.materialize()?.batch,
+                        &bootstrap_states[*input].rows.materialize()?.batch,
                     )?;
-                    out.states[id] = Relation::new(state.contents()?)?;
+                    bootstrap_states[id] = Relation::new(state.contents()?)?;
                     out.accumulators[id] = Some(state);
                 }
                 Some(StateSpec::Group {
                     input, projection, ..
                 }) => {
-                    let input_batch = out.states[*input].rows.materialize()?.batch;
+                    let input_batch = bootstrap_states[*input].rows.materialize()?.batch;
                     let input = &input_batch;
                     let keys =
                         executor::apply(&out.ctx, projection, std::slice::from_ref(input)).await?;
                     let index = GroupState::try_new(
                         input,
                         &keys,
-                        &out.states[id].rows.materialize()?.batch,
+                        &bootstrap_states[id].rows.materialize()?.batch,
                         KeyPolicy {
                             binary_strings: true,
                         },
@@ -423,7 +437,7 @@ impl SqlView {
                     let inputs = spec
                         .inputs
                         .iter()
-                        .map(|i| Ok(out.states[*i].rows.materialize()?.batch))
+                        .map(|i| Ok(bootstrap_states[*i].rows.materialize()?.batch))
                         .collect::<Result<Vec<_>>>()?;
                     let mut projected = Vec::with_capacity(inputs.len());
                     for (input, projection) in inputs.iter().zip(&spec.projections) {
@@ -437,14 +451,16 @@ impl SqlView {
                             executor::apply(
                                 &out.ctx,
                                 projection,
-                                std::slice::from_ref(&out.states[id].rows.materialize()?.batch),
+                                std::slice::from_ref(
+                                    &bootstrap_states[id].rows.materialize()?.batch,
+                                ),
                             )
                             .await?,
                         )
                     } else {
                         None
                     };
-                    let output_batch = out.states[id].rows.materialize()?.batch;
+                    let output_batch = bootstrap_states[id].rows.materialize()?.batch;
                     let output = output_keys.as_ref().map(|keys| (&output_batch, keys));
                     let mut index = KeyedState::new(&inputs, &projected, output)?;
                     index.initialize_matches(&out.ctx, spec)?;
@@ -453,7 +469,18 @@ impl SqlView {
                 None => {}
             }
         }
+        // Drop dead intermediate relation caches once operator states are initialized.
+        out.states = bootstrap_states
+            .into_iter()
+            .enumerate()
+            .map(|(id, rel)| retained_relations[id].then_some(rel))
+            .collect();
         Ok(out)
+    }
+
+    /// Number of graph nodes that retain a maintained full relation cache at runtime.
+    pub fn retained_relation_count(&self) -> usize {
+        self.states.iter().filter(|rel| rel.is_some()).count()
     }
 
     /// Current source epoch; bootstrap is epoch zero.
@@ -464,7 +491,8 @@ impl SqlView {
     pub fn contents(&self) -> Result<RecordBatch> {
         self.states
             .last()
-            .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
+            .and_then(|rel| rel.as_ref())
+            .ok_or_else(|| Error::Invalid("empty plan graph or missing root relation".into()))?
             .rows
             .materialize()
             .map(|m| m.batch)
@@ -478,7 +506,8 @@ impl SqlView {
         Ok(self
             .states
             .last()
-            .ok_or_else(|| Error::Invalid("empty plan graph".into()))?
+            .and_then(|rel| rel.as_ref())
+            .ok_or_else(|| Error::Invalid("empty plan graph or missing root relation".into()))?
             .rows
             .clone())
     }
@@ -543,15 +572,37 @@ impl SqlView {
                 "persisted view state node count differs from compiled plan".into(),
             ));
         }
+        let node_schemas: Vec<datafusion::arrow::datatypes::SchemaRef> = nodes
+            .iter()
+            .map(|n| Arc::new(n.plan.schema().as_arrow().clone()))
+            .collect();
+        let retained_relations = incremental_plan.retained_relations();
+        for (id, (&required, persisted)) in retained_relations
+            .iter()
+            .zip(&snapshot.node_relations)
+            .enumerate()
+        {
+            if required && persisted.is_none() {
+                return Err(Error::Invalid(format!(
+                    "persisted view state missing required relation for node #{id}"
+                )));
+            }
+        }
         let templates = incremental_plan
             .programs()
             .iter()
             .map(|program| ProgramTemplates::compile(&ctx, program))
             .collect::<Result<Vec<_>>>()?;
-        let states: Vec<Relation> = snapshot
+        let states: Vec<Option<Relation>> = snapshot
             .node_relations
             .into_iter()
-            .map(|rows| Relation { rows })
+            .enumerate()
+            .map(|(id, rows)| {
+                retained_relations[id]
+                    .then_some(rows)
+                    .flatten()
+                    .map(|rows| Relation { rows })
+            })
             .collect();
         let mut accumulators = vec![None; nodes.len()];
         let mut keyed = vec![None; nodes.len()];
@@ -568,7 +619,7 @@ impl SqlView {
                     accumulators[id] = Some(AccumulatorState::from_persisted(
                         &ctx,
                         operator,
-                        states[*input].rows.schema(),
+                        Arc::clone(&node_schemas[*input]),
                         snap,
                     )?);
                 }
@@ -576,12 +627,12 @@ impl SqlView {
                     let input_schemas = spec
                         .inputs
                         .iter()
-                        .map(|i| states[*i].rows.schema())
+                        .map(|i| Arc::clone(&node_schemas[*i]))
                         .collect();
                     let output_schema = spec
                         .output_projection
                         .as_ref()
-                        .map(|_| states[id].rows.schema());
+                        .map(|_| Arc::clone(&node_schemas[id]));
                     keyed[id] = Some(KeyedState::from_persisted(
                         &ctx,
                         spec,
@@ -595,8 +646,8 @@ impl SqlView {
                     Some(OperatorStateSnapshot::Group(snap)),
                 ) => {
                     groups[id] = Some(GroupState::from_persisted(
-                        states[*input].rows.schema(),
-                        states[id].rows.schema(),
+                        Arc::clone(&node_schemas[*input]),
+                        Arc::clone(&node_schemas[id]),
                         snap,
                     )?);
                 }
@@ -609,7 +660,7 @@ impl SqlView {
                     ranks[id] = Some(RankState::from_persisted(
                         &ctx,
                         operator,
-                        states[*input].rows.schema(),
+                        Arc::clone(&node_schemas[*input]),
                         snap,
                     )?);
                 }
@@ -630,6 +681,8 @@ impl SqlView {
             owner: NEXT_OWNER.fetch_add(1, Ordering::Relaxed),
             epoch: snapshot.view_epoch,
             nodes,
+            node_schemas,
+            retained_relations,
             incremental_plan,
             templates,
             states,
@@ -872,7 +925,7 @@ impl SqlView {
             let mut keyed_work = None;
             let mut accumulator_work = None;
             let mut rank_work = None;
-            let schema = self.states[id].rows.schema();
+            let schema = Arc::clone(&self.node_schemas[id]);
             // Scans own a raw-source dependency even though they have no graph
             // children. This binding is independent of the selected rule.
             let source_delta = if let LogicalPlan::TableScan(scan) = &node.plan {
@@ -957,25 +1010,32 @@ impl SqlView {
                 (result.delta, replacement)
             };
             if dirty {
-                states[id] = match next {
-                    Some(next) => next,
-                    None if delta.is_empty() => self.states[id].clone(),
-                    None => {
-                        let update = self.states[id].rows.apply(&delta)?;
-                        stats.work.caches.absorb(&update.work.delta_update)?;
-                        stats
-                            .work
-                            .cache_work
-                            .leaf_validation
-                            .absorb(&update.work.leaf_validation)?;
-                        stats
-                            .work
-                            .cache_work
-                            .cache_blocks
-                            .absorb(&update.work.block_update)?;
-                        Relation { rows: update.rows }
-                    }
-                };
+                if self.retained_relations[id] {
+                    states[id] = match next {
+                        Some(next) => Some(next),
+                        None if delta.is_empty() => self.states[id].clone(),
+                        None => {
+                            let existing = self.states[id].as_ref().ok_or_else(|| {
+                                Error::Invalid(format!(
+                                    "missing retained relation cache for node #{id}"
+                                ))
+                            })?;
+                            let update = existing.rows.apply(&delta)?;
+                            stats.work.caches.absorb(&update.work.delta_update)?;
+                            stats
+                                .work
+                                .cache_work
+                                .leaf_validation
+                                .absorb(&update.work.leaf_validation)?;
+                            stats
+                                .work
+                                .cache_work
+                                .cache_blocks
+                                .absorb(&update.work.block_update)?;
+                            Some(Relation { rows: update.rows })
+                        }
+                    };
+                }
                 stats.nodes.push(NodeStats {
                     id,
                     operator: node.plan.display().to_string(),
@@ -989,14 +1049,26 @@ impl SqlView {
                 });
             }
             let changed_sequence = if node.ordered {
-                let after = states[id].rows.materialize_recorded(
-                    &mut stats.work.cache_work.complete_caches,
-                    &mut stats.work.cache_work.demanded_leaves,
-                )?;
-                let before = self.states[id].rows.materialize_recorded(
-                    &mut stats.work.cache_work.complete_caches,
-                    &mut stats.work.cache_work.demanded_leaves,
-                )?;
+                let after = states[id]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Error::Invalid(format!("missing retained ordered relation for node #{id}"))
+                    })?
+                    .rows
+                    .materialize_recorded(
+                        &mut stats.work.cache_work.complete_caches,
+                        &mut stats.work.cache_work.demanded_leaves,
+                    )?;
+                let before = self.states[id]
+                    .as_ref()
+                    .ok_or_else(|| {
+                        Error::Invalid(format!("missing retained ordered relation for node #{id}"))
+                    })?
+                    .rows
+                    .materialize_recorded(
+                        &mut stats.work.cache_work.complete_caches,
+                        &mut stats.work.cache_work.demanded_leaves,
+                    )?;
                 after != before
             } else {
                 false
@@ -1010,7 +1082,8 @@ impl SqlView {
         // Complete root output is an explicit API demand; intermediates remain lazy.
         let output = states
             .last()
-            .ok_or_else(|| Error::Invalid("empty graph".into()))?
+            .and_then(|rel| rel.as_ref())
+            .ok_or_else(|| Error::Invalid("empty graph or missing root relation".into()))?
             .rows
             .materialize_recorded(
                 &mut stats.work.cache_work.complete_caches,
