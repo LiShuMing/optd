@@ -224,6 +224,12 @@ impl QueryExplain {
     }
 }
 
+/// Pre-applied shared source revision and optional single-attribution work counts.
+pub(crate) struct SharedSourceUpdate {
+    pub(crate) source: SourceState,
+    pub(crate) work: Option<(crate::RelationWork, crate::SourceStateWork)>,
+}
+
 impl SqlView {
     /// Floating result positions with the explicitly documented stable numerical contract.
     /// Source images, other columns and signed-delta replay retain exact identity.
@@ -340,9 +346,23 @@ impl SqlView {
         tables: BTreeMap<String, RecordBatch>,
         optimizer: IncrementalOptimizer,
     ) -> Result<Self> {
+        let shared = tables
+            .into_iter()
+            .map(|(name, batch)| Ok((name, SourceState::new(Bag::from_batch(&batch)?)?)))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        Self::new_with_shared_sources(sql, shared, optimizer).await
+    }
+
+    /// Initialize a view directly from shared `SourceState` handles so multiple views
+    /// referencing the same base table share one `Arc<SourceSnapshot>` per table.
+    pub(crate) async fn new_with_shared_sources(
+        sql: &str,
+        tables: BTreeMap<String, SourceState>,
+        optimizer: IncrementalOptimizer,
+    ) -> Result<Self> {
         let ctx = context();
-        for (name, batch) in &tables {
-            ctx.register_batch(name, batch.clone())?;
+        for (name, source) in &tables {
+            ctx.register_batch(name, RecordBatch::new_empty(source.schema()))?;
         }
         let compilation = crate::planning::compile(&ctx, sql, &optimizer).await?;
         let (nodes, incremental_plan) = compilation.into_plan(optimizer.requires_incremental())?;
@@ -351,11 +371,7 @@ impl SqlView {
             .iter()
             .map(|program| ProgramTemplates::compile(&ctx, program))
             .collect::<Result<Vec<_>>>()?;
-        // Reject the complete plan before encoding source rows or creating any state.
-        let source = tables
-            .into_iter()
-            .map(|(name, batch)| Ok((name, SourceState::new(Bag::from_batch(&batch)?)?)))
-            .collect::<Result<_>>()?;
+        let source = tables;
         let node_schemas: Vec<datafusion::arrow::datatypes::SchemaRef> = nodes
             .iter()
             .map(|n| Arc::new(n.plan.schema().as_arrow().clone()))
@@ -481,6 +497,23 @@ impl SqlView {
     /// Number of graph nodes that retain a maintained full relation cache at runtime.
     pub fn retained_relation_count(&self) -> usize {
         self.states.iter().filter(|rel| rel.is_some()).count()
+    }
+
+    /// Rebind matching dependency tables to session-shared `SourceState` handles.
+    pub(crate) fn bind_shared_sources(&mut self, shared: &BTreeMap<String, SourceState>) {
+        for (name, slot) in &mut self.tables {
+            if let Some(shared_source) = shared.get(name) {
+                *slot = shared_source.clone();
+            }
+        }
+    }
+
+    /// True when both views share the exact same `Arc<SourceSnapshot>` for `table`.
+    pub(crate) fn source_state_ptr_eq(&self, other: &Self, table: &str) -> bool {
+        match (self.tables.get(table), other.tables.get(table)) {
+            (Some(a), Some(b)) => a.ptr_eq(b),
+            _ => false,
+        }
     }
 
     /// Current source epoch; bootstrap is epoch zero.
@@ -873,6 +906,16 @@ impl SqlView {
 
     /// Prepare an atomic multi-table epoch, without mutating any visible state.
     pub async fn prepare(&self, changes: &[TableChange]) -> Result<PreparedSqlRefresh> {
+        self.prepare_with_shared_sources(changes, None).await
+    }
+
+    /// Prepare an atomic multi-table epoch while reusing pre-applied shared `SourceState`
+    /// handles across sibling views in the same session.
+    pub(crate) async fn prepare_with_shared_sources(
+        &self,
+        changes: &[TableChange],
+        shared_next: Option<&BTreeMap<String, SharedSourceUpdate>>,
+    ) -> Result<PreparedSqlRefresh> {
         let epoch = self.epoch.checked_add(1).ok_or(Error::Overflow)?;
         let mut stats = RefreshStats {
             epoch,
@@ -896,6 +939,19 @@ impl SqlView {
         let mut tables = self.tables.clone();
         for (name, delta) in &source_deltas {
             if delta.is_empty() {
+                continue;
+            }
+            if let Some(shared) = shared_next.and_then(|m| m.get(name)) {
+                if shared.source.schema() != delta.schema() {
+                    return Err(Error::Invalid(
+                        "shared source schema differs from delta".into(),
+                    ));
+                }
+                if let Some((rel_work, src_work)) = &shared.work {
+                    stats.work.sources.absorb(rel_work)?;
+                    stats.work.cache_work.source_state.absorb(src_work)?;
+                }
+                tables.insert(name.clone(), shared.source.clone());
                 continue;
             }
             // Every name was bound above; apply the atomic net change once,

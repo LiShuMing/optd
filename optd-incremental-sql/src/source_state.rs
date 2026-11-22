@@ -43,6 +43,16 @@ impl SourceState {
         Self::with_hash(bag, row_hash)
     }
 
+    /// Exact schema of the rows tracked by this source revision.
+    pub(crate) fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.0.schema)
+    }
+
+    /// True when two handles share the exact same underlying `Arc<SourceSnapshot>`.
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     fn with_hash(bag: Bag, hash: RowHash) -> Result<Self> {
         bag.validate_relation()?;
         let buckets = partition(&bag, hash)?

@@ -6,8 +6,10 @@ use super::sql;
 use super::store::{DatabaseSnapshot, ViewOutput};
 use super::table_rows::TableRows;
 use crate::bag::Bag;
+use crate::engine::SharedSourceUpdate;
 use crate::error::invalid;
-use crate::{Error, PreparedSqlRefresh, Result, SqlView};
+use crate::source_state::SourceState;
+use crate::{Error, PreparedSqlRefresh, RelationWork, Result, SourceStateWork, SqlView};
 use datafusion::sql::sqlparser::ast::Statement;
 use std::collections::BTreeMap;
 
@@ -52,6 +54,8 @@ pub(super) struct PreparedCommit {
     pub(super) report: CommitReport,
     /// View-state candidates to acknowledge only after publishing the root.
     pub(super) candidates: BTreeMap<String, PreparedSqlRefresh>,
+    /// Updated session-shared `SourceState` handles (installed only after publish succeeds).
+    pub(super) shared_sources: BTreeMap<String, SourceState>,
     /// Complete next-epoch tables, view outputs and output deltas to publish together.
     pub(super) snapshot: DatabaseSnapshot,
 }
@@ -103,13 +107,29 @@ impl TransactionWorkspace {
         mut self,
         committed_epoch: u64,
         views: &BTreeMap<String, SqlView>,
+        shared_sources: &BTreeMap<String, SourceState>,
     ) -> Result<PreparedCommit> {
         self.snapshot.epoch = committed_epoch.checked_add(1).ok_or(Error::Overflow)?;
+        let mut next_shared_sources = shared_sources.clone();
+        let mut applied_shared: BTreeMap<String, SharedSourceUpdate> = BTreeMap::new();
         for (table, delta) in &self.changes {
             if !delta.is_empty() {
                 self.snapshot
                     .table_deltas
                     .insert(table.clone(), delta.weighted_batch()?);
+                if let Some(old_source) = shared_sources.get(table) {
+                    let mut rel_work = RelationWork::default();
+                    let mut src_work = SourceStateWork::default();
+                    let updated = old_source.apply(delta, &mut rel_work, &mut src_work)?;
+                    next_shared_sources.insert(table.clone(), updated.clone());
+                    applied_shared.insert(
+                        table.clone(),
+                        SharedSourceUpdate {
+                            source: updated,
+                            work: Some((rel_work, src_work)),
+                        },
+                    );
+                }
             }
         }
         let mut candidates = BTreeMap::new();
@@ -119,15 +139,29 @@ impl TransactionWorkspace {
                 continue;
             };
             let mut changes = Vec::new();
+            let mut view_shared: BTreeMap<String, SharedSourceUpdate> = BTreeMap::new();
             for dep in &definition.dependencies {
                 if let Some(delta) = self.changes.get(dep).filter(|d| !d.is_empty()) {
                     changes.extend(sql::changes(dep, delta)?);
+                    if let Some(shared) = applied_shared.get_mut(dep) {
+                        // Attribute the single shared SourceState::apply work once to the first
+                        // consuming view so multi-view sums reflect actual work, not double counting.
+                        view_shared.insert(
+                            dep.clone(),
+                            SharedSourceUpdate {
+                                source: shared.source.clone(),
+                                work: shared.work.take(),
+                            },
+                        );
+                    }
                 }
             }
             if changes.is_empty() {
                 continue;
             }
-            let candidate = view.prepare(&changes).await?;
+            let candidate = view
+                .prepare_with_shared_sources(&changes, Some(&view_shared))
+                .await?;
             definition.output = if view.is_ordered() {
                 ViewOutput::Ordered(candidate.contents().clone())
             } else {
@@ -151,6 +185,7 @@ impl TransactionWorkspace {
         Ok(PreparedCommit {
             report,
             candidates,
+            shared_sources: next_shared_sources,
             snapshot: self.snapshot,
         })
     }

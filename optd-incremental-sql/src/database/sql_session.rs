@@ -10,6 +10,7 @@ use super::transaction_workspace::{PreparedCommit, TransactionWorkspace};
 use crate::bag::Bag;
 use crate::error::invalid;
 use crate::planner::IncrementalOptimizer;
+use crate::source_state::SourceState;
 use crate::state_codec::ViewStateSnapshot;
 use crate::store::PublishPoint;
 use crate::{Error, PreparedSqlRefresh, Result, SqlView};
@@ -66,6 +67,7 @@ pub struct SqlSession {
     store: DatabaseStore,
     committed: DatabaseSnapshot,
     views: BTreeMap<String, SqlView>,
+    shared_sources: BTreeMap<String, SourceState>,
     transaction: Option<TransactionWorkspace>,
     fenced: bool,
     recovery: RecoveryWork,
@@ -175,11 +177,27 @@ impl SqlSession {
             }
             views.insert(name.clone(), engine);
         }
+        let mut shared_sources = BTreeMap::new();
+        for v in committed.views.values() {
+            for dep in &v.dependencies {
+                if !shared_sources.contains_key(dep) {
+                    let table = committed
+                        .tables
+                        .get(dep)
+                        .ok_or_else(|| invalid("unbound restored view dependency"))?;
+                    shared_sources.insert(dep.clone(), SourceState::new(table.rows.to_bag()?)?);
+                }
+            }
+        }
+        for engine in views.values_mut() {
+            engine.bind_shared_sources(&shared_sources);
+        }
         recovery.store = store.work()?;
         Ok(Self {
             store,
             committed,
             views,
+            shared_sources,
             transaction: None,
             fenced: false,
             recovery,
@@ -415,6 +433,26 @@ impl SqlSession {
             .ok_or_else(|| invalid("unknown materialized view"))
     }
 
+    /// True when two materialized views share the exact same underlying `SourceState` allocation
+    /// (`Arc::ptr_eq`) for `table`.
+    pub fn views_share_source_state(
+        &self,
+        view_a: &str,
+        view_b: &str,
+        table: &str,
+    ) -> Result<bool> {
+        self.ensure_ready()?;
+        let a = self
+            .views
+            .get(view_a)
+            .ok_or_else(|| invalid("unknown materialized view"))?;
+        let b = self
+            .views
+            .get(view_b)
+            .ok_or_else(|| invalid("unknown materialized view"))?;
+        Ok(a.source_state_ptr_eq(b, table))
+    }
+
     /// Render the incremental plan of a SQL query against base-table schemas without scanning rows.
     ///
     /// Blocked or non-strict-eligible queries still render their full logical DAG tree with inline
@@ -638,6 +676,7 @@ impl SqlSession {
         let mut tx = TransactionWorkspace::new(self.committed.clone());
         let mut created = None;
         let mut dropped = None;
+        let mut staged_shared_sources = self.shared_sources.clone();
         match stmt {
             Statement::Insert(_) | Statement::Delete(_) | Statement::Update(_) => {
                 tx.apply_dml(stmt, TransactionMode::Autocommit).await?
@@ -697,18 +736,24 @@ impl SqlSession {
                         report: Box::new(preflight),
                     });
                 }
-                let tables = dependencies
-                    .iter()
-                    .map(|n| {
-                        let t = tx.snapshot.tables.get(n).ok_or_else(|| {
-                            invalid("MV definitions may reference base tables only")
-                        })?;
-                        Ok((n.clone(), t.rows.materialize()?.batch))
-                    })
-                    .collect::<Result<_>>()?;
-                let engine = SqlView::new_with_optimizer(
+                let mut view_sources = BTreeMap::new();
+                for dep in &dependencies {
+                    let shared = match staged_shared_sources.get(dep) {
+                        Some(existing) => existing.clone(),
+                        None => {
+                            let table = tx.snapshot.tables.get(dep).ok_or_else(|| {
+                                invalid("MV definitions may reference base tables only")
+                            })?;
+                            let built = SourceState::new(table.rows.to_bag()?)?;
+                            staged_shared_sources.insert(dep.clone(), built.clone());
+                            built
+                        }
+                    };
+                    view_sources.insert(dep.clone(), shared);
+                }
+                let engine = SqlView::new_with_shared_sources(
                     &definition,
-                    tables,
+                    view_sources,
                     IncrementalOptimizer::default().require_incremental(),
                 )
                 .await?;
@@ -749,15 +794,26 @@ impl SqlSession {
         let PreparedCommit {
             report: response,
             candidates,
+            shared_sources: mut next_shared_sources,
             snapshot: next,
-        } = tx.prepare(self.committed.epoch, &self.views).await?;
+        } = tx
+            .prepare(self.committed.epoch, &self.views, &staged_shared_sources)
+            .await?;
+        if dropped.is_some() {
+            let referenced: BTreeSet<&str> = next
+                .views
+                .values()
+                .flat_map(|v| v.dependencies.iter().map(String::as_str))
+                .collect();
+            next_shared_sources.retain(|table, _| referenced.contains(table.as_str()));
+        }
         let mut checkpoints = self.select_checkpoints(&next, &candidates)?;
         if let Some((name, engine)) = &created {
             let schemas = view_schemas(&next, name)?;
             checkpoints.insert(name.clone(), engine.export_state(&schemas)?);
         }
         self.publish(next, checkpoints, request, &response, observer)?;
-        self.install(candidates)?;
+        self.install(candidates, next_shared_sources)?;
         if let Some((name, engine)) = created {
             self.views.insert(name, engine);
         }
@@ -778,11 +834,14 @@ impl SqlSession {
         let PreparedCommit {
             report,
             candidates,
+            shared_sources: next_shared_sources,
             snapshot: next,
-        } = tx.prepare(self.committed.epoch, &self.views).await?;
+        } = tx
+            .prepare(self.committed.epoch, &self.views, &self.shared_sources)
+            .await?;
         let checkpoints = self.select_checkpoints(&next, &candidates)?;
         self.publish(next, checkpoints, request, &report, observer)?;
-        self.install(candidates)?;
+        self.install(candidates, next_shared_sources)?;
         Ok(SqlResponse::committed(report, false))
     }
 
@@ -837,7 +896,11 @@ impl SqlSession {
     /// Acknowledge candidates only after their outputs have become durable.
     /// Partial installation must keep the fence set so reopening rebuilds all views
     /// from the authoritative root instead of exposing mixed in-memory revisions.
-    fn install(&mut self, candidates: BTreeMap<String, PreparedSqlRefresh>) -> Result<()> {
+    fn install(
+        &mut self,
+        candidates: BTreeMap<String, PreparedSqlRefresh>,
+        shared_sources: BTreeMap<String, SourceState>,
+    ) -> Result<()> {
         for (name, candidate) in candidates {
             // Session ownership and &mut self exclude another acknowledgement.
             self.views
@@ -845,6 +908,7 @@ impl SqlSession {
                 .ok_or_else(|| invalid("prepared view disappeared"))?
                 .acknowledge(candidate)?;
         }
+        self.shared_sources = shared_sources;
         self.fenced = false;
         Ok(())
     }

@@ -275,6 +275,21 @@ impl SourceStateWork {
         add(&mut self.snapshot_collections, misses)?;
         add(&mut self.snapshot_entries_collected, entries)
     }
+    /// Merge independently observed source-state update boundaries.
+    pub(crate) fn absorb(&mut self, other: &Self) -> Result<()> {
+        add(&mut self.updates, other.updates)?;
+        add(&mut self.validation_probes, other.validation_probes)?;
+        add(&mut self.touched_buckets, other.touched_buckets)?;
+        add(
+            &mut self.directory_entries_copied,
+            other.directory_entries_copied,
+        )?;
+        add(&mut self.snapshot_collections, other.snapshot_collections)?;
+        add(
+            &mut self.snapshot_entries_collected,
+            other.snapshot_entries_collected,
+        )
+    }
 }
 
 /// Checked addition keeps diagnostic counters from silently wrapping.
