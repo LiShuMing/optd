@@ -146,6 +146,28 @@ async fn migrate_at_old_limit_without_losing_retries_and_reopen_after_compaction
         .execute_request("original-00000", "INSERT INTO t VALUES (2)")
         .await
         .is_err());
+
+    // Keep a newer epoch eligible for compaction, then corrupt a child shard
+    // while leaving the authenticated root descriptor intact.
+    db.execute("INSERT INTO t VALUES (3)").await.unwrap();
+    let current_path = root.join("CURRENT");
+    let before = fs::read(&current_path).unwrap();
+    let head: Value = serde_json::from_slice(&before).unwrap();
+    let manifest = json_file(
+        &root
+            .join(head["directory"].as_str().unwrap())
+            .join("manifest.json"),
+    );
+    let index = read_payload(root, &manifest["receipt_root"]["node"]);
+    let digit = (Sha256::digest(b"fixture--00001")[0] >> 4).to_string();
+    let child = &index["branch"][digit];
+    let file = root
+        .join(child["directory"].as_str().unwrap())
+        .join(child["file"]["name"].as_str().unwrap());
+    fs::write(file, b"damaged receipt node").unwrap();
+    assert!(db.execute_request("fixture--00001", DML).await.is_err());
+    assert!(db.compact(RetentionPolicy { retain_epochs: 1 }).is_err());
+    assert_eq!(fs::read(current_path).unwrap(), before);
 }
 
 #[tokio::test]

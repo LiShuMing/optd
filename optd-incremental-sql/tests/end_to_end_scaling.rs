@@ -163,7 +163,7 @@ async fn fixed_single_row_writes_remain_bounded_across_1k_8k_65k_rows() {
 }
 
 #[tokio::test]
-async fn o1_receipt_index_avoids_history_traversal_after_twenty_commits() {
+async fn receipt_index_avoids_history_traversal_after_twenty_commits() {
     let root = tempfile::tempdir().unwrap();
     let mut db = SqlSession::open(root.path()).await.unwrap();
     db.execute("CREATE TABLE t(k BIGINT)").await.unwrap();

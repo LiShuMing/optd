@@ -103,10 +103,8 @@ pub(super) struct DatabaseSnapshot {
 /// History retention policy governing database compaction (`R07c`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RetentionPolicy {
-    /// Minimum number of trailing committed epochs to retain in lineage metadata (must be >= 1).
-    ///
-    /// Compaction always retains further back when any live view's operator-state checkpoint
-    /// requires earlier epochs for bounded-replay recovery.
+    /// Number of trailing committed epochs to retain in lineage metadata (must be >= 1).
+    /// Compaction advances older live checkpoints before dropping their replay history.
     pub retain_epochs: u64,
 }
 
@@ -131,6 +129,12 @@ pub struct CompactionReport {
     pub removed_dirs: u64,
     /// Total bytes reclaimed across removed files and directories.
     pub reclaimed_bytes: u64,
+    /// Older checkpoints advanced by reusing unchanged operator state.
+    pub promoted_checkpoints: u64,
+    /// Older or missing checkpoints replaced with current committed state.
+    pub written_checkpoints: u64,
+    /// New state files written for those checkpoints, before writing the database manifest.
+    pub checkpoint_bytes_written: u64,
 }
 
 /// Persisted request identity and original outcome for exact identified-write retries.
@@ -265,6 +269,33 @@ struct Manifest {
     // Legacy manifests retained an inline copy of their latest receipt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     receipt: Option<Receipt>,
+}
+
+/// State to publish for a live view that would otherwise need pruned history.
+pub(super) enum CompactionCheckpoint {
+    Promote,
+    Write(ViewStateSnapshot),
+}
+
+#[derive(Default)]
+struct ReachablePayloads {
+    files: BTreeMap<String, BTreeSet<String>>,
+    state_dirs: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ReachablePayloads {
+    fn mark(&mut self, payload: &Payload) {
+        self.files
+            .entry(payload.directory.clone())
+            .or_default()
+            .insert(payload.file.name.clone());
+    }
+
+    fn contains(&self, payload: &Payload) -> bool {
+        self.files
+            .get(&payload.directory)
+            .is_some_and(|names| names.contains(&payload.file.name))
+    }
 }
 
 struct LoadedSnapshot {
@@ -611,22 +642,28 @@ impl DatabaseStore {
     }
 
     fn manifests_with_roots(&self) -> Result<Vec<(Root, Manifest)>> {
+        self.read_lineage(
+            self.head.clone(),
+            self.snapshot.epoch,
+            self.retained_from_epoch(),
+        )
+    }
+
+    fn read_lineage(
+        &self,
+        mut current: Option<Root>,
+        mut expected: u64,
+        floor: u64,
+    ) -> Result<Vec<(Root, Manifest)>> {
         self.work.start_history()?;
-        let Some(head_root) = self.head.clone() else {
+        if current.is_none() {
             return Ok(Vec::new());
-        };
-        let floor = self
-            .manifest
-            .as_ref()
-            .and_then(|m| m.retained_from_epoch)
-            .unwrap_or(1);
-        if floor == 0 || floor > self.snapshot.epoch {
+        }
+        if floor == 0 || floor > expected {
             return Err(invalid("invalid retained_from_epoch in database manifest"));
         }
-        let mut current = Some(head_root);
         let mut result = Vec::new();
         let mut visited = BTreeSet::new();
-        let mut expected = self.snapshot.epoch;
         while let Some(root) = current {
             if result.len() >= MAX_HISTORY || !visited.insert(root.directory.clone()) {
                 return Err(invalid("database history is cyclic or exceeds its budget"));
@@ -775,7 +812,13 @@ impl DatabaseStore {
     pub fn table_deltas_since(
         &self,
         after_epoch: u64,
+        dependencies: &BTreeSet<String>,
     ) -> Result<Vec<(u64, BTreeMap<String, RecordBatch>)>> {
+        if after_epoch < self.retained_from_epoch() || after_epoch > self.snapshot.epoch {
+            return Err(invalid(
+                "view checkpoint lies outside retained database history",
+            ));
+        }
         let mut current = self.head.clone();
         let mut collected = Vec::new();
         let mut expected = self.snapshot.epoch;
@@ -790,6 +833,7 @@ impl DatabaseStore {
             let deltas = m
                 .table_deltas
                 .iter()
+                .filter(|(name, _)| dependencies.contains(*name))
                 .map(|(n, p)| Ok((n.clone(), self.batch(p, PayloadKind::TableDelta)?)))
                 .collect::<Result<BTreeMap<_, _>>>()?;
             collected.push((m.epoch, deltas));
@@ -967,17 +1011,7 @@ impl DatabaseStore {
         if next.epoch != self.snapshot.epoch.checked_add(1).ok_or(Error::Overflow)? {
             return Err(invalid("database predecessor differs"));
         }
-        let disk = match fs::read(self.root.join("CURRENT")) {
-            Ok(bytes) => {
-                self.work.pointer_read(bytes.len())?;
-                Some(serde_json::from_slice::<Root>(&bytes)?)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.into()),
-        };
-        if json_bytes(&disk)? != json_bytes(&self.head)? {
-            return Err(invalid("database CURRENT changed; reopen required"));
-        }
+        self.verify_current()?;
         let (name, dir) = loop {
             let name = format!(
                 "db-{}-{}-{}",
@@ -1170,37 +1204,9 @@ impl DatabaseStore {
         let mut view_states = BTreeMap::new();
         for (n, v) in &next.views {
             if let Some(snap) = view_state_checkpoints.remove(n) {
-                let state_subdir = format!("states-v-{}", v.id);
-                let state_dir = dir.join(&state_subdir);
-                let operator_manifest = state_codec::write_operator_states(
-                    &state_dir,
-                    snap.view_epoch,
-                    &snap.plan_fingerprint,
-                    &snap.operators,
-                )?;
-                let mut node_relations = Vec::with_capacity(snap.node_relations.len());
-                for (node_id, rel) in snap.node_relations.iter().enumerate() {
-                    let entry = match rel {
-                        Some(rel) => Some(self.write_state_block_relation(
-                            &mut stage,
-                            &format!("s{}-n{node_id}", v.id),
-                            rel,
-                        )?),
-                        None => None,
-                    };
-                    node_relations.push(entry);
-                }
                 view_states.insert(
                     n.clone(),
-                    ViewStateRef {
-                        checkpoint_epoch: next.epoch,
-                        affected_commits: 0,
-                        plan_fingerprint: snap.plan_fingerprint,
-                        directory: name.clone(),
-                        state_subdir,
-                        operator_manifest,
-                        node_relations,
-                    },
+                    self.write_view_checkpoint(&mut stage, next.epoch, v.id, snap)?,
                 );
             } else if let Some(prev_ref) = self
                 .manifest
@@ -1250,21 +1256,8 @@ impl DatabaseStore {
             receipt_root,
             receipt: None,
         };
-        let manifest = write_bytes(&dir, "manifest.json", &json_bytes(&m)?)?;
-        self.work.manifest_write(manifest.bytes)?;
-        sync_dir(&dir)?;
-        sync_dir(&self.root)?;
-        observer(PublishPoint::FilesDurable)?;
-        let head = Root {
-            directory: name.clone(),
-            manifest,
-        };
-        let pointer = format!("CURRENT-{name}.tmp");
-        let entry = write_bytes(&self.root, &pointer, &json_bytes(&head)?)?;
-        self.work.pointer_write(entry.bytes)?;
-        fs::rename(self.root.join(pointer), self.root.join("CURRENT"))?;
-        sync_dir(&self.root)?;
-        observer(PublishPoint::CurrentDurable)?;
+        let head = self.write_manifest(&dir, &name, &m)?;
+        self.publish_head(&dir, &head, observer)?;
         self.head = Some(head);
         if m.receipt_root.is_some() {
             self.legacy_receipts.clear();
@@ -1276,163 +1269,261 @@ impl DatabaseStore {
         Ok(())
     }
 
-    /// Reclaim unreachable historical files, stale operator-state directories and crash orphans
-    /// while strictly preserving every live block, retry index and bounded-replay checkpoint (`R07c`).
-    ///
-    /// Publish-before-delete: if `retained_from_epoch` advances, the updated `CURRENT` pointer is
-    /// atomically published and fsynced *before* any unreachable file or directory is deleted.
-    pub fn compact(
-        &mut self,
-        policy: RetentionPolicy,
+    fn write_view_checkpoint(
+        &self,
+        stage: &mut CommitStage<'_>,
+        epoch: u64,
+        id: u64,
+        snapshot: ViewStateSnapshot,
+    ) -> Result<ViewStateRef> {
+        let state_subdir = format!("states-v-{id}");
+        let operator_manifest = state_codec::write_operator_states(
+            &stage.dir.join(&state_subdir),
+            snapshot.view_epoch,
+            &snapshot.plan_fingerprint,
+            &snapshot.operators,
+        )?;
+        let node_relations = snapshot
+            .node_relations
+            .iter()
+            .enumerate()
+            .map(|(node, relation)| {
+                relation
+                    .as_ref()
+                    .map(|rows| {
+                        self.write_state_block_relation(stage, &format!("s{id}-n{node}"), rows)
+                    })
+                    .transpose()
+            })
+            .collect::<Result<_>>()?;
+        Ok(ViewStateRef {
+            checkpoint_epoch: epoch,
+            affected_commits: 0,
+            plan_fingerprint: snapshot.plan_fingerprint,
+            directory: stage.dir_name.to_owned(),
+            state_subdir,
+            operator_manifest,
+            node_relations,
+        })
+    }
+
+    fn verify_current(&self) -> Result<()> {
+        let disk = match fs::read(self.root.join("CURRENT")) {
+            Ok(bytes) => {
+                self.work.pointer_read(bytes.len())?;
+                Some(serde_json::from_slice::<Root>(&bytes)?)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        if json_bytes(&disk)? != json_bytes(&self.head)? {
+            return Err(invalid("database CURRENT changed; reopen required"));
+        }
+        Ok(())
+    }
+
+    fn write_manifest(&self, directory: &Path, name: &str, manifest: &Manifest) -> Result<Root> {
+        let manifest = write_bytes(directory, "manifest.json", &json_bytes(manifest)?)?;
+        self.work.manifest_write(manifest.bytes)?;
+        Ok(Root {
+            directory: name.to_owned(),
+            manifest,
+        })
+    }
+
+    fn publish_head(
+        &self,
+        directory: &Path,
+        head: &Root,
         observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
-    ) -> Result<CompactionReport> {
+    ) -> Result<()> {
+        sync_dir(directory)?;
+        sync_dir(&self.root)?;
+        observer(PublishPoint::FilesDurable)?;
+        let pointer = format!("CURRENT-{}.tmp", head.directory);
+        let entry = write_bytes(&self.root, &pointer, &json_bytes(head)?)?;
+        self.work.pointer_write(entry.bytes)?;
+        fs::rename(self.root.join(pointer), self.root.join("CURRENT"))?;
+        sync_dir(&self.root)?;
+        observer(PublishPoint::CurrentDurable)
+    }
+
+    /// Compute the requested floor without changing the committed root.
+    pub(super) fn compaction_floor(&self, policy: RetentionPolicy) -> Result<u64> {
         if policy.retain_epochs == 0 {
             return Err(invalid("retain_epochs must be at least 1"));
         }
-        let Some(head_manifest) = self.manifest.clone() else {
-            // Empty database: still sweep any orphan `db-*` crash remnants.
-            let (removed_files, removed_dirs, reclaimed_bytes) =
-                sweep_unreachable(&self.root, &BTreeMap::new(), &BTreeMap::new())?;
-            return Ok(CompactionReport {
-                head_epoch: 0,
-                retained_from_epoch: 0,
-                retained_manifests: 0,
-                removed_files,
-                removed_dirs,
-                reclaimed_bytes,
-            });
+        Ok(self
+            .snapshot
+            .epoch
+            .saturating_sub(policy.retain_epochs - 1)
+            .max(self.retained_from_epoch()))
+    }
+
+    /// Publish new recovery points and retention together before sweeping unreachable files.
+    pub(super) fn compact(
+        &mut self,
+        floor: u64,
+        checkpoints: BTreeMap<String, CompactionCheckpoint>,
+        observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
+    ) -> Result<CompactionReport> {
+        self.verify_current()?;
+        let mut report = CompactionReport {
+            head_epoch: self.snapshot.epoch,
+            retained_from_epoch: floor,
+            ..CompactionReport::default()
+        };
+        let reachable = if floor > self.retained_from_epoch() || !checkpoints.is_empty() {
+            self.compact_with_checkpoints(floor, checkpoints, &mut report, observer)?
+        } else {
+            self.compaction_reachability(self.manifests_with_roots()?, &mut report)?
         };
 
-        let head_epoch = head_manifest.epoch;
-        let prev_floor = head_manifest.retained_from_epoch.unwrap_or(1);
-        let requested_floor = head_epoch
-            .saturating_sub(policy.retain_epochs.saturating_sub(1))
-            .max(1);
-        let min_view_checkpoint = head_manifest
-            .view_states
-            .values()
-            .map(|vs| vs.checkpoint_epoch)
-            .min();
-        let safe_floor = match min_view_checkpoint {
-            Some(cp) => requested_floor.min(cp),
-            None => requested_floor,
-        }
-        .max(prev_floor)
-        .min(head_epoch);
+        (
+            report.removed_files,
+            report.removed_dirs,
+            report.reclaimed_bytes,
+        ) = sweep_unreachable(&self.root, &reachable.files, &reachable.state_dirs)?;
+        self.committed_blocks
+            .retain(|_, block| reachable.contains(&block.payload));
+        self.committed_schemas
+            .retain(|_, schema| reachable.contains(schema));
+        Ok(report)
+    }
 
-        // Step 1: Atomically publish the new `retained_from_epoch` floor BEFORE any deletion.
-        if safe_floor > prev_floor {
-            let disk = match fs::read(self.root.join("CURRENT")) {
-                Ok(bytes) => {
-                    self.work.pointer_read(bytes.len())?;
-                    Some(serde_json::from_slice::<Root>(&bytes)?)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+    fn compact_with_checkpoints(
+        &mut self,
+        floor: u64,
+        checkpoints: BTreeMap<String, CompactionCheckpoint>,
+        report: &mut CompactionReport,
+        observer: &mut dyn FnMut(PublishPoint) -> Result<()>,
+    ) -> Result<ReachablePayloads> {
+        let mut updated = self
+            .manifest
+            .clone()
+            .ok_or_else(|| invalid("missing database for compaction"))?;
+        let epoch = updated.epoch;
+        let (name, dir) = loop {
+            let name = format!(
+                "db-{epoch}-c-{}-{}",
+                std::process::id(),
+                ATTEMPT.fetch_add(1, Ordering::Relaxed)
+            );
+            let dir = self.root.join(&name);
+            match fs::create_dir(&dir) {
+                Ok(()) => break (name, dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e.into()),
-            };
-            if json_bytes(&disk)? != json_bytes(&self.head)? {
-                return Err(invalid("database CURRENT changed; reopen required"));
             }
-            let (name, dir) = loop {
-                let name = format!(
-                    "db-{head_epoch}-c-{}-{}",
-                    std::process::id(),
-                    ATTEMPT.fetch_add(1, Ordering::Relaxed)
-                );
-                let dir = self.root.join(&name);
-                match fs::create_dir(&dir) {
-                    Ok(()) => break (name, dir),
-                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(e) => return Err(e.into()),
-                }
-            };
-            let mut updated = head_manifest.clone();
-            updated.retained_from_epoch = Some(safe_floor);
-            if safe_floor == head_epoch {
-                updated.previous = None;
-            }
-            let manifest = write_bytes(&dir, "manifest.json", &json_bytes(&updated)?)?;
-            self.work.manifest_write(manifest.bytes)?;
-            sync_dir(&dir)?;
-            sync_dir(&self.root)?;
-            observer(PublishPoint::FilesDurable)?;
-            let new_head = Root {
-                directory: name.clone(),
-                manifest,
-            };
-            let pointer = format!("CURRENT-{name}.tmp");
-            let entry = write_bytes(&self.root, &pointer, &json_bytes(&new_head)?)?;
-            self.work.pointer_write(entry.bytes)?;
-            fs::rename(self.root.join(pointer), self.root.join("CURRENT"))?;
-            sync_dir(&self.root)?;
-            observer(PublishPoint::CurrentDurable)?;
-            self.head = Some(new_head);
-            self.manifest = Some(updated);
-        }
-
-        // Step 2: Compute exact reachability across `safe_floor..=head_epoch`.
-        let retained = self.manifests_with_roots()?;
-        let mut reachable_files: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut reachable_subdirs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mark_payload = |files: &mut BTreeMap<String, BTreeSet<String>>, payload: &Payload| {
-            files
-                .entry(payload.directory.clone())
-                .or_default()
-                .insert(payload.file.name.clone());
         };
-
-        let mut receipt_reachability = receipt_index::Reachability::default();
-        for (root, m) in &retained {
-            reachable_files
-                .entry(root.directory.clone())
-                .or_default()
-                .insert(root.manifest.name.clone());
-            for t in m.tables.values() {
-                self.mark_block_relation(&t.data, &mut reachable_files)?;
-            }
-            for v in m.views.values() {
-                match &v.output {
-                    ViewOutputEntry::BlockRelation(rel) => {
-                        self.mark_block_relation(rel, &mut reachable_files)?;
-                    }
-                    ViewOutputEntry::OrderedPayload(p) => mark_payload(&mut reachable_files, p),
+        let mut stage = CommitStage {
+            dir: &dir,
+            dir_name: &name,
+            next_blocks: BTreeMap::new(),
+            next_schemas: BTreeMap::new(),
+        };
+        for (view, checkpoint) in checkpoints {
+            let definition = updated
+                .views
+                .get(&view)
+                .ok_or_else(|| invalid("compaction has an unbound view"))?;
+            match checkpoint {
+                CompactionCheckpoint::Promote => {
+                    let state = updated
+                        .view_states
+                        .get_mut(&view)
+                        .filter(|state| state.affected_commits == 0)
+                        .ok_or_else(|| {
+                            invalid("compaction cannot promote a changed view checkpoint")
+                        })?;
+                    state.checkpoint_epoch = epoch;
+                    report.promoted_checkpoints += 1;
                 }
-            }
-            for p in m.table_deltas.values() {
-                mark_payload(&mut reachable_files, p);
-            }
-            for p in m.deltas.values() {
-                mark_payload(&mut reachable_files, p);
-            }
-            if let Some(p) = &m.receipt_index {
-                mark_payload(&mut reachable_files, p);
-            }
-            if let Some(root) = &m.receipt_root {
-                receipt_reachability.mark(self, root, &mut reachable_files)?;
-            }
-            for vs in m.view_states.values() {
-                reachable_subdirs
-                    .entry(vs.directory.clone())
-                    .or_default()
-                    .insert(vs.state_subdir.clone());
-                for rel in vs.node_relations.iter().flatten() {
-                    self.mark_block_relation(rel, &mut reachable_files)?;
+                CompactionCheckpoint::Write(snapshot) => {
+                    let state =
+                        self.write_view_checkpoint(&mut stage, epoch, definition.id, snapshot)?;
+                    updated.view_states.insert(view, state);
+                    report.written_checkpoints += 1;
                 }
             }
         }
+        if updated.views.keys().ne(updated.view_states.keys())
+            || updated
+                .view_states
+                .values()
+                .any(|state| state.checkpoint_epoch < floor)
+        {
+            return Err(invalid("compaction would prune a required view checkpoint"));
+        }
+        report.checkpoint_bytes_written = dir_size(&dir)?;
+        updated.retained_from_epoch = Some(floor);
+        if floor == epoch {
+            updated.previous = None;
+        }
+        let head = self.write_manifest(&dir, &name, &updated)?;
+        let reachable = self.compaction_reachability(
+            self.read_lineage(Some(head.clone()), epoch, floor)?,
+            report,
+        )?;
 
-        // Step 3: Sweep unreachable files, stale state subdirectories and dead/orphan `db-*` dirs.
-        let (removed_files, removed_dirs, reclaimed_bytes) =
-            sweep_unreachable(&self.root, &reachable_files, &reachable_subdirs)?;
+        // Do not drop the predecessor's payloads until CURRENT points to a durable,
+        // validated replacement. An observer error fences the owning session.
+        self.publish_head(&dir, &head, observer)?;
+        self.head = Some(head);
+        self.manifest = Some(updated);
+        self.committed_blocks.extend(stage.next_blocks);
+        Ok(reachable)
+    }
 
-        Ok(CompactionReport {
-            head_epoch,
-            retained_from_epoch: safe_floor,
-            retained_manifests: retained.len() as u64,
-            removed_files,
-            removed_dirs,
-            reclaimed_bytes,
-        })
+    fn compaction_reachability(
+        &self,
+        retained: Vec<(Root, Manifest)>,
+        report: &mut CompactionReport,
+    ) -> Result<ReachablePayloads> {
+        report.retained_manifests = retained.len() as u64;
+        let mut reachable = ReachablePayloads::default();
+        let mut receipt_reachability = receipt_index::Reachability::default();
+        for (root, manifest) in retained {
+            reachable.mark(&Payload {
+                directory: root.directory,
+                file: root.manifest,
+            });
+            for table in manifest.tables.values() {
+                self.mark_block_relation(&table.data, &mut reachable.files)?;
+            }
+            for view in manifest.views.values() {
+                match &view.output {
+                    ViewOutputEntry::BlockRelation(relation) => {
+                        self.mark_block_relation(relation, &mut reachable.files)?;
+                    }
+                    ViewOutputEntry::OrderedPayload(payload) => reachable.mark(payload),
+                }
+            }
+            for delta in manifest
+                .table_deltas
+                .values()
+                .chain(manifest.deltas.values())
+            {
+                reachable.mark(delta);
+            }
+            if let Some(payload) = &manifest.receipt_index {
+                reachable.mark(payload);
+            }
+            if let Some(root) = &manifest.receipt_root {
+                receipt_reachability.mark(self, root, &mut reachable.files)?;
+            }
+            for state in manifest.view_states.values() {
+                reachable
+                    .state_dirs
+                    .entry(state.directory.clone())
+                    .or_default()
+                    .insert(state.state_subdir.clone());
+                for relation in state.node_relations.iter().flatten() {
+                    self.mark_block_relation(relation, &mut reachable.files)?;
+                }
+            }
+        }
+        Ok(reachable)
     }
 
     fn mark_block_relation(

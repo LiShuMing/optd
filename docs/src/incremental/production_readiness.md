@@ -84,3 +84,37 @@ Run target validation in shadow mode with the current production output still au
 
 - Agree the warehouse compatibility and rollback contract for the optional receipt root. Choose the shard byte target using measured tradeoffs in commit I/O and lookup work.
 - Identify the target placement, supported source/catalog and delete modes, exact SQL and change profile, and tolerable freshness, memory, commit and recovery limits. Decide whether an isolated replay or a production shadow run is authorized.
+
+## 9. Observed local storage qualification
+
+**Verified with synthetic fixtures.** The baseline was `166eb5f82cbd4af6fa5319f26b85e73410356bf0`. Both binaries used Rust 1.95.0 and the locked dependencies in optimized builds on macOS 14.8.9, Apple M2 Pro, 10 CPU cores, 16 GiB RAM and APFS. Baseline binary SHA-256 was `2439def957cb13f2a9af5fd97ddf30be8046e63299327896cf5b7aa7df3e8587`. Candidate binary SHA-256 was `159047a076c9f32302dfa686d334f8624a4c240c3b9fe3241ad863ab14861869`.
+
+Build the two example binaries at their respective revisions, preserving each binary under a distinct path. Then run the paired fixture generator from the candidate checkout.
+
+```sh
+CARGO_INCREMENTAL=0 cargo +1.95.0 build --release --locked -p optd-incremental-sql --example sql_database
+python3 optd-incremental-sql/benchmarks/tools/qualify_storage.py \
+  --baseline "$OPTD_BASELINE_SQL_DATABASE" --candidate "$OPTD_CANDIDATE_SQL_DATABASE" \
+  --output "$OPTD_STORAGE_COMPARISON_JSON" --samples 8 --repeats 2 --history-epochs 128
+```
+
+The near-limit fixture seeded 15,100 synthetic receipts in 16,777,088 bytes. The baseline rejected the next identified write without changing `CURRENT`. The candidate committed that same request through migration and returned the original outcomes for both old and new IDs after reopening.
+
+The receipt comparison used 16 timed updates per binary at each prior-ID count. Each update changed one row in a one-row table, and each binary received the same copied seed before warm-up. The byte figures are lengths of newly written receipt files. CLI times include reopening, hashing, SQL execution and writing the result. They are indicative local observations affected by process and test-run scheduling.
+
+| Prior IDs | Baseline receipt bytes, P50 | Candidate receipt bytes, P50 | Baseline CLI P50 | Candidate CLI P50 |
+| ---: | ---: | ---: | ---: | ---: |
+| 16 | 23,322 | 23,331 | 42.54 ms | 59.95 ms |
+| 4,096 | 4,556,202 | 24,104 | 2,084.56 ms | 55.60 ms |
+| 8,192 | 9,106,858 | 40,768 | 4,656.53 ms | 120.41 ms |
+
+For the 8,192-ID case the receipt write fell by 99.55%. Maximum sampled CLI RSS was 68,780,032 bytes for the baseline and 30,162,944 bytes for the candidate. Small indexes incurred a small representation overhead. The migration was outside the timed sample and still performs a one-time copy of the legacy index.
+
+Compaction followed 128 unrelated database commits and requested retention of one epoch. Both binaries reopened and returned the same full SQL and MV results. The candidate's unchanged checkpoint reused its existing state files. Its changed checkpoint wrote 3,867 bytes of new state files.
+
+| View shape | Retained epochs, baseline and candidate | Old epoch payload bytes reclaimed, baseline and candidate | Table-delta epochs replayed, baseline and candidate |
+| --- | --- | --- | --- |
+| Idle | 129 / 1 | 8,888 / 648,175 | 0 / 0 |
+| One relevant write | 130 / 1 | 8,888 / 658,219 | 1 / 0 |
+
+**Evidence boundary.** These measurements cover stored receipt-file work, logical history retention, observed local CLI latency and a single-host process-recovery contract. Receipts are retained indefinitely; aggregate disk usage still grows with new IDs. Compaction must run often enough to keep history within the configured operational envelope. Target workload latency percentiles, host-loss recovery, full TPC execution, strict Top-K, and production Iceberg remain separate acceptance gates.

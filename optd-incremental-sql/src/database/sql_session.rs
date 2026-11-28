@@ -4,8 +4,8 @@ use super::dml_compiler::TransactionMode;
 use super::response::{CommitReport, SqlResponse};
 use super::sql::{self, RelationScope};
 use super::store::{
-    CompactionReport, DatabaseSnapshot, DatabaseStore, Receipt, RetentionPolicy, TableData,
-    ViewData, ViewOutput,
+    CompactionCheckpoint, CompactionReport, DatabaseSnapshot, DatabaseStore, Receipt,
+    RetentionPolicy, TableData, ViewData, ViewOutput,
 };
 use super::store_work::{RecoveryWork, StoreWork};
 use super::table_rows::TableRows;
@@ -497,9 +497,29 @@ impl SqlSession {
         if self.transaction.is_some() {
             return Err(invalid("compaction requires an autocommit session"));
         }
+        let floor = self.store.compaction_floor(policy)?;
+        let mut checkpoints = BTreeMap::new();
+        for (name, view) in &self.views {
+            let prior = self.store.view_state_ref(name);
+            if prior.is_some_and(|state| state.checkpoint_epoch >= floor) {
+                continue;
+            }
+            // A successfully restored or newly published unchanged view has the
+            // same dependency rows and engine state as its existing checkpoint.
+            // Rebuilt sessions may still hold an incompatible checkpoint on disk.
+            let checkpoint = if self.recovery.rebuilt_views == 0
+                && prior.is_some_and(|state| state.affected_commits == 0)
+            {
+                CompactionCheckpoint::Promote
+            } else {
+                let schemas = view_schemas(&self.committed, name)?;
+                CompactionCheckpoint::Write(view.export_state(&schemas)?)
+            };
+            checkpoints.insert(name.clone(), checkpoint);
+        }
         // Any publication error fences this session until reopen resolves `CURRENT`.
         self.fenced = true;
-        let report = self.store.compact(policy, observer)?;
+        let report = self.store.compact(floor, checkpoints, observer)?;
         self.fenced = false;
         Ok(report)
     }
@@ -990,7 +1010,7 @@ async fn try_restore_view(
         .ok_or_else(|| invalid("missing persisted operator state checkpoint for view"))?
         .checkpoint_epoch;
     let (state_snap, state_reads) = store.load_view_state(name, expected_fp)?;
-    let raw_deltas = store.table_deltas_since(checkpoint_epoch)?;
+    let raw_deltas = store.table_deltas_since(checkpoint_epoch, &view.dependencies)?;
     // Decode only deltas belonging to this view's dependency tables and accumulate net
     // post-checkpoint change per dependency so `B_checkpoint = B_head - sum(D)`.
     let mut cumulative_by_table = BTreeMap::<String, Bag>::new();

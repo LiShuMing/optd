@@ -126,7 +126,7 @@ async fn compaction_reclaims_unreachable_history_while_preserving_reused_blocks_
         "dirs should decrease after compaction: {dirs_before} -> {dirs_after}"
     );
 
-    // 1. Identified retry from BEFORE `retained_from_epoch` still resolves in O(1) via receipt index!
+    // 1. Identified retry from before the retained floor needs no history scan.
     let before_retry = session.store_work().unwrap();
     let retry_resp = session
         .execute_request("req-early", early_sql)
@@ -205,7 +205,7 @@ async fn compaction_reclaims_unreachable_history_while_preserving_reused_blocks_
 }
 
 #[tokio::test]
-async fn compaction_never_prunes_below_live_view_checkpoint_epoch() {
+async fn compaction_checkpoints_a_changed_view_before_pruning_its_replay_history() {
     let dir = tempdir().unwrap();
     let opts = OpenOptions {
         checkpoint_interval: 16,
@@ -222,7 +222,6 @@ async fn compaction_never_prunes_below_live_view_checkpoint_epoch() {
         .execute("CREATE MATERIALIZED VIEW mv AS SELECT k, SUM(v) AS s FROM t GROUP BY k")
         .await
         .unwrap();
-    let mv_checkpoint_epoch = session.epoch();
 
     // 6 commits after checkpoint (all < K=16, so view still needs table_deltas since mv_checkpoint_epoch).
     for i in 1..=6_i64 {
@@ -232,21 +231,95 @@ async fn compaction_never_prunes_below_live_view_checkpoint_epoch() {
             .unwrap();
     }
 
-    // Request retaining only 2 epochs: compaction MUST clamp floor to `mv_checkpoint_epoch`!
+    let head = session.epoch();
     let report = session
         .compact(RetentionPolicy { retain_epochs: 2 })
         .unwrap();
-    assert_eq!(report.retained_from_epoch, mv_checkpoint_epoch);
-
+    assert_eq!(report.retained_from_epoch, head - 1);
+    assert_eq!(report.retained_manifests, 2);
+    assert_eq!(report.written_checkpoints, 1);
+    assert_eq!(report.promoted_checkpoints, 0);
+    assert!(report.checkpoint_bytes_written > 0);
+    session.verify_output_history().unwrap();
     drop(session);
 
-    // Reopen must still replay all 6 deltas cleanly with zero rebuilds!
-    let reopened = SqlSession::open_with_options(dir.path(), opts)
+    let mut reopened = SqlSession::open_with_options(dir.path(), opts)
         .await
         .unwrap();
     assert_eq!(reopened.recovery_work().restored_views, Some(1));
     assert_eq!(reopened.recovery_work().rebuilt_views, 0);
-    assert_eq!(reopened.recovery_work().replayed_epochs, Some(6));
+    assert_eq!(reopened.recovery_work().replayed_epochs, Some(0));
+    let actual = reopened
+        .execute("SELECT * FROM mv ORDER BY k")
+        .await
+        .unwrap()
+        .rows
+        .unwrap();
+    let reference = reopened
+        .execute("SELECT k, SUM(v) AS s FROM t GROUP BY k ORDER BY k")
+        .await
+        .unwrap()
+        .rows
+        .unwrap();
+    assert_eq!(actual, reference);
+}
+
+#[tokio::test]
+async fn idle_views_advance_without_state_writes_and_empty_output_deltas_do_not_promote() {
+    let dir = tempdir().unwrap();
+    let mut session = SqlSession::open(dir.path()).await.unwrap();
+    session
+        .execute_script(
+            "CREATE TABLE idle(k BIGINT); CREATE TABLE busy(k BIGINT);
+         CREATE MATERIALIZED VIEW stable AS SELECT COUNT(*) AS n FROM idle;
+         CREATE MATERIALIZED VIEW filtered AS SELECT k FROM busy WHERE k < 0;",
+        )
+        .await
+        .unwrap();
+    // The input state of filtered changes, although its output stays empty.
+    session
+        .execute("INSERT INTO busy VALUES (1)")
+        .await
+        .unwrap();
+    let head = session.epoch();
+    let report = session
+        .compact(RetentionPolicy { retain_epochs: 1 })
+        .unwrap();
+    assert_eq!(report.retained_from_epoch, head);
+    assert_eq!(report.retained_manifests, 1);
+    assert_eq!(report.promoted_checkpoints, 1);
+    assert_eq!(report.written_checkpoints, 1);
+    session.verify_output_history().unwrap();
+    drop(session);
+
+    let mut reopened = SqlSession::open(dir.path()).await.unwrap();
+    assert_eq!(reopened.recovery_work().restored_views, Some(2));
+    assert_eq!(reopened.recovery_work().replayed_epochs, Some(0));
+    // Retraction needs the committed input state, even though its earlier insert
+    // emitted no output rows.
+    reopened
+        .execute("DELETE FROM busy WHERE k = 1")
+        .await
+        .unwrap();
+    let actual = reopened
+        .execute("SELECT * FROM filtered")
+        .await
+        .unwrap()
+        .rows
+        .unwrap();
+    let expected = reopened
+        .execute("SELECT k FROM busy WHERE k < 0")
+        .await
+        .unwrap()
+        .rows
+        .unwrap();
+    assert_eq!(actual, expected);
+    // A subsequent compaction advances the still-idle view without rewriting it.
+    let report = reopened
+        .compact(RetentionPolicy { retain_epochs: 1 })
+        .unwrap();
+    assert_eq!(report.promoted_checkpoints, 1);
+    reopened.verify_output_history().unwrap();
 }
 
 #[tokio::test]

@@ -59,11 +59,12 @@ A view state checkpoint directory (`states/view-<id>/`) stores a hashed `state-m
 * On subsequent commits affecting view `v`:
   * If `affected_commits_since_checkpoint < checkpoint_interval`, `ManifestV2.view_states[v]` carries forward the existing `ViewStateRef` with zero operator-state disk writes.
   * When `affected_commits_since_checkpoint >= checkpoint_interval`, a new `ViewStateCheckpoint` is written atomically in the epoch directory.
+* On compaction, advance old recovery points before pruning. An unchanged view can reuse its state payloads. A changed view receives a new checkpoint of its current committed state. Publish the new recovery points and history floor together at the same database epoch. See [production readiness](./production_readiness.md).
 * On `SqlSession::open`:
   1. Compile each view's strict `IncrementalPlan` from table schemas only (`SqlView::compile_plan`, zero row scans).
   2. Verify `ViewStateRef.plan_fingerprint == compiled_fingerprint`.
   3. Load the `checkpoint_epoch` operator states and intermediate relations.
-  4. Read `table_deltas` for epochs `(checkpoint_epoch + 1)..=head_epoch` (at most `K` epochs) and replay them via `SqlView::prepare` + `acknowledge`.
+  4. Walk retained metadata after the checkpoint and decode table deltas only for the view's dependencies. Replay up to `K - 1` affected commits via `SqlView::prepare` and `acknowledge` on the normally checkpointed path. Unrelated metadata epochs can still lie between the checkpoint and database head.
   5. Verify final view output equals committed `ViewData.output` (exact bag equality, plus exact order when `ordered == true`).
 
 ### 4.4 `RecoveryWork` Accounting

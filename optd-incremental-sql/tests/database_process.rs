@@ -6,7 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use optd_incremental_sql::database::{
-    display_rows, IncompatibleStatePolicy, OpenOptions, SqlSession,
+    display_rows, IncompatibleStatePolicy, OpenOptions, RetentionPolicy, SqlSession,
 };
 use optd_incremental_sql::store::PublishPoint;
 
@@ -19,7 +19,7 @@ impl Drop for OwnedChild {
     }
 }
 
-fn kill_at(root: &Path, point: &str, epoch: u64, checkpoint_interval: u64) {
+fn kill_at(root: &Path, point: &str, epoch: u64, checkpoint_interval: u64, operation: &str) {
     let mut child = OwnedChild(
         Command::new(std::env::current_exe().unwrap())
             .args([
@@ -30,6 +30,7 @@ fn kill_at(root: &Path, point: &str, epoch: u64, checkpoint_interval: u64) {
             ])
             .env("OPTD_DATABASE_KILL_ROOT", root)
             .env("OPTD_DATABASE_KILL_POINT", point)
+            .env("OPTD_DATABASE_KILL_OPERATION", operation)
             .env(
                 "OPTD_DATABASE_CHECKPOINT_INTERVAL",
                 checkpoint_interval.to_string(),
@@ -90,8 +91,9 @@ fn database_worker() {
             )
             .await
             .unwrap();
-            let epoch = db.epoch() + 1;
-            db.execute_transaction_observed("atomic-write", WRITE, |p| {
+            let compact = std::env::var("OPTD_DATABASE_KILL_OPERATION").as_deref() == Ok("compact");
+            let epoch = db.epoch() + u64::from(!compact);
+            let mut barrier = |p| {
                 if matches!(
                     (p, point.as_str()),
                     (PublishPoint::FilesDurable, "files")
@@ -112,9 +114,15 @@ fn database_worker() {
                     }
                 }
                 Ok(())
-            })
-            .await
-            .unwrap();
+            };
+            if compact {
+                db.compact_with_observer(RetentionPolicy { retain_epochs: 1 }, &mut barrier)
+                    .unwrap();
+            } else {
+                db.execute_transaction_observed("atomic-write", WRITE, barrier)
+                    .await
+                    .unwrap();
+            }
         });
     panic!("worker missed publication barrier");
 }
@@ -152,7 +160,7 @@ async fn sigkill_recovers_all_tables_views_and_identified_transaction_exactly_on
             let epoch = db.epoch();
             drop(db);
             let before = fs::read(root.path().join("CURRENT")).unwrap();
-            kill_at(root.path(), point, epoch + 1, interval);
+            kill_at(root.path(), point, epoch + 1, interval, "write");
             let mut recovered = SqlSession::open(root.path()).await.unwrap();
             let published = point == "current";
             assert_eq!(recovered.epoch(), epoch + u64::from(published));
@@ -183,5 +191,55 @@ async fn sigkill_recovers_all_tables_views_and_identified_transaction_exactly_on
             drop(recovered);
             assert_contents(&mut SqlSession::open(root.path()).await.unwrap(), true).await;
         }
+    }
+}
+
+#[tokio::test]
+async fn sigkill_at_compaction_publication_preserves_receipts_and_view_recovery() {
+    for point in ["files", "current"] {
+        let root = tempfile::tempdir().unwrap();
+        let mut db = SqlSession::open(root.path()).await.unwrap();
+        db.execute_script(
+            "CREATE TABLE items(k BIGINT); CREATE TABLE busy(k BIGINT);
+             CREATE MATERIALIZED VIEW tally AS SELECT COUNT(*) AS n FROM items;",
+        )
+        .await
+        .unwrap();
+        let write = "INSERT INTO items VALUES (1)";
+        db.execute_request("compact-retry", write).await.unwrap();
+        db.execute("INSERT INTO busy VALUES (2)").await.unwrap();
+        let epoch = db.epoch();
+        drop(db);
+        let current = root.path().join("CURRENT");
+        let before = fs::read(&current).unwrap();
+        kill_at(root.path(), point, epoch, 16, "compact");
+        let published = point == "current";
+        assert_eq!(fs::read(current).unwrap() != before, published);
+        let mut db = SqlSession::open(root.path()).await.unwrap();
+        assert_eq!(db.epoch(), epoch);
+        assert_eq!(
+            db.recovery_work().replayed_epochs,
+            Some(u64::from(!published))
+        );
+        assert!(
+            db.execute_request("compact-retry", write)
+                .await
+                .unwrap()
+                .replayed
+        );
+        let actual = db
+            .execute("SELECT * FROM tally")
+            .await
+            .unwrap()
+            .rows
+            .unwrap();
+        let expected = db
+            .execute("SELECT COUNT(*) AS n FROM items")
+            .await
+            .unwrap()
+            .rows
+            .unwrap();
+        assert_eq!(actual, expected);
+        db.verify_output_history().unwrap();
     }
 }
