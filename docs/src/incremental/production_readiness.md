@@ -118,3 +118,19 @@ Compaction followed 128 unrelated database commits and requested retention of on
 | One relevant write | 130 / 1 | 8,888 / 658,219 | 1 / 0 |
 
 **Evidence boundary.** These measurements cover stored receipt-file work, logical history retention, observed local CLI latency and a single-host process-recovery contract. Receipts are retained indefinitely; aggregate disk usage still grows with new IDs. Compaction must run often enough to keep history within the configured operational envelope. Target workload latency percentiles, host-loss recovery, full TPC execution, strict Top-K, and production Iceberg remain separate acceptance gates.
+
+### Implementation and release gates
+
+The code under test was `41fa259`, including the receipt migration in `412e186`. A separate staged build of the receipt-only change passed both release regression tests. The complete storage candidate passed the following commands on macOS arm64 with Rust 1.95.0, using a separate target directory for local verification.
+
+```sh
+CARGO_TARGET_DIR="$OPTD_CHECK_TARGET" CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  bash scripts/agent-check.sh sql
+RUSTDOCFLAGS='-D warnings' CARGO_TARGET_DIR="$OPTD_CHECK_TARGET" \
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
+  cargo +1.95.0 doc --locked -p optd-incremental-sql --features iceberg \
+  --no-deps --document-private-items
+MDBOOK_BUILD__BUILD_DIR="$OPTD_BOOK_TARGET" mdbook build docs
+```
+
+The SQL script exited 0 with format and both all-target Clippy checks clean. The default suite passed 369 tests with 2 ignored. The Iceberg suite passed 383 tests with 3 ignored. Both suites had zero failures. The full TPC qualification and large Q21 recovery witness were ignored. The Iceberg helper marked ignored is run as a child by its process-death test. Rustdoc and mdBook 0.4.52 exited 0.

@@ -75,6 +75,12 @@ ceiling and retention pinned by an idle view checkpoint. The accepted first incr
 covers sharded receipts and checkpoint advancement during compaction.
 R05b, R08, R10b, and R10c retain their own acceptance gates.
 
+**Verified local storage increment.** `412e186` implements sharded receipt
+publication. `41fa259` advances old checkpoints during compaction and records
+the paired release comparison. The design records verified correctness,
+durability, and local storage evidence. Owner review is required for the next
+implementation design. Production shadow qualification needs a target workload.
+
 ## Evidence ledger
 
 No new TPC runtime or performance qualification is recorded yet. Historical evidence:
