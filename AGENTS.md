@@ -4,6 +4,8 @@ Read [AGENT.md](./AGENT.md) before changing this repository. It is the canonical
 Area designs under `docs/src/` define their acceptance criteria; report observed verification
 results and outstanding gates without treating design acceptance as implementation acceptance.
 
+多 Agent 协作时，请在 [TEAMS.md](./TEAMS.md) 登记模型编号、认领任务，并追加交接及合并结果。
+
 Every agent session, including resumed work, must follow the
 [publishability rules](./AGENT.md#publishability) before each commit, amend, and push:
 
