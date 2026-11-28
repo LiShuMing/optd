@@ -4,6 +4,8 @@
 //! as immutable weighted blocks (`RowBlocks`), reusing untouched blocks across epochs
 //! by `BlockUid`. Legacy `optd-sql-database/1` directories are rejected explicitly.
 
+mod receipt_index;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use serde::{Deserialize, Serialize};
+
+use self::receipt_index::ReceiptRoot;
 
 use super::response::CommitReport;
 use super::store_work::{PayloadAction, PayloadKind, StoreWork, StoreWorkCounter};
@@ -22,7 +26,7 @@ use crate::row_blocks::{BlockOrderMode, BlockUid, PersistedBlock};
 use crate::state_codec::{self, StateReadStats, ViewStateSnapshot};
 use crate::store::{
     batches_equal, component, json_bytes, read_batch, read_json_file, sync_dir, verified_file,
-    write_batch, write_bytes, CheckpointDirectories, FileEntry, PublishPoint,
+    write_batch, write_bytes, CheckpointDirectories, FileEntry, PublishPoint, MAX_JSON_BYTES,
 };
 use crate::{Error, Result};
 
@@ -254,7 +258,12 @@ struct Manifest {
     deltas: BTreeMap<String, Payload>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     view_states: BTreeMap<String, ViewStateRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     receipt_index: Option<Payload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt_root: Option<ReceiptRoot>,
+    // Legacy manifests retained an inline copy of their latest receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     receipt: Option<Receipt>,
 }
 
@@ -281,7 +290,7 @@ pub(super) struct DatabaseStore {
     snapshot: DatabaseSnapshot,
     committed_blocks: BTreeMap<BlockUid, BlockEntry>,
     committed_schemas: BTreeMap<u64, Payload>,
-    receipts: BTreeMap<String, Receipt>,
+    legacy_receipts: BTreeMap<String, Receipt>,
     work: StoreWorkCounter,
 }
 
@@ -311,7 +320,7 @@ impl DatabaseStore {
             },
             committed_blocks: BTreeMap::new(),
             committed_schemas: BTreeMap::new(),
-            receipts: BTreeMap::new(),
+            legacy_receipts: BTreeMap::new(),
         };
         match fs::symlink_metadata(out.root.join("CURRENT")) {
             Ok(_) => {
@@ -320,10 +329,12 @@ impl DatabaseStore {
                 let head: Root = serde_json::from_slice(&bytes)?;
                 let m = out.read_manifest(&head)?;
                 let loaded = out.read_snapshot(&m)?;
-                out.receipts = match &m.receipt_index {
-                    Some(payload) => out.read_receipt_index(payload)?,
-                    None => BTreeMap::new(),
-                };
+                if let Some(root) = &m.receipt_root {
+                    root.validate_root(&out)?;
+                }
+                if let Some(payload) = &m.receipt_index {
+                    out.legacy_receipts = out.read_legacy_receipts(payload)?;
+                }
                 out.snapshot = loaded.snapshot;
                 out.committed_blocks = loaded.committed_blocks;
                 out.committed_schemas = loaded.committed_schemas;
@@ -379,6 +390,12 @@ impl DatabaseStore {
             )));
         }
         let m: Manifest = serde_json::from_value(value)?;
+        if let Some(root) = &m.receipt_root {
+            if m.receipt_index.is_some() || m.receipt.is_some() {
+                return Err(invalid("database manifest mixes receipt index formats"));
+            }
+            root.validate_version()?;
+        }
         if m.epoch == 0 || m.next_id == 0 {
             return Err(invalid("invalid database epoch or relation id counter"));
         }
@@ -416,8 +433,8 @@ impl DatabaseStore {
         Ok(m)
     }
 
-    fn read_receipt_index(&self, payload: &Payload) -> Result<BTreeMap<String, Receipt>> {
-        if payload.file.bytes > 16 * 1024 * 1024 {
+    fn read_legacy_receipts(&self, payload: &Payload) -> Result<BTreeMap<String, Receipt>> {
+        if payload.file.bytes > MAX_JSON_BYTES {
             return Err(invalid("database receipt index exceeds byte budget"));
         }
         let dir = self.directory(&payload.directory)?;
@@ -428,6 +445,7 @@ impl DatabaseStore {
                 return Err(invalid("receipt index key differs from receipt ID"));
             }
         }
+        self.work.receipt_read(payload.file.bytes)?;
         Ok(map)
     }
 
@@ -646,15 +664,19 @@ impl DatabaseStore {
             .collect())
     }
 
-    /// O(log H) lookup in the persisted receipt index; zero manifest-history traversal.
+    /// Resolve an exact receipt without traversing historical manifests.
     pub fn receipt(&self, id: &str, fingerprint: &str) -> Result<Option<CommitReport>> {
-        let Some(receipt) = self.receipts.get(id) else {
+        let receipt = match self.manifest.as_ref().and_then(|m| m.receipt_root.as_ref()) {
+            Some(root) => root.lookup(self, id)?,
+            None => self.legacy_receipts.get(id).cloned(),
+        };
+        let Some(receipt) = receipt else {
             return Ok(None);
         };
         if receipt.fingerprint != fingerprint {
             return Err(invalid("request identifier reused with different SQL"));
         }
-        Ok(Some(receipt.report.clone()))
+        Ok(Some(receipt.report))
     }
 
     /// Return the latest persisted operator-state descriptor for a view, if any.
@@ -945,11 +967,6 @@ impl DatabaseStore {
         if next.epoch != self.snapshot.epoch.checked_add(1).ok_or(Error::Overflow)? {
             return Err(invalid("database predecessor differs"));
         }
-        if let Some(r) = &receipt {
-            if self.receipts.contains_key(&r.id) {
-                return Err(invalid("request identifier already committed"));
-            }
-        }
         let disk = match fs::read(self.root.join("CURRENT")) {
             Ok(bytes) => {
                 self.work.pointer_read(bytes.len())?;
@@ -1201,18 +1218,20 @@ impl DatabaseStore {
             }
         }
 
-        let mut next_receipts = self.receipts.clone();
-        let receipt_index = if let Some(r) = &receipt {
-            next_receipts.insert(r.id.clone(), r.clone());
-            let file = write_bytes(&dir, "receipts.json", &json_bytes(&next_receipts)?)?;
-            Some(Payload {
-                directory: name.clone(),
-                file,
-            })
-        } else {
-            self.manifest
-                .as_ref()
-                .and_then(|manifest| manifest.receipt_index.clone())
+        let prior_receipt_root = self.manifest.as_ref().and_then(|m| m.receipt_root.as_ref());
+        let (receipt_index, receipt_root) = match receipt {
+            Some(receipt) => (
+                None,
+                Some(receipt_index::Writer::new(self, &dir, &name).stage(
+                    prior_receipt_root,
+                    &self.legacy_receipts,
+                    receipt,
+                )?),
+            ),
+            None => (
+                self.manifest.as_ref().and_then(|m| m.receipt_index.clone()),
+                prior_receipt_root.cloned(),
+            ),
         };
 
         let retained_from_epoch = self.manifest.as_ref().and_then(|m| m.retained_from_epoch);
@@ -1228,7 +1247,8 @@ impl DatabaseStore {
             deltas,
             view_states,
             receipt_index,
-            receipt,
+            receipt_root,
+            receipt: None,
         };
         let manifest = write_bytes(&dir, "manifest.json", &json_bytes(&m)?)?;
         self.work.manifest_write(manifest.bytes)?;
@@ -1246,11 +1266,13 @@ impl DatabaseStore {
         sync_dir(&self.root)?;
         observer(PublishPoint::CurrentDurable)?;
         self.head = Some(head);
+        if m.receipt_root.is_some() {
+            self.legacy_receipts.clear();
+        }
         self.manifest = Some(m);
         self.snapshot = next;
         self.committed_blocks = stage.next_blocks;
         self.committed_schemas = stage.next_schemas;
-        self.receipts = next_receipts;
         Ok(())
     }
 
@@ -1359,6 +1381,7 @@ impl DatabaseStore {
                 .insert(payload.file.name.clone());
         };
 
+        let mut receipt_reachability = receipt_index::Reachability::default();
         for (root, m) in &retained {
             reachable_files
                 .entry(root.directory.clone())
@@ -1383,6 +1406,9 @@ impl DatabaseStore {
             }
             if let Some(p) = &m.receipt_index {
                 mark_payload(&mut reachable_files, p);
+            }
+            if let Some(root) = &m.receipt_root {
+                receipt_reachability.mark(self, root, &mut reachable_files)?;
             }
             for vs in m.view_states.values() {
                 reachable_subdirs

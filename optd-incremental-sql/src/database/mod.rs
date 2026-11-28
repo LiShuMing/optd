@@ -20,6 +20,6 @@ pub use response::{display_rows, CommitReport, DmlWork, SqlResponse};
 pub use sql_session::{IncompatibleStatePolicy, OpenOptions, SqlSession};
 pub use store::{CompactionReport, RetentionPolicy};
 pub use store_work::{
-    FileWork, PayloadIoWork, PayloadWork, RecoveryWork, StoreWork, TableBootstrapWork,
-    TableMaterializationWork,
+    FileWork, PayloadIoWork, PayloadWork, ReceiptIndexWork, RecoveryWork, StoreWork,
+    TableBootstrapWork, TableMaterializationWork,
 };

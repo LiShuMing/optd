@@ -49,6 +49,7 @@
   - [Ideas]()
   - [RFCs]()
 - [Incremental Engine Design]()
+  - [Incremental SQL production readiness](./incremental/production_readiness.md)
   - [Strict Incremental Gap Execution Spec](./incremental/strict_gap_execution_spec.md)
   - [Reusable Execution Templates](./incremental/reusable_execution_templates.md)
   - [Block-Level Checkpoints and Delta Logs](./incremental/block_checkpoints.md)

@@ -87,6 +87,30 @@ pub use crate::work::{
     RowBootstrapWork as TableBootstrapWork, RowMaterializationWork as TableMaterializationWork,
 };
 
+/// Completed receipt-index operations, independent of Arrow and manifest I/O.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReceiptIndexWork {
+    /// Legacy index files and receipt nodes verified and decoded.
+    pub reads: FileWork,
+    /// Receipt nodes serialized and synced before publication.
+    pub writes: FileWork,
+    /// Legacy receipts copied into a new index before publication.
+    pub legacy_receipts_copied: u64,
+}
+
+impl ReceiptIndexWork {
+    fn since(&self, before: &Self) -> Result<Self> {
+        Ok(Self {
+            reads: self.reads.since(&before.reads)?,
+            writes: self.writes.since(&before.writes)?,
+            legacy_receipts_copied: subtract(
+                self.legacy_receipts_copied,
+                before.legacy_receipts_copied,
+            )?,
+        })
+    }
+}
+
 /// Cumulative, host-local SQL database work since this session began opening.
 ///
 /// Read byte volumes describe successfully decoded file lengths, not reader/syscall
@@ -131,6 +155,9 @@ pub struct StoreWork {
     /// Per-epoch consolidated base-table signed delta payloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table_deltas: Option<PayloadIoWork>,
+    /// Actual receipt-index work. Older reports leave this domain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_index: Option<ReceiptIndexWork>,
 }
 
 impl Default for StoreWork {
@@ -151,6 +178,7 @@ impl Default for StoreWork {
             table_leaf_demand: Some(crate::RelationWork::default()),
             table_leaf_validation: Some(crate::RowEncodingWork::default()),
             table_deltas: Some(PayloadIoWork::default()),
+            receipt_index: Some(ReceiptIndexWork::default()),
         }
     }
 }
@@ -234,6 +262,12 @@ impl StoreWork {
                 .table_deltas
                 .as_ref()
                 .zip(before.table_deltas.as_ref())
+                .map(|(a, b)| a.since(b))
+                .transpose()?,
+            receipt_index: self
+                .receipt_index
+                .as_ref()
+                .zip(before.receipt_index.as_ref())
                 .map(|(a, b)| a.since(b))
                 .transpose()?,
         })
@@ -433,6 +467,40 @@ impl StoreWorkCounter {
         self.record(|w| w.manifest_writes.record(bytes))
     }
 
+    pub(super) fn receipt_read(&self, bytes: u64) -> Result<()> {
+        self.record(|work| {
+            let receipts = work
+                .receipt_index
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks receipt index domain"))?;
+            receipts.reads.record(bytes)?;
+            work.checksum_reads.record(bytes)
+        })
+    }
+
+    pub(super) fn receipt_write(&self, bytes: u64) -> Result<()> {
+        self.record(|work| {
+            work.receipt_index
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks receipt index domain"))?
+                .writes
+                .record(bytes)
+        })
+    }
+
+    pub(super) fn receipt_migration(&self, copied: usize) -> Result<()> {
+        self.record(|work| {
+            let receipts = work
+                .receipt_index
+                .as_mut()
+                .ok_or_else(|| invalid("live counter lacks receipt index domain"))?;
+            add(
+                &mut receipts.legacy_receipts_copied,
+                u64::try_from(copied).map_err(|_| Error::Overflow)?,
+            )
+        })
+    }
+
     pub(super) fn start_history(&self) -> Result<()> {
         self.record(|w| add(&mut w.history_traversals, 1))
     }
@@ -583,12 +651,14 @@ mod legacy_table_domains {
             .unwrap()
             .remove("table_leaf_validation");
         value.as_object_mut().unwrap().remove("table_deltas");
+        value.as_object_mut().unwrap().remove("receipt_index");
         let old: StoreWork = serde_json::from_value(value.clone()).unwrap();
         assert!(old.table_materialization.is_none());
         assert!(old.table_bootstrap.is_none());
         assert!(old.table_leaf_demand.is_none());
         assert!(old.table_leaf_validation.is_none());
         assert!(old.table_deltas.is_none());
+        assert!(old.receipt_index.is_none());
         assert_eq!(serde_json::to_value(&old).unwrap(), value);
         let interval = StoreWork::default().since(&old).unwrap();
         assert!(interval.table_materialization.is_none());
@@ -596,5 +666,6 @@ mod legacy_table_domains {
         assert!(interval.table_leaf_demand.is_none());
         assert!(interval.table_leaf_validation.is_none());
         assert!(interval.table_deltas.is_none());
+        assert!(interval.receipt_index.is_none());
     }
 }

@@ -67,6 +67,14 @@ Start with [refresh work accounting](docs/src/incremental/work_accounting.md),
 then R02a. R01b/R01c/R01d extend the same accounting contract before claiming a
 complete end-to-end baseline. R10a adds assertions alongside each implementation.
 
+## Production readiness follow-up
+
+The [production readiness design](docs/src/incremental/production_readiness.md)
+records two open R07c limits at baseline `166eb5f`: the cumulative receipt byte
+ceiling and retention pinned by an idle view checkpoint. The accepted first increment
+covers sharded receipts and checkpoint advancement during compaction.
+R05b, R08, R10b, and R10c retain their own acceptance gates.
+
 ## Evidence ledger
 
 No new TPC runtime or performance qualification is recorded yet. Historical evidence:

@@ -22,7 +22,7 @@ use crate::{Error, Result};
 
 const FORMAT: &str = "optd-incremental-sql-checkpoint/1";
 const SOURCE_FORMAT: &str = "optd-incremental-sql-checkpoint/2";
-const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 static NEXT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 /// All source and output state committed at one logical epoch.

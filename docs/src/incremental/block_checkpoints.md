@@ -45,7 +45,7 @@ Assign every newly constructed `RowBlock` a monotonic process-local `BlockUid(u6
   * Unordered MVs (`ordered == false`, the default for strict incremental views) store `ViewOutput::Blocks(RowBlocks)` in memory and `ViewOutputEntry::BlockRelation(BlockRelationEntry)` on disk, sharing identical O(Δ) block reuse with base tables and lazy chunked `RowTable` scans for `SELECT`.
   * Ordered MVs (`ordered == true`, root `ORDER BY`/`LIMIT`) store `ViewOutput::Ordered(RecordBatch)` and `ViewOutputEntry::OrderedPayload(Payload)` to preserve presentation sequence.
 * **Per-epoch `table_deltas`**: persist the consolidated net signed changes (`TransactionWorkspace::changes`) for every modified base table as weighted Arrow IPC (`tdelta-<table_id>.arrow`) in `ManifestV2.table_deltas`, enabling bounded delta replay in `R07b`.
-* **O(1) Request Receipt Index**: `DatabaseStore` caches all committed `Receipt`s in memory (`BTreeMap<String, Receipt>`) and persists a `receipts.json` snapshot referenced by `ManifestV2.receipt_index` (reused unchanged when a commit has no `receipt`). `DatabaseStore::receipt(id, fingerprint)` performs an O(log H) in-memory lookup with zero manifest-chain traversal (`history_traversals == 0`).
+* **Request receipts**: New identified writes publish a bounded-path immutable receipt index. Existing cumulative JSON indexes migrate on the first identified write. See [production readiness](./production_readiness.md) for format, rollback, and qualification details.
 
 ### 4.3 `StoreWork` Accounting
 
