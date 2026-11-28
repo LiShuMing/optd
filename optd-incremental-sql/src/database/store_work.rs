@@ -35,9 +35,9 @@ impl FileWork {
 /// Serialized payload volume and expanded batch rows, including duplicates.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadWork {
-    /// Number of completed payload operations or reused descriptors.
+    /// Number of completed logical payload operations or reused descriptors (including bundle segments).
     pub files: u64,
-    /// Sum of serialized file lengths; reused bytes are references, not IO.
+    /// Sum of serialized payload lengths; bundled segments exclude the shared footer.
     pub bytes: u64,
     /// Expanded rows decoded, written or referenced by those operations.
     pub rows: u64,
@@ -67,7 +67,7 @@ impl PayloadWork {
 pub struct PayloadIoWork {
     /// Successfully decoded files; checksum passes are counted separately.
     pub read: PayloadWork,
-    /// Successfully serialized, synced and described new files.
+    /// Successfully serialized and synced payloads, including logical bundle segments.
     pub written: PayloadWork,
     /// Existing payload descriptors retained without reading or writing the file.
     pub reused: PayloadWork,
@@ -113,8 +113,8 @@ impl ReceiptIndexWork {
 
 /// Cumulative, host-local SQL database work since this session began opening.
 ///
-/// Read byte volumes describe successfully decoded file lengths, not reader/syscall
-/// traffic. Checksum passes are explicit and must not be mistaken for unique bytes.
+/// Read byte volumes describe decoded files or segments. Checksum reads include
+/// range verification and exclude hashes computed inline while writing a bundle.
 /// Complete operations count even if a later publication barrier fails. Partial
 /// failed helpers, directory operations, fsyncs and comparison CPU work are excluded.
 /// This diagnostic is never stored in receipts and does not certify publication.
@@ -128,8 +128,11 @@ pub struct StoreWork {
     pub manifest_reads: FileWork,
     /// Successfully written manifest files.
     pub manifest_writes: FileWork,
-    /// Complete file hash passes (verified reads and IPC write descriptions).
+    /// Hash passes over files or segments read for verification or IPC write descriptions.
     pub checksum_reads: FileWork,
+    /// Physical view bundle files synchronized before manifest publication (including footer).
+    #[serde(default)]
+    pub view_bundle_writes: FileWork,
     /// Base-table payload operations.
     pub tables: PayloadIoWork,
     /// Materialized-view output payload operations.
@@ -168,6 +171,7 @@ impl Default for StoreWork {
             manifest_reads: FileWork::default(),
             manifest_writes: FileWork::default(),
             checksum_reads: FileWork::default(),
+            view_bundle_writes: FileWork::default(),
             tables: PayloadIoWork::default(),
             view_outputs: PayloadIoWork::default(),
             output_deltas: PayloadIoWork::default(),
@@ -223,6 +227,7 @@ impl StoreWork {
             manifest_reads: self.manifest_reads.since(&before.manifest_reads)?,
             manifest_writes: self.manifest_writes.since(&before.manifest_writes)?,
             checksum_reads: self.checksum_reads.since(&before.checksum_reads)?,
+            view_bundle_writes: self.view_bundle_writes.since(&before.view_bundle_writes)?,
             tables: self.tables.since(&before.tables)?,
             view_outputs: self.view_outputs.since(&before.view_outputs)?,
             output_deltas: self.output_deltas.since(&before.output_deltas)?,
@@ -498,6 +503,25 @@ impl StoreWorkCounter {
                 &mut receipts.legacy_receipts_copied,
                 u64::try_from(copied).map_err(|_| Error::Overflow)?,
             )
+        })
+    }
+
+    pub(super) fn view_bundle(
+        &self,
+        physical_bytes: u64,
+        segments: &[(PayloadKind, u64, usize)],
+    ) -> Result<()> {
+        self.record(|work| {
+            work.view_bundle_writes.record(physical_bytes)?;
+            for &(kind, bytes, rows) in segments {
+                let payload = match kind {
+                    PayloadKind::ViewOutput => &mut work.view_outputs,
+                    PayloadKind::OutputDelta => &mut work.output_deltas,
+                    _ => return Err(invalid("unexpected payload in view bundle")),
+                };
+                payload.written.record(bytes, rows)?;
+            }
+            Ok(())
         })
     }
 

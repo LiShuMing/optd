@@ -1,10 +1,12 @@
 //! A database root is the sole authority for all tables and materialized views.
 //!
-//! Format `optd-sql-database/2` persists base tables and unordered materialized views
+//! Format `optd-sql-database/3` persists base tables and unordered materialized views
 //! as immutable weighted blocks (`RowBlocks`), reusing untouched blocks across epochs
-//! by `BlockUid`. Legacy `optd-sql-database/1` directories are rejected explicitly.
+//! by `BlockUid`. New view blocks and output deltas share a synced per-view file.
 
 mod receipt_index;
+mod view_bundle;
+use view_bundle::ViewBundle;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -30,7 +32,7 @@ use crate::store::{
 };
 use crate::{Error, Result};
 
-const FORMAT: &str = "optd-sql-database/2";
+const FORMAT: &str = "optd-sql-database/3";
 const MAX_HISTORY: usize = 100_000;
 const INLINE_BLOCK_LIMIT: usize = 128;
 static ATTEMPT: AtomicU64 = AtomicU64::new(0);
@@ -158,6 +160,18 @@ struct Root {
 struct Payload {
     directory: String,
     file: FileEntry,
+    /// Byte position in a view bundle; the length and digest describe that segment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u64>,
+}
+
+impl Payload {
+    fn batch(&self, directory: &Path) -> Result<RecordBatch> {
+        match self.offset {
+            Some(offset) => view_bundle::read(directory, &self.file, offset),
+            None => read_batch(directory, &self.file),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -510,7 +524,7 @@ impl DatabaseStore {
         if p.file.bytes > MAX_MATERIALIZED_BYTES as u64 {
             return Err(invalid("database IPC payload exceeds byte budget"));
         }
-        let batch = read_batch(&self.directory(&p.directory)?, &p.file)?;
+        let batch = p.batch(&self.directory(&p.directory)?)?;
         let rows = logical_rows.unwrap_or_else(|| batch.num_rows());
         self.work
             .payload(kind, PayloadAction::Read, p.file.bytes, rows)?;
@@ -768,10 +782,9 @@ impl DatabaseStore {
             let entries = self.read_block_list(&rel_entry.blocks)?;
             let mut persisted = Vec::with_capacity(entries.len());
             for block in &entries {
-                let weighted_batch = read_batch(
-                    &self.directory(&block.payload.directory)?,
-                    &block.payload.file,
-                )?;
+                let weighted_batch = block
+                    .payload
+                    .batch(&self.directory(&block.payload.directory)?)?;
                 loaded.stats.files = loaded.stats.files.checked_add(1).ok_or(Error::Overflow)?;
                 loaded.stats.bytes = loaded
                     .stats
@@ -855,11 +868,15 @@ impl DatabaseStore {
     fn write_block_relation(
         &self,
         stage: &mut CommitStage<'_>,
-        prefix: &str,
         id: u64,
         rows: &TableRows,
-        kind: PayloadKind,
+        mut bundle: Option<&mut ViewBundle<'_>>,
     ) -> Result<BlockRelationEntry> {
+        let (prefix, kind) = if bundle.is_some() {
+            ("v", PayloadKind::ViewOutput)
+        } else {
+            ("t", PayloadKind::Table)
+        };
         let schema = match self.committed_schemas.get(&id) {
             Some(existing) => existing.clone(),
             None => {
@@ -871,6 +888,7 @@ impl DatabaseStore {
                         .payload(kind, PayloadAction::Write, file.bytes, 0)?;
                 }
                 Payload {
+                    offset: None,
                     directory: stage.dir_name.to_owned(),
                     file,
                 }
@@ -891,18 +909,32 @@ impl DatabaseStore {
                 existing.clone()
             } else {
                 let weighted = block.weighted_batch()?;
-                let filename = format!("{prefix}-{id}-b-{seq}.arrow");
-                let file = write_batch(stage.dir, &filename, &weighted)?;
-                self.work
-                    .payload(kind, PayloadAction::Write, file.bytes, block.row_count())?;
+                let payload = match bundle.as_deref_mut() {
+                    Some(writer) => writer.append(&weighted, kind, block.row_count())?,
+                    None => {
+                        let file = write_batch(
+                            stage.dir,
+                            &format!("{prefix}-{id}-b-{seq}.arrow"),
+                            &weighted,
+                        )?;
+                        self.work.payload(
+                            kind,
+                            PayloadAction::Write,
+                            file.bytes,
+                            block.row_count(),
+                        )?;
+                        Payload {
+                            directory: stage.dir_name.to_owned(),
+                            file,
+                            offset: None,
+                        }
+                    }
+                };
                 BlockEntry {
                     min_key_sha256: block.min_key_sha256(),
                     row_count: block.row_count(),
                     distinct_entries: block.distinct_entries(),
-                    payload: Payload {
-                        directory: stage.dir_name.to_owned(),
-                        file,
-                    },
+                    payload,
                 }
             };
             stage.next_blocks.insert(uid, entry.clone());
@@ -921,6 +953,7 @@ impl DatabaseStore {
             BlockListRef::External {
                 block_count,
                 payload: Payload {
+                    offset: None,
                     directory: stage.dir_name.to_owned(),
                     file,
                 },
@@ -943,6 +976,7 @@ impl DatabaseStore {
         let empty = RecordBatch::new_empty(rows.schema());
         let schema_file = write_batch(stage.dir, &format!("schema-{prefix}.arrow"), &empty)?;
         let schema = Payload {
+            offset: None,
             directory: stage.dir_name.to_owned(),
             file: schema_file,
         };
@@ -964,6 +998,7 @@ impl DatabaseStore {
                     row_count: block.row_count(),
                     distinct_entries: block.distinct_entries(),
                     payload: Payload {
+                        offset: None,
                         directory: stage.dir_name.to_owned(),
                         file,
                     },
@@ -984,6 +1019,7 @@ impl DatabaseStore {
             BlockListRef::External {
                 block_count,
                 payload: Payload {
+                    offset: None,
                     directory: stage.dir_name.to_owned(),
                     file,
                 },
@@ -1033,6 +1069,7 @@ impl DatabaseStore {
                 self.work
                     .payload(kind, PayloadAction::Write, file.bytes, batch.num_rows())?;
                 Ok(Payload {
+                    offset: None,
                     directory: name.clone(),
                     file,
                 })
@@ -1082,15 +1119,15 @@ impl DatabaseStore {
                     }
                     old.data.clone()
                 }
-                None => {
-                    self.write_block_relation(&mut stage, "t", t.id, &t.rows, PayloadKind::Table)?
-                }
+                None => self.write_block_relation(&mut stage, t.id, &t.rows, None)?,
             };
             tables.insert(n.clone(), TableEntry { id: t.id, data });
         }
 
         let mut views = BTreeMap::new();
+        let mut deltas = BTreeMap::new();
         for (n, v) in &next.views {
+            let mut bundle = ViewBundle::new(&dir, &name, v.id);
             let reusable = match self.snapshot.views.get(n) {
                 Some(old) if old.id == v.id && old.output.same_contents(&v.output)? => self
                     .manifest
@@ -1141,23 +1178,24 @@ impl DatabaseStore {
                     }
                     old.output.clone()
                 }
-                None => match &v.output {
-                    ViewOutput::Blocks(rows) => {
-                        ViewOutputEntry::BlockRelation(self.write_block_relation(
-                            &mut stage,
-                            "v",
-                            v.id,
-                            rows,
-                            PayloadKind::ViewOutput,
-                        )?)
+                None => {
+                    match &v.output {
+                        ViewOutput::Blocks(rows) => ViewOutputEntry::BlockRelation(
+                            self.write_block_relation(&mut stage, v.id, rows, Some(&mut bundle))?,
+                        ),
+                        ViewOutput::Ordered(batch) => ViewOutputEntry::OrderedPayload(
+                            bundle.append(batch, PayloadKind::ViewOutput, batch.num_rows())?,
+                        ),
                     }
-                    ViewOutput::Ordered(batch) => ViewOutputEntry::OrderedPayload(write_payload(
-                        PayloadKind::ViewOutput,
-                        format!("view-{}.arrow", v.id),
-                        batch,
-                    )?),
-                },
+                }
             };
+            if let Some(delta) = next.deltas.get(n) {
+                deltas.insert(
+                    n.clone(),
+                    bundle.append(delta, PayloadKind::OutputDelta, delta.num_rows())?,
+                );
+            }
+            bundle.finish(&self.work)?;
             views.insert(
                 n.clone(),
                 ViewEntry {
@@ -1185,21 +1223,9 @@ impl DatabaseStore {
             })
             .collect::<Result<_>>()?;
 
-        let deltas = next
-            .deltas
-            .iter()
-            .map(|(n, b)| {
-                let id = next
-                    .views
-                    .get(n)
-                    .ok_or_else(|| invalid("unbound output delta"))?
-                    .id;
-                Ok((
-                    n.clone(),
-                    write_payload(PayloadKind::OutputDelta, format!("delta-{id}.arrow"), b)?,
-                ))
-            })
-            .collect::<Result<_>>()?;
+        if deltas.len() != next.deltas.len() {
+            return Err(invalid("unbound output delta"));
+        }
 
         let mut view_states = BTreeMap::new();
         for (n, v) in &next.views {
@@ -1485,6 +1511,7 @@ impl DatabaseStore {
         let mut receipt_reachability = receipt_index::Reachability::default();
         for (root, manifest) in retained {
             reachable.mark(&Payload {
+                offset: None,
                 directory: root.directory,
                 file: root.manifest,
             });

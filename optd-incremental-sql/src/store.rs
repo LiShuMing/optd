@@ -664,8 +664,11 @@ pub(crate) fn write_batch(directory: &Path, name: &str, batch: &RecordBatch) -> 
 }
 
 pub(crate) fn read_batch(directory: &Path, entry: &FileEntry) -> Result<RecordBatch> {
-    let file = verified_file(directory, entry)?;
-    let mut reader = FileReader::try_new(file, None)?;
+    decode_batch(verified_file(directory, entry)?)
+}
+
+pub(crate) fn decode_batch(reader: impl Read + Seek) -> Result<RecordBatch> {
+    let mut reader = FileReader::try_new(reader, None)?;
     let batch = reader
         .next()
         .transpose()?

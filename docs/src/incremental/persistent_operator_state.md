@@ -1,5 +1,7 @@
 # Persistent Operator State and Bounded-Replay Recovery (R07b)
 
+> **当前磁盘格式。** 本文记录 v2 阶段的设计与验证。当前 SQL 数据库从空仓库使用 v3，结果块与输出变更日志的存储布局见[视图合并持久化设计](./view_output_bundle.md)。
+
 **Status:** accepted · 2026-11-21
 **Scope:** `optd-incremental-sql` persisted view operator states (`optd-operator-state/1`), plan/rule fingerprinting, checkpoint + bounded delta replay recovery in `SqlSession::open`, and `RecoveryWork` accounting.
 

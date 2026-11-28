@@ -163,6 +163,7 @@ impl<'a> Writer<'a> {
         let file = write_bytes(self.directory, &name, bytes)?;
         self.store.work.receipt_write(file.bytes)?;
         Ok(Payload {
+            offset: None,
             directory: self.name.to_owned(),
             file,
         })

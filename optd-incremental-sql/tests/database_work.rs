@@ -23,6 +23,11 @@ fn payload_bytes(root: &Path, payload: &Value) -> u64 {
         .join(payload["directory"].as_str().unwrap())
         .join(payload["file"]["name"].as_str().unwrap());
     let actual = std::fs::metadata(path).unwrap().len();
+    if let Some(offset) = payload["offset"].as_u64() {
+        let bytes = payload["file"]["bytes"].as_u64().unwrap();
+        assert!(offset + bytes <= actual - 8);
+        return bytes;
+    }
     assert_eq!(actual, payload["file"]["bytes"].as_u64().unwrap());
     actual
 }
@@ -130,6 +135,23 @@ async fn file_counts_match_serialized_files_and_reuse_untouched_blocks() {
             after.output_deltas.written.bytes - before.output_deltas.written.bytes,
             payload_bytes(root.path(), &m["deltas"]["v"])
         );
+        let delta = &m["deltas"]["v"];
+        let bundle = root
+            .path()
+            .join(head_dir)
+            .join(delta["file"]["name"].as_str().unwrap());
+        assert_eq!(
+            after.view_bundle_writes.files - before.view_bundle_writes.files,
+            1
+        );
+        assert_eq!(
+            after.view_bundle_writes.bytes - before.view_bundle_writes.bytes,
+            std::fs::metadata(bundle).unwrap().len()
+        );
+        assert_eq!(
+            after.view_bundle_writes.bytes - before.view_bundle_writes.bytes,
+            written_view_bytes + delta["file"]["bytes"].as_u64().unwrap() + 8
+        );
         let td_written = after.table_deltas.as_ref().unwrap().written.bytes
             - before.table_deltas.as_ref().unwrap().written.bytes;
         assert_eq!(
@@ -138,10 +160,7 @@ async fn file_counts_match_serialized_files_and_reuse_untouched_blocks() {
         );
         assert_eq!(
             after.checksum_reads.bytes - before.checksum_reads.bytes,
-            (after.tables.written.bytes - before.tables.written.bytes)
-                + (after.view_outputs.written.bytes - before.view_outputs.written.bytes)
-                + (after.output_deltas.written.bytes - before.output_deltas.written.bytes)
-                + td_written
+            (after.tables.written.bytes - before.tables.written.bytes) + td_written
         );
         assert_eq!(
             after.manifest_writes.bytes - before.manifest_writes.bytes,
