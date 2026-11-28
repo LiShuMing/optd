@@ -51,6 +51,7 @@
 - [Incremental Engine Design]()
   - [增量 SQL 生产就绪评估](./incremental/production_readiness.md)
   - [视图结果与输出变更日志合并持久化](./incremental/view_output_bundle.md)
+  - [Q6 规模实验的评审答复](./incremental/q6_h002_review.md)
   - [Strict Incremental Gap Execution Spec](./incremental/strict_gap_execution_spec.md)
   - [Reusable Execution Templates](./incremental/reusable_execution_templates.md)
   - [Block-Level Checkpoints and Delta Logs](./incremental/block_checkpoints.md)
