@@ -45,7 +45,7 @@ Assign every newly constructed `RowBlock` a monotonic process-local `BlockUid(u6
   * Unordered MVs (`ordered == false`, the default for strict incremental views) store `ViewOutput::Blocks(RowBlocks)` in memory and `ViewOutputEntry::BlockRelation(BlockRelationEntry)` on disk, sharing identical O(Δ) block reuse with base tables and lazy chunked `RowTable` scans for `SELECT`.
   * Ordered MVs (`ordered == true`, root `ORDER BY`/`LIMIT`) store `ViewOutput::Ordered(RecordBatch)` and `ViewOutputEntry::OrderedPayload(Payload)` to preserve presentation sequence.
 * **Per-epoch `table_deltas`**: persist the consolidated net signed changes (`TransactionWorkspace::changes`) for every modified base table as weighted Arrow IPC (`tdelta-<table_id>.arrow`) in `ManifestV2.table_deltas`, enabling bounded delta replay in `R07b`.
-* **Request receipts**: New identified writes publish a bounded-path immutable receipt index. Existing cumulative JSON indexes migrate on the first identified write. See [production readiness](./production_readiness.md) for format, rollback, and qualification details.
+* **请求回执。** 新的带 ID 写入发布不可变的分片回执索引，查找路径的深度有上限。首次成功执行带 ID 的写入时，旧版累计 JSON 索引随该次写入一起迁移。格式、回退条件和验证结果见[增量 SQL 生产就绪评估](./production_readiness.md)。
 
 ### 4.3 `StoreWork` Accounting
 

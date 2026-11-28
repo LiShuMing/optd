@@ -59,12 +59,12 @@ A view state checkpoint directory (`states/view-<id>/`) stores a hashed `state-m
 * On subsequent commits affecting view `v`:
   * If `affected_commits_since_checkpoint < checkpoint_interval`, `ManifestV2.view_states[v]` carries forward the existing `ViewStateRef` with zero operator-state disk writes.
   * When `affected_commits_since_checkpoint >= checkpoint_interval`, a new `ViewStateCheckpoint` is written atomically in the epoch directory.
-* On compaction, advance old recovery points before pruning. An unchanged view can reuse its state payloads. A changed view receives a new checkpoint of its current committed state. Publish the new recovery points and history floor together at the same database epoch. See [production readiness](./production_readiness.md).
+* 压缩时，先推进旧检查点，再清理历史版本。未变化的视图可复用已有状态文件；发生变化的视图则根据当前已提交状态写入新检查点。新检查点和历史保留下界在同一数据库逻辑版本一起发布。详见[增量 SQL 生产就绪评估](./production_readiness.md)。
 * On `SqlSession::open`:
   1. Compile each view's strict `IncrementalPlan` from table schemas only (`SqlView::compile_plan`, zero row scans).
   2. Verify `ViewStateRef.plan_fingerprint == compiled_fingerprint`.
   3. Load the `checkpoint_epoch` operator states and intermediate relations.
-  4. Walk retained metadata after the checkpoint and decode table deltas only for the view's dependencies. Replay up to `K - 1` affected commits via `SqlView::prepare` and `acknowledge` on the normally checkpointed path. Unrelated metadata epochs can still lie between the checkpoint and database head.
+  4. 遍历检查点之后保留的元数据，仅解码该视图依赖的表增量。按正常检查点策略恢复时，通过 `SqlView::prepare` 和 `acknowledge` 最多重放 `K - 1` 次影响视图的提交。检查点与数据库当前版本之间仍可能夹有与该视图无关的元数据版本。
   5. Verify final view output equals committed `ViewData.output` (exact bag equality, plus exact order when `ordered == true`).
 
 ### 4.4 `RecoveryWork` Accounting

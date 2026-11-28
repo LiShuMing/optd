@@ -67,19 +67,11 @@ Start with [refresh work accounting](docs/src/incremental/work_accounting.md),
 then R02a. R01b/R01c/R01d extend the same accounting contract before claiming a
 complete end-to-end baseline. R10a adds assertions alongside each implementation.
 
-## Production readiness follow-up
+## 生产就绪进展
 
-The [production readiness design](docs/src/incremental/production_readiness.md)
-records two open R07c limits at baseline `166eb5f`: the cumulative receipt byte
-ceiling and retention pinned by an idle view checkpoint. The accepted first increment
-covers sharded receipts and checkpoint advancement during compaction.
-R05b, R08, R10b, and R10c retain their own acceptance gates.
+在基线 `166eb5f`，R07c 有两个存储限制：历史回执累计达到大小上限后，新的带 ID 写入会失败；空闲视图的旧检查点会阻碍历史回收。[生产就绪评估](docs/src/incremental/production_readiness.md)记录了已接受的首批修复方案、验证方法和本地对照结果。
 
-**Verified local storage increment.** `412e186` implements sharded receipt
-publication. `41fa259` advances old checkpoints during compaction and records
-the paired release comparison. The design records verified correctness,
-durability, and local storage evidence. Owner review is required for the next
-implementation design. Production shadow qualification needs a target workload.
+**已完成本地验证。** `412e186` 实现回执分片发布，`41fa259` 实现在压缩时推进旧检查点，并提供发布构建的对照脚本。两项修改已验证结果正确性、持久性和本地存储开销。R05b、R08、R10b 和 R10c 各自的验收条件仍需满足。下一阶段的实现方案需要项目负责人评审，生产影子验证还需要目标负载。
 
 ## Evidence ledger
 

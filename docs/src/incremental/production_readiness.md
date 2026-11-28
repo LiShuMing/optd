@@ -1,95 +1,96 @@
-# Incremental SQL production readiness
+# 增量 SQL 生产就绪评估
 
-**Status:** accepted for the first storage increment · 2026-11-28
-**Scope:** Bound the local SQL store's receipt and recovery work, qualify ordered SQL and Iceberg ingestion, and measure the effect on a target workload. This proposal specifies the first storage increment and its acceptance criteria. Later increments have their own reviewed designs.
+**评审状态**　首批存储方案已接受（`accepted`），2026-11-28。
 
-## 1. Problem
+**范围**　本文给出本地 SQL 存储的请求回执与恢复方案、验收条件及实测结果。后续工作涵盖有序 SQL、Iceberg 数据接入和目标负载验证，各阶段的实现方案需单独评审。
 
-At baseline `166eb5f82cbd4af6fa5319f26b85e73410356bf0`, every identified write clones and serializes all request receipts. The cumulative JSON file has a 16 MiB cap. Crossing it permanently prevents further identified writes until the stored receipt representation changes. Compaction preserves the receipt index. A view whose checkpoint has stopped advancing pins the retention floor even when subsequent writes touch only unrelated tables. The history walker admits at most 100,000 manifests.
+## 1. 待解决的问题
 
-`ORDER BY ... LIMIT` can block strict MV creation after a valid incremental aggregate. The typed Iceberg adapter decodes both endpoints for each changed source and requires its qualified local catalog and a stable, delete-free source profile. Local transaction and crash tests leave capacity, tail latency, and host-loss recovery unqualified. The original DataFusion bridge has panic paths and takes the shared optimizer out of its mutex while converting a physical plan.
+在基线版本 `166eb5f82cbd4af6fa5319f26b85e73410356bf0`，每次携带请求 ID 的写入都会复制并序列化全部历史回执。累计 JSON 文件上限为 16 MiB。一旦下一次写入将超过上限，后续带 ID 的写入就会持续失败。压缩会保留完整回执索引，无法解除这一限制。另一个问题是，即使后续写入只涉及无关表，只要某个视图的检查点停留在旧版本，压缩就必须为它保留历史。历史遍历最多支持 100,000 份清单。
 
-## 2. Constraints and evidence
+即使聚合本身支持增量维护，末尾的 `ORDER BY ... LIMIT` 仍可能使严格增量物化视图无法创建。类型化 Iceberg 适配器对每个发生变化的数据源都要解码起止两个快照，目前只验证了本地目录、稳定模式且没有删除文件的组合。本地事务和崩溃测试尚未验证生产容量、尾延迟或整机丢失后的恢复能力。原有 Optd/DataFusion 桥接层还存在可能触发 panic 的路径，并会在物理计划转换期间从互斥锁中取出共享优化器。
 
-The owner accepted the first storage increment and selected controlled local comparison for this run. Target production qualification remains a separate gate.
+## 2. 约束与基线证据
 
-- Preserve exact request identity, original response and conflict rejection forever under the current API. Any future receipt expiry must define a request fencing contract before allowing a formerly used ID to execute again.
-- `CURRENT` remains the local publication authority. A failed candidate must change neither visible rows nor which request IDs are acknowledged. A lost response after publication must remain unambiguous after reopen.
-- Retain the requested trailing history and every block, receipt and operator-state payload referenced by it. No reader or writer visibility change is allowed during compaction.
-- The baseline local receipt fixture with 15,155 synthetic entries was 128 bytes below the cumulative cap. A normal identified write failed, the exact `CURRENT` bytes stayed intact, and an old request replayed after reopening. A separate 12-write fixture produced 1,110 bytes after the first request and 13,320 bytes after the twelfth. An idle view checkpoint at epoch 3 forced compaction at epoch 15 with a retention request of one to keep 13 manifests.
-- The baseline unit and integration runs on macOS arm64 and Rust 1.100.1 passed 365 default tests and 379 Iceberg-feature tests. The recorded TPC plan counts describe plan admission. Target workloads require separate correctness and capacity qualification.
+项目负责人已接受首批存储方案，并选择先做受控的本地对照。目标生产环境仍需独立验证。
 
-## 3. Options considered
+- 现有 API 要求永久保留请求 ID、原始响应及对冲突请求的拒绝行为。将来若要让回执过期，必须先定义如何隔离旧请求，避免已使用的 ID 被再次执行。
+- 本地存储以 `CURRENT` 为发布依据。发布前失败，可见行和已确认的请求 ID 均应保持原状。发布后即使响应丢失，重新打开仓库也必须能确定请求结果。
+- 保留用户指定的最近若干版本，以及这些版本引用的全部数据块、回执和算子状态。压缩期间，读者和写者看到的数据应保持一致。
+- 基线的一组本地测试包含 15,155 条合成回执，距离累计上限仅差 128 字节。一次正常的带 ID 写入失败，`CURRENT` 逐字节保持原样，重新打开后仍能重放旧请求。另一组测试中，回执文件从首次写入后的 1,110 字节增长到第 12 次后的 13,320 字节。空闲视图的检查点停在版本 3，到版本 15 时请求只保留一个版本，压缩仍保留了 13 份清单。
+- 在 macOS arm64 和 Rust 1.100.1 上，基线默认配置通过 365 项测试，启用 Iceberg 后通过 379 项测试。已有 TPC 统计记录的是通过计划准入检查的查询数。目标负载的结果正确性和容量需要另行验证。
 
-- Increase the receipt byte limit or give receipts a TTL. Raising the cap leaves write amplification and a later failure. Expiry without fencing changes retry semantics.
-- Write each receipt beside its transaction and rebuild a receipt index by scanning epochs. Lookup after restart and compaction would then depend on unbounded history.
-- Publish a root for an immutable sharded receipt index and refresh old view checkpoints during compaction. The same local transaction root commits both operational records and data. Select this option.
+## 3. 备选方案
 
-## 4. Decision
+- **提高回执上限或设置过期时间。** 提高上限只能推迟失败，写放大仍会随历史累积。缺少旧请求隔离机制时，回执过期会改变重试语义。
+- **按事务存放回执，通过扫描历史版本重建索引。** 重启或压缩后的查询成本将随历史长度增长。
+- **采用不可变分片索引，并在压缩时推进旧检查点。** 同一个本地事务根可以原子发布数据和配套记录。首批实现采用此方案。
 
-### 4.1 Store receipts in bounded shards
+## 4. 设计决策
 
-Keep reading existing `optd-sql-database/2` manifests with the legacy `receipt_index` payload. Introduce an optional, versioned receipt root whose nodes are referenced by hashed payload descriptors. New roots and legacy index payloads are mutually exclusive. Migrate the legacy map on the first successful identified write by including every existing ID and original report in the same publication as the new write. A reader encountering an unknown root version fails before admitting writes.
+### 4.1 将回执存入大小受限的分片
 
-Route by a stable SHA-256 digest of the exact request ID. Use narrow internal nodes and bounded sorted leaf shards. Split by the next digest nibble when a leaf reaches its target byte size. A large individual receipt uses a leaf by itself, subject to the existing individual JSON byte budget. Check IDs for exact equality inside leaves and return an error on a conflicting fingerprint or a directory or hash invariant violation. Use the existing JSON and verified-file helpers. Limit fanout and stop at the digest width. Report theoretical digest collisions without executing a duplicate ID. Storing a new ID writes the affected leaf and its ancestor path. Requests without an ID reuse the root. Open and retry use the root and a bounded path without traversing historical manifests on behalf of the receipt lookup.
+继续支持读取 `optd-sql-database/2` 清单中的旧 `receipt_index`。清单可改为保存带格式版本的回执索引根，各节点由含哈希值的文件描述符引用。同一清单只能使用一种索引格式。首次成功执行带 ID 的写入时，将所有旧 ID 及其原始报告迁入新索引，与本次写入一起发布。读取器遇到未知的根格式版本时，必须在接受写入前报错。
 
-Before publication, make the new receipt nodes and manifest durable. After publication, old roots remain valid for retained history. Walk the union of reachable receipt payloads from the retained roots before sweep and deduplicate shared subtrees by verified payload identity. Missing or corrupt referenced node data aborts the sweep. Account for receipt files and bytes read, written, and migrated independently of Arrow payloads and manifest bytes.
+对完整请求 ID 计算稳定的 SHA-256 摘要，沿摘要选择分支。内部节点限制分支数，叶分片按键排序，并设定目标字节数。叶分片达到目标大小时，使用摘要接下来的 4 位拆分。单条大回执可以独占一个叶节点，仍受单个 JSON 文件大小上限约束。查找时在叶内精确比较 ID。请求指纹冲突、目录结构或哈希校验异常均须报错。复用现有 JSON 和文件校验逻辑，树深限制在摘要位数以内。即便发生理论上的摘要碰撞，也应报告错误，避免重复执行请求。通常新增 ID 只需写入对应叶及祖先路径；分裂时还会写入拆出的节点。无 ID 写入复用现有根。打开仓库和重试请求时，只需沿有限深度的索引路径查回执，无须为此扫描历史清单。
 
-### 4.2 Advance recovery during compaction
+先持久化新节点和清单，再发布。只要旧版本仍在保留范围，其索引根就必须可用。清理前，从所有保留的根遍历可达回执文件，按已校验的文件标识对共享子树去重。如果任何被引用的节点缺失或损坏，终止清理。分别统计回执读取、写入和迁移的文件数与字节数，单独核算 Arrow 数据和清单的开销。
 
-Determine the floor from the requested trailing epochs and current database head. For each checkpoint older than that floor, move its reference forward without writing a state snapshot only if its validated state and source dependencies already represent the head. Initially use the persisted zero-affected-commits invariant and an admitted view identity for that check. For stale checkpoints with relevant writes or unsupported fast promotion, export the current committed view state under the exclusive store lock. Preserve each view's engine epoch, plan fingerprint and ordered output. Reuse existing state export and block persistence code.
+### 4.2 在压缩时推进恢复检查点
 
-Publish the updated checkpoints and retention floor together at the same logical database epoch. Keep old payloads and deltas reachable until the new `CURRENT` is durable. A failure after publication is resolved by reopen. Resume or repeat compaction after a crash. Ensure retained output replay starts from the retained baseline and that recovery loads only the table deltas it needs to restore each view. Report checkpoint bytes, reclaimed bytes, retained epochs, and recovery metadata and payload reads.
+根据用户要求保留的最近版本数和数据库当前版本，确定最早需要保留的版本。对于早于该版本的检查点，只有已验证的视图状态和源表依赖已能代表当前版本时，才能直接推进引用，复用原状态文件。首批实现检查已持久化的“自检查点以来影响该视图的提交数为零”条件，并核对视图标识。若期间有相关写入，或视图不满足快速推进条件，则在存储独占锁内导出当前已提交的视图状态。复用现有的状态导出和数据块持久化逻辑，保留视图的引擎版本、计划指纹和输出顺序。
 
-### 4.3 Follow-on increments
+在同一数据库逻辑版本一并发布更新后的检查点和历史保留下界。在新 `CURRENT` 持久化前，旧文件和增量必须仍可访问。发布后发生故障，可重新打开仓库确定结果；进程崩溃后可继续或重新执行压缩。保留版本的输出应能从保留区间的起点重放，恢复每个视图时只加载其所需的表增量。统计检查点字节数、回收字节数、保留版本数，以及恢复时读取的元数据和数据文件。
 
-| Increment | Implementation boundary | Acceptance witness |
+### 4.3 后续阶段
+
+| 阶段 | 实现范围 | 验收方法 |
 | --- | --- | --- |
-| Strict ordered SQL, R05b | Start with finite `ORDER BY`/Top-K over qualified scalar keys. Maintain an ordered index with signed duplicate counts and seek the post-change prefix to refill deletions. Preserve SQL NULL ordering, direction, offsets, membership, and physical output sequence. Require proven or checked total ordering when boundary ties would expose ambiguous membership. Admit only covered plan shapes and persist versioned state. | Use the exact original SQL against a full SQL oracle. Include cutoff ties, NULLs, duplicate rows, deletes, order-only changes, rollback, restart, and fixed-delta scaling. Republish both original and relational-core plan catalogs separately. |
-| Incremental Iceberg input, R08 | First qualify immutable Parquet file additions and removals under the existing typed snapshot contract. Bind a validated file inventory to the committed source position and read changed files. Revalidate metadata lineage and projected schema. Account separately for metadata, decoded rows, checkpoint writes, and source-cache work. | On the same exact snapshot tuples, compare signed deltas and the final result against full endpoint scans. Cover append, overwrite, compaction of equal rows, retries, missing files and a source cursor recovery interruption. |
-| Target Iceberg integration | Design remote catalog and delete-file handling against the selected production catalog, storage and writer modes. Specify snapshot retention and per-file delete applicability, authenticated configuration, and output publication independently of the local source cursor. | In the approved target environment, compare position and equality delete effects to the existing full snapshot reader and exercise retained snapshots, lost responses and retries. |
-| Storage limits and operations | Add workload-specific resource admission and checkpoint telemetry, and exercise capacity under checkpoint, compaction, long-running randomized workloads and restart. Design spillable state and multi-host operation independently if the target cannot meet its envelope on one host. | Publish a measured capacity envelope and verify the required restart, restore, and rollback paths within the target SLO. |
-| Original Optd/DataFusion bridge | Replace supported error-path panics with typed errors, preserve optimizer ownership on fallible or canceled planning, and qualify explicit native planner fallback before execution. Use a separate branch increment from the SQL engine. | Differential SQL results, forced conversion errors, cancellation, concurrent sessions, planner fallback, and measured planning and execution latency on the chosen workload. |
+| 严格增量有序 SQL（R05b） | 先支持以已验证标量键排序、结果条数有限的 `ORDER BY` / Top-K。用有序索引维护重复行的带符号计数，删除后从更新后的排序前缀补足结果。保留 SQL 对 NULL、排序方向、偏移量、入选行和输出顺序的语义。若边界并列会使入选行不确定，须证明或验证排序键具有全序。仅接受已覆盖的计划形态，并为持久化状态标注版本。 | 将原始 SQL 的增量结果与全量执行结果比较。覆盖边界并列、NULL、重复行、删除、仅顺序变化、回滚、重启和固定增量下的规模测试。分别公布原始 SQL 与关系核心计划的准入结果。 |
+| Iceberg 增量输入（R08） | 先在现有类型化快照契约下验证不可变 Parquet 文件的增删。将已验证的文件清单绑定到已提交的数据源位置，读取发生变化的文件，重新校验元数据沿袭关系和投影模式。分别统计元数据、解码行数、检查点写入和源缓存开销。 | 对同一组起止快照，将带符号增量和最终结果与两端快照的全量扫描比较。覆盖追加、覆写、行内容不变的文件压实、重试、文件缺失，以及恢复源游标时发生中断。 |
+| 目标 Iceberg 环境接入 | 围绕选定的生产目录、存储和写入模式设计远程目录及删除文件支持。明确定义快照保留策略、每个数据文件适用的删除记录和认证配置，独立定义输出发布与本地源游标的关系。 | 在获准的环境中，对照现有全量快照读取器，比较位置删除和等值删除的效果，验证保留快照、响应丢失和请求重试。 |
+| 存储容量与运维 | 针对负载增加资源准入和检查点监测，在生成检查点、压缩、长时间随机负载及重启下测量容量。若单机资源不足以满足目标，再单独设计状态溢写和多机运行。 | 公布实测容量范围，验证重启、备份恢复和回滚均达到目标服务水平（SLO）。 |
+| 原有 Optd/DataFusion 桥接层 | 将已支持路径上的错误以类型化错误返回，避免 panic。计划编制失败或取消时仍保留优化器所有权，并验证执行前显式回退到原生计划器的行为。与 SQL 引擎分开实施。 | 比对 SQL 结果，覆盖强制转换错误、取消、并发会话和计划器回退，并在目标负载上测量计划编制与执行延迟。 |
 
-## 5. Failure modes and recovery
+## 5. 故障与恢复
 
-- Before `CURRENT` is durable, keep the previous receipt root and retention floor authoritative. Orphaned attempts can be collected later.
-- After `CURRENT` is durable, reopening yields the new checkpoint and receipt root even if the operation returned an error. The same request returns its stored outcome. A different request body under that ID stays rejected.
-- Retention release requires reachable checkpoint payloads and an exact committed head. A failed state export, receipt migration, or validation leaves the older retained lineage available.
-- A single outstanding request report can still exceed the individual JSON budget. Reject it before publication and preserve prior request identities. Do not use dropping receipts as recovery.
+- 在新 `CURRENT` 持久化前，旧回执根与历史保留下界继续生效。失败尝试留下的孤立文件可稍后回收。
+- 新 `CURRENT` 持久化后，即使调用返回错误，重新打开也应看到新检查点和回执根。同一请求应返回已保存的结果，同一 ID 携带不同请求内容时应被拒绝。
+- 释放历史版本前，必须确认检查点文件可达且对应准确的已提交版本。状态导出、回执迁移或校验失败时，旧版本链仍应可用。
+- 单个请求报告仍可能超出单个 JSON 文件的上限。此时在发布前拒绝写入，保留已有请求的身份记录，避免通过删除回执来恢复写入。
 
-## 6. Acceptance criteria
+## 6. 验收条件
 
-### First storage increment
+### 首批存储修复
 
-1. Read a baseline warehouse, replay old IDs, migrate on the first new identified write and reopen. Include a valid legacy fixture within 128 bytes of the legacy cap. Confirm the same write failed on the baseline, then succeeds on the candidate while every old ID remains resolvable and conflicting bodies stay rejected.
-2. Vary prior IDs at fixed statement, table size and request report shape. Record per-write receipt bytes and files, lookup work, process memory and durable commit latency. Prove that each successful post-migration write modifies only the route and leaf, including shard splits. Ensure the store reopens after cumulative receipts exceed the old cap.
-3. Exercise unrelated writes after view creation and after one relevant write. With retention of one and compaction at the same logical head, demonstrate floor advancement, bounded recovery metadata work and exact full SQL results. Include a transaction with relevant input changes and empty output delta to validate fast promotion eligibility.
-4. Inject failures on both sides of `CURRENT` publication for identified commits, migration and compaction. Run real process death checks as well as deterministic fault tests. Confirm old and new epoch visibility, request replay, post-compaction writes, and output-history verification. Validate that corrupt receipt paths fail before sweep and never look like a new request.
+1. 打开基线仓库并重放旧 ID，首次写入新 ID 时触发迁移，再重新打开。构造与旧上限相差不超过 128 字节的有效仓库，验证同一次写入在基线失败、在候选版本成功，所有旧 ID 仍可查询，内容冲突的请求仍被拒绝。
+2. 固定 SQL 语句、表大小和请求报告结构，改变历史 ID 数量。记录每次写入的回执字节数和文件数、查找开销、进程内存和持久化提交延迟。验证迁移后每次成功写入只改动对应路径及叶分片，覆盖分片拆分，并确认累计回执超过旧上限后仍可重新打开仓库。
+3. 分别在创建视图后、以及对视图做一次相关写入后，连续执行无关写入。在同一数据库逻辑版本上执行压缩并要求只保留一个版本，验证历史下界能够推进、恢复所需元数据工作量受限，且结果与全量 SQL 精确一致。另测相关输入变化但输出增量为空的事务，检查能否正确判断快速推进资格。
+4. 对带 ID 的提交、迁移和压缩，在发布 `CURRENT` 的前后注入故障。结合真实进程终止与可重复的故障注入测试，检查新旧版本可见性、请求重放、压缩后写入和输出历史。回执路径损坏时，必须在清理文件前失败，并避免将原 ID 当作新请求处理。
 
-### Controlled and production evidence
+### 本地对照与生产验证
 
-- Pin the baseline commit, candidate commit, lockfile, toolchain, release build profile, hardware, storage filesystem and input fixture identities. Run both binaries in isolated new warehouses on the same target machine, alternate run order, and record warm-up, sample counts, every run and timeouts.
-- Report the effect of each increment independently. For receipts compare physical bytes and commit latency across prior-ID counts. For compaction compare retained epochs, reclaimed bytes and reopen time. For Top-K and source ingestion compare planned or decoded work and result equality as separate measurements. Use repeated unchanged-work and changing-work windows.
-- Compare incremental maintenance with a full-query oracle over identical source epochs and the same original SQL. Check typed results, signed changes and recovery output before interpreting any latency measurement. Report p50/p95/p99 where sample counts support them, plus peak RSS, disk growth, failover or restart duration and result freshness.
-- For production claims run a read-only or shadow replay of authorized inputs on the actual target storage or a user-approved equivalent. Keep output and checkpoint locations isolated. Agree the target query set, source types, peak change sizes, and acceptance limits ahead of time. Report synthetic or development-hardware measurements as controlled evidence and record the target production result separately.
+- 固定基线与候选提交、依赖锁文件、工具链、发布构建配置、硬件、文件系统及输入样本标识。在同一台目标机器上使用独立的新仓库运行两套二进制，交替安排运行顺序，记录预热过程、样本数、每次运行结果和超时。
+- 各阶段独立报告收益。回执比较不同历史 ID 数量下的实际写入字节数与提交延迟，压缩比较保留版本数、回收字节数与重新打开耗时，Top-K 和数据源接入分别比较计划或解码开销与结果一致性。重复测量工作量不变和发生变化的时段。
+- 在相同源版本上，用同一条原始 SQL 的全量执行结果校验增量维护。先检查带类型的结果、带符号的变化和恢复后的输出，再解释延迟数据。样本量足够时报告 P50、P95、P99，同时报告峰值常驻内存（RSS）、磁盘增长、故障切换或重启耗时，以及结果新鲜度。
+- 生产收益验证需取得输入授权，在目标存储或用户认可的等效环境做只读或影子回放，为输出和检查点使用隔离的位置。事先约定查询集、源类型、峰值变更规模和验收阈值。合成数据或开发机测量标作受控实验，生产数据单独记录。
 
-## 7. Rollout and migration
+## 7. 上线与迁移
 
-Use separate commits for receipt storage and checkpoint-aware compaction. Exercise a copied warehouse during the format transition. Keep a pre-migration backup for rollback to the old binary. When the new receipt root is published, use a compatible binary to preserve and replay the new request IDs. The store remains host-local and requires a single owner during compaction.
+回执分片和压缩时推进检查点分别提交。升级前复制仓库，在副本上演练格式迁移，并保留迁移前备份，以便回退旧二进制。一旦发布新回执根，只有兼容新格式的二进制才能保留并重放此后的新请求 ID。存储仍位于单机，压缩期间必须由单一进程独占。
 
-Run target validation in shadow mode with the current production output still authoritative. Compare every agreed epoch and rehearse removing the shadow process and rebuilding from the approved source position. Consider a consumer cutover only after the target correctness, resource and recovery gates pass.
+在目标环境使用影子模式验证，线上消费者继续使用现有生产输出。逐一核对约定版本的结果，并演练撤除影子进程、从获准的源位置重建。目标环境的正确性、资源和恢复指标全部达标后，再考虑切换消费者。
 
-## 8. Open questions for review
+## 8. 待评审事项
 
-- Agree the warehouse compatibility and rollback contract for the optional receipt root. Choose the shard byte target using measured tradeoffs in commit I/O and lookup work.
-- Identify the target placement, supported source/catalog and delete modes, exact SQL and change profile, and tolerable freshness, memory, commit and recovery limits. Decide whether an isolated replay or a production shadow run is authorized.
+- 明确可选回执根的仓库兼容与回退约定。根据提交 I/O 与查找开销的实测权衡选择分片的目标大小。
+- 明确目标部署位置、所需的数据源和目录、删除模式、具体 SQL 和变更分布，以及可接受的新鲜度、内存、提交延迟和恢复时间。确认授权范围是隔离回放还是生产影子运行。
 
-## 9. Observed local storage qualification
+## 9. 本地存储验证结果
 
-**Verified with synthetic fixtures.** The baseline was `166eb5f82cbd4af6fa5319f26b85e73410356bf0`. Both binaries used Rust 1.95.0 and the locked dependencies in optimized builds on macOS 14.8.9, Apple M2 Pro, 10 CPU cores, 16 GiB RAM and APFS. Baseline binary SHA-256 was `2439def957cb13f2a9af5fd97ddf30be8046e63299327896cf5b7aa7df3e8587`. Candidate binary SHA-256 was `159047a076c9f32302dfa686d334f8624a4c240c3b9fe3241ad863ab14861869`.
+**已用合成数据验证。** 基线提交为 `166eb5f82cbd4af6fa5319f26b85e73410356bf0`，候选实现为 `41fa259`。两套二进制均使用 Rust 1.95.0、锁定依赖和发布优化配置构建。测试环境为 macOS 14.8.9、Apple M2 Pro、10 核 CPU、16 GiB 内存和 APFS。基线二进制 SHA-256 为 `2439def957cb13f2a9af5fd97ddf30be8046e63299327896cf5b7aa7df3e8587`，候选二进制为 `159047a076c9f32302dfa686d334f8624a4c240c3b9fe3241ad863ab14861869`。
 
-Build the two example binaries at their respective revisions, preserving each binary under a distinct path. Then run the paired fixture generator from the candidate checkout.
+在各自提交上分别构建示例程序，将二进制保存在不同路径。然后从候选版本的工作区运行对照脚本。
 
 ```sh
 CARGO_INCREMENTAL=0 cargo +1.95.0 build --release --locked -p optd-incremental-sql --example sql_database
@@ -98,30 +99,30 @@ python3 optd-incremental-sql/benchmarks/tools/qualify_storage.py \
   --output "$OPTD_STORAGE_COMPARISON_JSON" --samples 8 --repeats 2 --history-epochs 128
 ```
 
-The near-limit fixture seeded 15,100 synthetic receipts in 16,777,088 bytes. The baseline rejected the next identified write without changing `CURRENT`. The candidate committed that same request through migration and returned the original outcomes for both old and new IDs after reopening.
+接近上限的样本包含 15,100 条合成回执，共 16,777,088 字节。基线拒绝下一次带 ID 的写入，`CURRENT` 保持原样。候选版本在迁移过程中提交了同一个请求，重新打开后，新旧 ID 均返回各自的原始结果。
 
-The receipt comparison used 16 timed updates per binary at each prior-ID count. Each update changed one row in a one-row table, and each binary received the same copied seed before warm-up. The byte figures are lengths of newly written receipt files. CLI times include reopening, hashing, SQL execution and writing the result. They are indicative local observations affected by process and test-run scheduling.
+对每种历史 ID 数量，每个二进制都执行了 16 次计时更新。表内只有一行，每次仅更新该行。预热前，两套程序分别获得同一初始仓库的副本。下表的字节数是每次更新新写入的回执文件长度之和。命令行耗时包括重新打开仓库、哈希计算、SQL 执行和结果写出，也受本机进程及测试调度影响。
 
-| Prior IDs | Baseline receipt bytes, P50 | Candidate receipt bytes, P50 | Baseline CLI P50 | Candidate CLI P50 |
+| 历史 ID 数 | 基线回执写入量 P50（字节） | 候选回执写入量 P50（字节） | 基线命令行耗时 P50 | 候选命令行耗时 P50 |
 | ---: | ---: | ---: | ---: | ---: |
 | 16 | 23,322 | 23,331 | 42.54 ms | 59.95 ms |
 | 4,096 | 4,556,202 | 24,104 | 2,084.56 ms | 55.60 ms |
 | 8,192 | 9,106,858 | 40,768 | 4,656.53 ms | 120.41 ms |
 
-For the 8,192-ID case the receipt write fell by 99.55%. Maximum sampled CLI RSS was 68,780,032 bytes for the baseline and 30,162,944 bytes for the candidate. Small indexes incurred a small representation overhead. The migration was outside the timed sample and still performs a one-time copy of the legacy index.
+在已有 8,192 个 ID 时，每次更新的回执写入量中位数下降 99.55%。采样到的命令行进程最高 RSS 从 68,780,032 字节降至 30,162,944 字节。只有 16 个 ID 时，新格式的写入量和耗时均略有增加。首次迁移需要一次性复制旧索引，这部分开销在计时区间之外。
 
-Compaction followed 128 unrelated database commits and requested retention of one epoch. Both binaries reopened and returned the same full SQL and MV results. The candidate's unchanged checkpoint reused its existing state files. Its changed checkpoint wrote 3,867 bytes of new state files.
+压缩实验在 128 次无关提交后执行，请求只保留一个版本。两套程序重新打开后，全量 SQL 查询与物化视图结果均一致。候选版本对未变化的视图复用原状态文件，对发生过一次相关写入的视图写入了 3,867 字节的新状态文件。下表每格按“基线 / 候选”列出。
 
-| View shape | Retained epochs, baseline and candidate | Old epoch payload bytes reclaimed, baseline and candidate | Table-delta epochs replayed, baseline and candidate |
+| 视图情形 | 保留版本数 | 回收的旧版本数据文件字节数 | 重放表增量的版本数 |
 | --- | --- | --- | --- |
-| Idle | 129 / 1 | 8,888 / 648,175 | 0 / 0 |
-| One relevant write | 130 / 1 | 8,888 / 658,219 | 1 / 0 |
+| 视图空闲 | 129 / 1 | 8,888 / 648,175 | 0 / 0 |
+| 有一次相关写入 | 130 / 1 | 8,888 / 658,219 | 1 / 0 |
 
-**Evidence boundary.** These measurements cover stored receipt-file work, logical history retention, observed local CLI latency and a single-host process-recovery contract. Receipts are retained indefinitely; aggregate disk usage still grows with new IDs. Compaction must run often enough to keep history within the configured operational envelope. Target workload latency percentiles, host-loss recovery, full TPC execution, strict Top-K, and production Iceberg remain separate acceptance gates.
+**证据范围。** 这些测量覆盖回执文件写入量、历史版本保留、本地命令行耗时和单机进程恢复。回执会永久保留，随着新 ID 增加，磁盘总用量仍会增长。需要按工作负载安排压缩频率，将历史长度控制在运行限制内。生产负载延迟分位数、整机丢失后的恢复、全量 TPC 执行、严格增量 Top-K 和生产 Iceberg 接入仍待分别验证。
 
-### Implementation and release gates
+### 实现与发布检查
 
-The code under test was `41fa259`, including the receipt migration in `412e186`. A separate staged build of the receipt-only change passed both release regression tests. The complete storage candidate passed the following commands on macOS arm64 with Rust 1.95.0, using a separate target directory for local verification.
+完整候选提交为 `41fa259`，包含 `412e186` 的回执迁移。只包含回执改动的独立构建通过了两项发布配置回归测试。完整候选在 macOS arm64 上使用 Rust 1.95.0 和独立构建目录，通过以下检查。
 
 ```sh
 CARGO_TARGET_DIR="$OPTD_CHECK_TARGET" CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -133,4 +134,4 @@ RUSTDOCFLAGS='-D warnings' CARGO_TARGET_DIR="$OPTD_CHECK_TARGET" \
 MDBOOK_BUILD__BUILD_DIR="$OPTD_BOOK_TARGET" mdbook build docs
 ```
 
-The SQL script exited 0 with format and both all-target Clippy checks clean. The default suite passed 369 tests with 2 ignored. The Iceberg suite passed 383 tests with 3 ignored. Both suites had zero failures. The full TPC qualification and large Q21 recovery witness were ignored. The Iceberg helper marked ignored is run as a child by its process-death test. Rustdoc and mdBook 0.4.52 exited 0.
+SQL 检查脚本退出码为 0。格式检查和两种配置下覆盖所有目标的 Clippy 检查均通过。默认配置通过 369 项，忽略 2 项；启用 Iceberg 后通过 383 项，忽略 3 项。两组失败数均为零。忽略项包括全量 TPC 验证和大规模 Q21 恢复测试。Iceberg 的另一个辅助用例标记为忽略，由进程终止测试作为子进程调用。Rustdoc 和 mdBook 0.4.52 的退出码均为 0。
